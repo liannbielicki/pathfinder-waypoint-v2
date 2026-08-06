@@ -1,17 +1,11 @@
 # Pathfinder Waypoint V2
 
-Production rebuild of Pathfinder Waypoint.
+Clean implementation repository for the Pathfinder production rebuild.
 
-## Start here
-
-Read these files in order before changing code:
+Before building, read:
 
 1. `docs/specs/pathfinder-production-rebuild-design.md`
 2. `FRONTEND.md`
 3. `docs/plans/pathfinder-waypoint-v2-implementation.md`
-4. `docs/OPEN-INPUTS.md`
-5. `docs/knowledge/README.md`
 
-The design and implementation plan are authoritative. The knowledge packet preserves selected evidence and behavior from the legacy audits; it is reference material, not an instruction to port the old repository.
-
-The complete audit history remains in `Codefied/Pathfinder-Waypoint` on branch `liann/primed-rebuild-audit`.
+The legacy repository and audit branch are reference-only. Do not copy their application structure into this repository.

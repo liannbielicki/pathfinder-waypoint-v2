@@ -12,18 +12,15 @@
 
 - Build in the empty repository: `https://github.com/liannbielicki/pathfinder-waypoint-v2`.
 - Read `docs/specs/pathfinder-production-rebuild-design.md` before changing code.
-- Read `docs/OPEN-INPUTS.md`; never guess a production contract listed there.
-- Preserve `FRONTEND.md`; its first content section is the eight approved UI principles.
+- Create `FRONTEND.md`; its first content section must be the eight approved UI principles.
 - Frontend deploys to Vercel; API and workers deploy to Railway.
 - Supabase/Postgres is the sole durable application truth; local files are scratch only.
 - Reuse the existing n8n/Snowflake flow; never add direct Snowflake credentials to the app.
-- Require lineage attesting that supplied audience IDs were SQL-suppressed upstream; validate and preserve that lineage, but do not determine consent or duplicate DNC logic.
-- Launch input must provide both `pro_id` and `org_uuid`, or a separately approved resolver contract. Do not infer or fabricate identity mapping.
+- Supplied audience IDs are already SQL-suppressed; validate and preserve lineage, but do not duplicate DNC logic.
 - Pathfinder never sends. Allison's LCM tool owns final copy, personalization, Iterable DNC failsafe, and delivery.
 - Persona screen is fixed at three: two closest qualifying matches plus one related cross-family counterweight.
 - Final persona check is fixed at five: three closest qualifying matches plus two related cross-family counterweights.
 - Every counterweight must clear the same Pro-fit threshold; identity, contact data, and protected traits never affect matching.
-- The Pro-matched 3/5 panel is a new evaluation population. Until validated or refit at that grain, use its scores for relative persona-reaction ranking only; never report per-Pro churn direction, calibrated percentage points, or causal-lift claims from the legacy artifact.
 - Every winner stores one or two typed leading indicators; Iterable outcome readback is not in launch scope.
 - Propensity/AIPW causal estimation is not in launch scope.
 - 200 Pros/day is a hard launch gate demonstrated by a production-shaped load run.
@@ -69,9 +66,9 @@ services/api/                       Railway API and worker package
   tests/                            unit, integration, contract, and load tests
 ```
 
-## Agent handoff prompt
+## Fable Handoff Prompt
 
-Give Fable or Claude this instruction after seeding the approved packet into the new repository:
+Give Fable this instruction after copying the approved design into the new repository:
 
 ```text
 Build Pathfinder Waypoint V2 in this empty repository.
@@ -86,15 +83,14 @@ Execute the implementation plan task by task using test-first development. Do no
 
 ---
 
-### Task 1: Verify the governing packet and bootstrap the production skeleton
+### Task 1: Bootstrap the production skeleton and governing docs
 
 **Files:**
-- Verify: `docs/specs/pathfinder-production-rebuild-design.md`
-- Verify: `docs/plans/pathfinder-waypoint-v2-implementation.md`
-- Verify: `docs/knowledge/**`
-- Modify: `FRONTEND.md`
-- Modify: `README.md`
-- Modify: `.gitignore`
+- Create: `docs/specs/pathfinder-production-rebuild-design.md`
+- Create: `docs/plans/pathfinder-waypoint-v2-implementation.md`
+- Create: `FRONTEND.md`
+- Create: `README.md`
+- Create: `.gitignore`
 - Create: `apps/web/**` through `create-next-app`
 - Create: `services/api/pyproject.toml`
 - Create: `services/api/src/waypoint/__init__.py`
@@ -105,33 +101,28 @@ Execute the implementation plan task by task using test-first development. Do no
 - Consumes: approved design and this plan.
 - Produces: `Settings.load() -> Settings`; runnable Python and Next.js projects.
 
-- [ ] **Step 1: Verify the approved handoff documents were seeded before implementation starts**
+- [ ] **Step 1: Verify the approved handoff documents were seeded before Fable starts**
 
 ```bash
 test -s docs/specs/pathfinder-production-rebuild-design.md
 test -s docs/plans/pathfinder-waypoint-v2-implementation.md
-test -s docs/OPEN-INPUTS.md
 ```
 
-- [ ] **Step 2: Verify the approved knowledge packet seeded with this repository**
+- [ ] **Step 2: Import only the approved knowledge packet from the legacy audit branch**
 
 ```bash
-test -s docs/knowledge/liann-synthesis.md
-test -s docs/knowledge/live-loop-generator.md
-test -s docs/knowledge/scoring-cost.md
-test -s docs/knowledge/persona-contract.md
-test -s docs/knowledge/integrations.md
-test -s docs/knowledge/lcm-export.md
-test -s docs/knowledge/calibration-verification.md
-test -s docs/knowledge/artifact-prompts.md
-test -s docs/knowledge/n8n/pathfinder-org-context.json
-test -s docs/knowledge/legacy-code/reaction_scorer.py
-test -s docs/knowledge/legacy-code/scoring.py
-test -s services/api/data/reaction_churn_calibration_cards.json
-test -s services/api/data/persona_cards_snapshot_2026_07_29.json
+git remote add legacy https://github.com/liannbielicki/pathfinder.git
+git fetch legacy liann/primed-rebuild-audit
+mkdir -p docs/knowledge services/api/data
+git show FETCH_HEAD:audit/liann/PLAN-OF-ATTACK.md > docs/knowledge/liann-synthesis.md
+git show FETCH_HEAD:docs/rebuild/audit-diff/_artifact-prompts.md > docs/knowledge/artifact-prompts.md
+git show FETCH_HEAD:docs/rebuild/audit-diff/_artifact-data.md > docs/knowledge/artifact-data.md
+git show FETCH_HEAD:docs/rebuild/audit-diff/_artifact-estimation-safety.md > docs/knowledge/artifact-estimation-safety.md
+git show FETCH_HEAD:data/v1l/frozen/reaction_churn_calibration_cards.json > services/api/data/reaction_churn_calibration_cards.json
+git remote remove legacy
 ```
 
-- [ ] **Step 3: Preserve and complete `FRONTEND.md` with UI principles first**
+- [ ] **Step 3: Create `FRONTEND.md` with UI principles first**
 
 ```markdown
 # Pathfinder Frontend
@@ -186,14 +177,14 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
     assert names == {
         "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",
-        "RUN_COST_USD", "DAY_COST_USD", "WORKER_COUNT",
+        "RUN_COST_USD", "DAY_COST_USD", "WORKER_COUNT", "KILL_SWITCH",
         "MODEL_FAST", "MODEL_DEEP", "APP_PASSWORD", "SESSION_KEY", "LOG_LEVEL",
     }
 ```
 
 - [ ] **Step 6: Run the settings test and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_settings.py -q`
+Run: `cd services/api && uv run pytest tests/test_settings.py -q`  
 Expected: FAIL because `waypoint.settings` does not exist.
 
 - [ ] **Step 7: Implement one strict settings class**
@@ -219,6 +210,7 @@ class Settings(BaseSettings):
     RUN_COST_USD: Decimal = Field(gt=0)
     DAY_COST_USD: Decimal = Field(gt=0)
     WORKER_COUNT: int = Field(ge=1)
+    KILL_SWITCH: bool = False
     MODEL_FAST: str
     MODEL_DEEP: str
     APP_PASSWORD: SecretStr
@@ -228,10 +220,10 @@ class Settings(BaseSettings):
 
 - [ ] **Step 8: Run the bootstrap checks and commit**
 
-Run: `cd services/api && uv run pytest tests/test_settings.py -q && uv run ruff check . && uv run mypy src`
+Run: `cd services/api && uv run pytest tests/test_settings.py -q && uv run ruff check . && uv run mypy src`  
 Expected: PASS.
 
-Run: `cd apps/web && npm run lint && npm run build`
+Run: `cd apps/web && npm run lint && npm run build`  
 Expected: PASS.
 
 ```bash
@@ -265,16 +257,12 @@ from waypoint.models import MeasurementIndicator, MeasurementPlan, RunCreate
 
 def test_run_requires_clean_audience_lineage() -> None:
     run = RunCreate(
-        members=[
-            {"pro_id": "pro_1", "org_uuid": "11111111-1111-4111-8111-111111111111"},
-            {"pro_id": "pro_2", "org_uuid": "22222222-2222-4222-8222-222222222222"},
-        ],
+        pro_ids=["pro_1", "pro_2"],
         audience_query="audience_v7",
         audience_run="2026-08-06T18:00:00Z",
         channels=["email"],
     )
-    assert run.members[0].pro_id == "pro_1"
-    assert str(run.members[0].org_uuid) == "11111111-1111-4111-8111-111111111111"
+    assert run.pro_ids == ["pro_1", "pro_2"]
     assert run.audience_query == "audience_v7"
 
 
@@ -288,7 +276,7 @@ def test_measurement_plan_accepts_only_one_or_two_indicators() -> None:
 
 - [ ] **Step 2: Run the contract test and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_persistence.py -q`
+Run: `cd services/api && uv run pytest tests/test_persistence.py -q`  
 Expected: FAIL because the models do not exist.
 
 - [ ] **Step 3: Implement boundary models and reject invalid indicator counts**
@@ -296,17 +284,11 @@ Expected: FAIL because the models do not exist.
 ```python
 # services/api/src/waypoint/models.py
 from typing import Literal
-from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class AudienceMember(BaseModel):
-    pro_id: str = Field(min_length=1)
-    org_uuid: UUID
-
-
 class RunCreate(BaseModel):
-    members: list[AudienceMember] = Field(min_length=1)
+    pro_ids: list[str] = Field(min_length=1)
     audience_query: str = Field(min_length=1)
     audience_run: str = Field(min_length=1)
     channels: list[str] = Field(min_length=1)
@@ -354,7 +336,7 @@ async def test_duplicate_handoff_key_is_rejected(db_session) -> None:
 
 - [ ] **Step 6: Run migration and persistence checks, then commit**
 
-Run: `cd services/api && uv run alembic upgrade head && uv run pytest tests/test_persistence.py -q`
+Run: `cd services/api && uv run alembic upgrade head && uv run pytest tests/test_persistence.py -q`  
 Expected: PASS against the test Postgres database.
 
 ```bash
@@ -396,7 +378,7 @@ async def test_cost_reservation_never_exceeds_run_limit(db_session) -> None:
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_queue.py -q`
+Run: `cd services/api && uv run pytest tests/test_queue.py -q`  
 Expected: FAIL because queue functions do not exist.
 
 - [ ] **Step 3: Implement one atomic claim query**
@@ -434,7 +416,7 @@ RETURNING id
 
 - [ ] **Step 5: Run concurrency tests repeatedly and commit**
 
-Run: `cd services/api && for i in 1 2 3 4 5; do uv run pytest tests/test_queue.py -q || exit 1; done`
+Run: `cd services/api && for i in 1 2 3 4 5; do uv run pytest tests/test_queue.py -q || exit 1; done`  
 Expected: five clean passes.
 
 ```bash
@@ -453,63 +435,64 @@ git commit -m "feat: add durable worker queue"
 - Create: `services/api/tests/test_n8n_live.py`
 
 **Interfaces:**
-- Consumes: `N8N_CONTEXT_URL`, `N8N_TOKEN`, `org_uuids`, and upstream-clean audience lineage.
-- Produces: `N8NContextClient.fetch(org_uuids: list[str]) -> list[OrgBrief]` containing versioned, allowlisted, PII-safe briefs.
-
-The audited live contract is `org-context-v2`. It accepts `{"org_uuids": [...]}`, returns one object per organization, and permits at most five UUIDs per request. The current workflow is flag-gated and runs an inline Snowflake query. Preserve the contract while measuring and improving its batching/pre-aggregation behavior for the 200 Pros/day launch gate.
+- Consumes: `N8N_CONTEXT_URL`, `N8N_TOKEN`, `pro_ids`, audience lineage.
+- Produces: `N8NContextClient.fetch(pro_ids: list[str]) -> OrgContextBatch` containing versioned, allowlisted, PII-safe briefs.
 
 - [ ] **Step 1: Record a redacted response fixture from the existing flow**
 
 ```json
-[
-  {
-    "org_uuid": "11111111-1111-4111-8111-111111111111",
-    "contract_version": "org-context-v2",
-    "open_ar_band": "1k_5k",
-    "invoices_sent_28d_band": "1_5",
-    "email_consent_state": "never_asked",
-    "feature_quickbooks_state": "attached_unused",
-    "recommended_focus": "quickbooks"
-  }
-]
+{
+  "contract_version": "org_context_v1",
+  "organizations": [
+    {
+      "pro_id": "pro_1",
+      "org_id": "org_1",
+      "open_invoice_count": 2,
+      "open_due_usd": "430.25",
+      "lifecycle_stage": "active"
+    }
+  ]
+}
 ```
 
 - [ ] **Step 2: Write failing contract and PII tests**
 
 ```python
 def test_n8n_fixture_obeys_ai_egress_contract() -> None:
-    rows = TypeAdapter(list[OrgBrief]).validate_json(FIXTURE.read_text())
-    assert rows[0].contract_version == "org-context-v2"
-    keys = collect_nested_keys([row.model_dump() for row in rows])
-    assert {"email", "phone", "first_name", "last_name", "address"}.isdisjoint(keys)
-    assert "email_consent_state" in keys
+    batch = OrgContextBatch.model_validate_json(FIXTURE.read_text())
+    assert batch.contract_version == "org_context_v1"
+    serialized = batch.model_dump_json().lower()
+    for forbidden in ("email", "phone", "first_name", "last_name", "address"):
+        assert forbidden not in serialized
 
 
-async def test_n8n_fetch_batches_at_five_orgs(httpx_mock) -> None:
+async def test_n8n_fetch_batches_ids(httpx_mock) -> None:
     httpx_mock.add_response(json=json.loads(FIXTURE.read_text()))
-    result = await client.fetch(["11111111-1111-4111-8111-111111111111"])
-    assert result[0].open_ar_band == "1k_5k"
+    result = await client.fetch(["pro_1"])
+    assert result.organizations[0].open_due_usd == Decimal("430.25")
 ```
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_n8n.py -q`
+Run: `cd services/api && uv run pytest tests/test_n8n.py -q`  
 Expected: FAIL because the client and contract do not exist.
 
-- [ ] **Step 4: Implement strict models and bounded five-org request chunking**
+- [ ] **Step 4: Implement strict models and one batched POST**
 
 ```python
 class OrgBrief(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    org_uuid: UUID
-    contract_version: Literal["org-context-v2"]
-    # Add the complete audited allowlist and closed domains from
-    # docs/knowledge/legacy-code/org_context_contract.py; never use free-form extras.
-    open_ar_band: str | None = None
-    invoices_sent_28d_band: str | None = None
-    email_consent_state: str | None = None
-    feature_quickbooks_state: str | None = None
-    recommended_focus: str | None = None
+    pro_id: str
+    org_id: str
+    open_invoice_count: int = Field(ge=0)
+    open_due_usd: Decimal = Field(ge=0)
+    lifecycle_stage: str
+
+
+class OrgContextBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contract_version: Literal["org_context_v1"]
+    organizations: list[OrgBrief]
 ```
 
 - [ ] **Step 5: Run fixture and live-contract smoke checks, then commit**
@@ -518,19 +501,17 @@ class OrgBrief(BaseModel):
 # services/api/tests/test_n8n_live.py
 @pytest.mark.live
 async def test_existing_n8n_flow_matches_the_recorded_contract(live_client) -> None:
-    rows = await live_client.fetch([os.environ["LIVE_TEST_ORG"]])
-    assert rows[0].contract_version == "org-context-v2"
-    keys = collect_nested_keys([row.model_dump() for row in rows])
-    assert {"email", "phone", "first_name", "last_name", "address"}.isdisjoint(keys)
+    batch = await live_client.fetch([os.environ["LIVE_TEST_PRO"]])
+    assert batch.contract_version == "org_context_v1"
+    assert batch.organizations
+    assert "email" not in batch.model_dump_json().lower()
 ```
 
-Run: `cd services/api && uv run pytest tests/test_n8n.py -q`
+Run: `cd services/api && uv run pytest tests/test_n8n.py -q`  
 Expected: PASS.
 
-Run only with approved credentials after confirming the workflow is active: `cd services/api && uv run pytest tests/test_n8n_live.py -q -m live`
-Expected: PASS with `org-context-v2`, no forbidden identity/contact fields, five-item request chunking, and explicit failure when the workflow is inactive.
-
-Benchmark one-org and five-org live requests and record p50/p95 latency, timeout rate, Snowflake queue time, and bytes returned. Project the 40-request minimum needed for 200 organizations. If the real flow cannot satisfy the daily capacity gate within approved service and cost limits, Task 4 is incomplete: implement a contract-preserving n8n-side pre-aggregated source or cache, then repeat the benchmark. Do not create a second Snowflake credential path.
+Run only with approved credentials: `cd services/api && uv run pytest tests/test_n8n_live.py -q -m live`  
+Expected: PASS with the same contract version and no forbidden fields.
 
 ```bash
 git add services/api/src/waypoint/n8n.py services/api/tests
@@ -571,7 +552,7 @@ def test_recommendation_is_structured_not_preformatted_prose() -> None:
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_llm.py tests/test_prompts.py -q`
+Run: `cd services/api && uv run pytest tests/test_llm.py tests/test_prompts.py -q`  
 Expected: FAIL because the gateway and prompt contracts do not exist.
 
 - [ ] **Step 3: Implement one shared Anthropic client with bounded retry**
@@ -612,7 +593,7 @@ def fenced_context(context: str) -> str:
 
 - [ ] **Step 5: Run gateway tests and commit**
 
-Run: `cd services/api && uv run pytest tests/test_llm.py tests/test_prompts.py -q`
+Run: `cd services/api && uv run pytest tests/test_llm.py tests/test_prompts.py -q`  
 Expected: PASS, including 429 retry exhaustion and missing-usage failure cases.
 
 ```bash
@@ -627,15 +608,14 @@ git commit -m "feat: add metered recommendation gateway"
 **Files:**
 - Create: `services/api/src/waypoint/personas.py`
 - Create: `services/api/src/waypoint/scoring.py`
-- Verify: `services/api/data/reaction_churn_calibration_cards.json`
-- Verify: `services/api/data/persona_cards_snapshot_2026_07_29.json`
+- Create: `services/api/data/reaction_churn_calibration_cards.json`
 - Create: `services/api/tests/fixtures/personas.json`
 - Create: `services/api/tests/test_personas.py`
 - Create: `services/api/tests/test_scoring.py`
 
 **Interfaces:**
-- Consumes: approved Pro/org match-feature contract, versioned persona snapshot, candidate reactions, and the legacy learned calibration as a parity reference only.
-- Produces: `select_panel(pro, personas, size) -> PanelSelection`; `score_candidate(reactions) -> CandidateScore`; `select_winner(scores) -> Winner | NoAction`.
+- Consumes: permitted Pro/org match features, versioned persona snapshot, candidate reactions, learned calibration artifact.
+- Produces: `select_panel(pro, personas, size) -> PanelSelection`; `score_candidate(reactions, calibration) -> CandidateScore`; `select_winner(scores) -> Winner | NoAction`.
 
 - [ ] **Step 1: Write failing composition and related-counterweight tests**
 
@@ -659,7 +639,7 @@ def test_protected_traits_cannot_enter_match_features() -> None:
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_personas.py tests/test_scoring.py -q`
+Run: `cd services/api && uv run pytest tests/test_personas.py tests/test_scoring.py -q`  
 Expected: FAIL because matching and scoring do not exist.
 
 - [ ] **Step 3: Implement deterministic fit scoring and diversity-constrained selection**
@@ -680,27 +660,20 @@ def select_panel(pro: ProMatchInput, personas: list[Persona], size: Literal[3, 5
     return PanelSelection(items=[*closest, *counterweights], fit_threshold=FIT_THRESHOLD)
 ```
 
-- [ ] **Step 4: Preserve legacy calibration parity without misapplying it to the new panel**
+- [ ] **Step 4: Port the current learned artifact and reject stale direction**
 
 ```python
-def test_matched_panel_score_is_proxy_not_calibrated_lift() -> None:
-    score = score_candidate(MATCHED_PANEL_REACTIONS)
-    assert score.calibration_status == "unvalidated_matched_panel"
-    assert score.persona_reaction in {"negative", "neutral", "positive"}
-    assert score.churn_direction is None
-    assert score.churn_lift_pp is None
-
-
-def test_legacy_artifact_integrity_is_preserved_but_not_applied() -> None:
-    legacy = load_legacy_calibration(LEGACY_ARTIFACT)
-    assert legacy.beta < 0
-    assert legacy.sign_forced is False
+def load_calibration(path: Path) -> Calibration:
+    calibration = Calibration.model_validate_json(path.read_text())
+    if calibration.beta >= 0:
+        raise ValueError("calibration beta must be negative")
+    return calibration
 ```
 
-- [ ] **Step 5: Verify legacy artifact integrity, prove 3/5 proxy semantics, and commit**
+- [ ] **Step 5: Reproduce the audited score fixture and commit**
 
-Run: `cd services/api && uv run pytest tests/test_personas.py tests/test_scoring.py -q`
-Expected: PASS with fixed panel composition, legacy artifact integrity, explicit unvalidated-panel status, no churn-direction or percentage-point claim, abstention, and no-action cases.
+Run: `cd services/api && uv run pytest tests/test_personas.py tests/test_scoring.py -q`  
+Expected: PASS with fixed panel composition, learned beta, CI, abstention, and no-action cases.
 
 ```bash
 git add services/api
@@ -744,7 +717,7 @@ async def test_generation_failure_never_uses_canned_ideas(deps, seeded_job) -> N
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_pipeline.py tests/test_resume.py -q`
+Run: `cd services/api && uv run pytest tests/test_pipeline.py tests/test_resume.py -q`  
 Expected: FAIL because the pipeline does not exist.
 
 - [ ] **Step 3: Implement the explicit stage machine**
@@ -776,7 +749,7 @@ TERMINAL_STATES = {
 
 - [ ] **Step 5: Run resume tests, then commit**
 
-Run: `cd services/api && uv run pytest tests/test_pipeline.py tests/test_resume.py -q`
+Run: `cd services/api && uv run pytest tests/test_pipeline.py tests/test_resume.py -q`  
 Expected: PASS with no duplicate paid stages or candidates.
 
 ```bash
@@ -797,8 +770,6 @@ git commit -m "feat: add resumable worker pipeline"
 **Interfaces:**
 - Consumes: winner, structured mechanism, available metric catalog, LLM gateway, audience lineage, canonical score.
 - Produces: `create_measurement_plan(winner, llm, catalog) -> MeasurementPlan`; `LCMClient.handoff(winner, measurement, lineage) -> HandoffReceipt`.
-
-The legacy LCM client proves the current `batch`/`rows` contract and receipt behavior, but V2 adds measurement and lineage fields. Build and test the internal handoff artifact immediately; do not enable the production POST adapter until Allison confirms a recorded request/response fixture for the expanded contract.
 
 - [ ] **Step 1: Write failing proposal-specific indicator tests**
 
@@ -830,7 +801,7 @@ async def test_retry_returns_one_durable_receipt(fake_lcm, db_session) -> None:
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_measurement.py tests/test_handoff.py -q`
+Run: `cd services/api && uv run pytest tests/test_measurement.py tests/test_handoff.py -q`  
 Expected: FAIL because measurement and handoff modules do not exist.
 
 - [ ] **Step 4: Implement a finite metric catalog and deterministic key**
@@ -864,7 +835,7 @@ def handoff_key(run_id: str, winner_id: str) -> str:
 
 - [ ] **Step 5: Verify the handoff stops before send and commit**
 
-Run: `cd services/api && uv run pytest tests/test_measurement.py tests/test_handoff.py -q`
+Run: `cd services/api && uv run pytest tests/test_measurement.py tests/test_handoff.py -q`  
 Expected: PASS; the payload contains no send command and preserves audience lineage.
 
 ```bash
@@ -905,7 +876,7 @@ def test_health_has_no_secret_or_dependency_payload(client) -> None:
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `cd services/api && uv run pytest tests/test_api.py -q`
+Run: `cd services/api && uv run pytest tests/test_api.py -q`  
 Expected: FAIL because the API does not exist.
 
 - [ ] **Step 3: Implement Railway-owned signed-cookie login**
@@ -935,10 +906,10 @@ async def create_run(body: RunCreate, session: SessionDep, _: AuthDep) -> RunVie
 
 - [ ] **Step 5: Freeze OpenAPI and commit**
 
-Run: `cd services/api && uv run pytest tests/test_api.py -q`
+Run: `cd services/api && uv run pytest tests/test_api.py -q`  
 Expected: PASS.
 
-Run: `cd services/api && uv run python -c 'import json; from waypoint.api import app; open("../../contracts/openapi.json", "w").write(json.dumps(app.openapi(), indent=2, sort_keys=True))'`
+Run: `cd services/api && uv run python -c 'import json; from waypoint.api import app; open("../../contracts/openapi.json", "w").write(json.dumps(app.openapi(), indent=2, sort_keys=True))'`  
 Expected: a deterministic committed contract.
 
 ```bash
@@ -995,7 +966,7 @@ it("keeps handoff disabled until a persisted winner is ready", () => {
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `cd apps/web && npm test -- --run`
+Run: `cd apps/web && npm test -- --run`  
 Expected: FAIL because components do not exist.
 
 - [ ] **Step 4: Add the external Railway rewrite without exposing secrets**
@@ -1042,7 +1013,7 @@ useEffect(() => {
 
 - [ ] **Step 7: Run component, accessibility, build, and Playwright checks**
 
-Run: `cd apps/web && npm test -- --run && npm run lint && npm run build && npx playwright test`
+Run: `cd apps/web && npm test -- --run && npm run lint && npm run build && npx playwright test`  
 Expected: PASS for keyboard login, async start, visible error, kill, no-action, winner evidence, and receipt flows.
 
 - [ ] **Step 8: Commit the frontend**
@@ -1120,10 +1091,10 @@ jobs:
 
 - [ ] **Step 4: Verify clean builds from scratch**
 
-Run: `docker build -t waypoint-api services/api`
+Run: `docker build -t waypoint-api services/api`  
 Expected: PASS.
 
-Run: `cd apps/web && npm ci && npm run build`
+Run: `cd apps/web && npm ci && npm run build`  
 Expected: PASS.
 
 - [ ] **Step 5: Commit deployment configuration**
@@ -1141,12 +1112,11 @@ git commit -m "chore: add production deployment gates"
 - Create: `services/api/tests/fixtures/parity_cases.json`
 - Create: `services/api/tests/test_parity.py`
 - Create: `services/api/tests/test_load.py`
-- Create: `services/api/tests/test_load_live.py`
 - Create: `apps/web/e2e/production.spec.ts`
 - Create: `docs/verification/launch-report.md`
 
 **Interfaces:**
-- Consumes: deterministic integration stack for integrity testing plus a staging stack using the real n8n, model, persona, Postgres, and non-sending LCM handoff endpoints for the launch capacity gate.
+- Consumes: production-shaped API, workers, n8n fixture, model/persona fakes, Postgres.
 - Produces: launch evidence for IDs, payloads, gates, scoring, recovery, handoff idempotency, and 200 Pros/day capacity.
 
 - [ ] **Step 1: Define contract parity cases, not generated-copy equality**
@@ -1157,7 +1127,7 @@ git commit -m "chore: add production deployment gates"
     "case": "invoice_opportunity",
     "pro_id": "pro_1",
     "expected_org_id": "org_1",
-    "expected_context_version": "org-context-v2",
+    "expected_context_version": "org_context_v1",
     "expected_panel_sizes": [3, 5],
     "expected_metric": "invoices_sent",
     "expected_handoff_fields": ["pro_id", "org_id", "winner", "measurement_plan", "audience_lineage"]
@@ -1178,13 +1148,13 @@ async def test_build_contract_parity(case, production_stack) -> None:
     assert set(result.handoff) >= set(case["expected_handoff_fields"])
 ```
 
-- [ ] **Step 3: Add a deterministic 200-Pro integrity load test**
+- [ ] **Step 3: Add a production-shaped 200-Pro load test**
 
 ```python
 @pytest.mark.load
 async def test_two_hundred_pros_complete_without_integrity_failures(load_stack) -> None:
-    run = await load_stack.enqueue(members=synthetic_members(count=200))
-    result = await load_stack.wait(run.id, timeout_seconds=3600)
+    run = await load_stack.enqueue(pro_ids=[f"pro_{index}" for index in range(200)])
+    result = await load_stack.wait(run.id, timeout_seconds=86400)
     assert result.processed == 200
     assert result.duplicate_claims == 0
     assert result.duplicate_handoffs == 0
@@ -1195,22 +1165,20 @@ async def test_two_hundred_pros_complete_without_integrity_failures(load_stack) 
 
 - [ ] **Step 4: Run failure injection before the load gate**
 
-Run: `cd services/api && uv run pytest tests/test_resume.py tests/test_queue.py tests/test_handoff.py tests/test_parity.py -q`
+Run: `cd services/api && uv run pytest tests/test_resume.py tests/test_queue.py tests/test_handoff.py tests/test_parity.py -q`  
 Expected: PASS with worker termination, expired lease, repeated handoff, 429, and unavailable n8n cases.
 
-- [ ] **Step 5: Run the real staging capacity gate and record evidence**
+- [ ] **Step 5: Run the real capacity gate and record evidence**
 
-Prerequisites: an approved 200-member test audience containing `pro_id` and `org_uuid`, active `org-context-v2`, real model/persona endpoints, the intended Railway worker count, production-equivalent rate limits, a non-sending LCM staging endpoint, and explicit dollar ceilings.
-
-Run: `cd services/api && LIVE_LOAD=1 uv run pytest tests/test_load_live.py -q -m live_load --log-cli-level=INFO`
-Expected: PASS for 200 Pros with measured elapsed time, stage latency, tokens, dollars, retries, 429s, n8n five-item chunk behavior, worker count, and handoff receipts written to `docs/verification/launch-report.md`. Fakes may prove integrity but cannot satisfy this launch gate.
+Run: `cd services/api && uv run pytest tests/test_load.py -q -m load --log-cli-level=INFO`  
+Expected: PASS for 200 Pros with measured elapsed time, stage latency, tokens, dollars, retries, 429s, and worker count written to `docs/verification/launch-report.md`.
 
 - [ ] **Step 6: Run the complete launch suite**
 
-Run: `cd services/api && uv run ruff check . && uv run mypy src && uv run pytest -q`
+Run: `cd services/api && uv run ruff check . && uv run mypy src && uv run pytest -q`  
 Expected: PASS.
 
-Run: `cd apps/web && npm test -- --run && npm run lint && npm run build && npx playwright test`
+Run: `cd apps/web && npm test -- --run && npm run lint && npm run build && npx playwright test`  
 Expected: PASS.
 
 - [ ] **Step 7: Commit launch evidence**

@@ -1,7 +1,7 @@
 # Pathfinder Production Rebuild Design
 
-Date: 2026-08-06
-Status: Approved for implementation
+Date: 2026-08-06  
+Status: Ready for Jake and Liann's final design review  
 Implementation target: production-ready initial release, capable of 200 Pros/day
 
 ## UI principles
@@ -26,7 +26,7 @@ The initial production release includes:
 - Vercel-hosted operator UI with async run lifecycle, explicit failures, cost, kill, candidate evidence, winner review, and LCM handoff receipts.
 - Railway-hosted Python 3.12 API and horizontally scalable worker fleet.
 - Supabase/Postgres as the sole durable source of truth for runs, candidates, winners, handoffs, jobs, measurement plans, and fleet control.
-- The existing n8n flow as the Snowflake credential and query boundary; contract-preserving batching and pre-aggregation improvements are launch work.
+- The existing n8n flow as the Snowflake credential, batching, and pre-aggregation boundary.
 - One metered LLM gateway with client reuse, retries, backoff, pricing, prompt caching, rate control, and usage persistence.
 - One resumable loop with leased queue claims, checkpoints, idempotency, honest stop reasons, and no canned recommendation fallback.
 - Pro-matched persona evaluation using a three-person screen and five-person final check.
@@ -61,7 +61,7 @@ No worker owns unique in-memory truth. A crash or deployment resumes from Postgr
 
 ### Context — existing n8n flow
 
-The rebuild reuses the existing n8n/Snowflake flow rather than creating a second warehouse path. The implementation records and verifies its payload contract, five-org request cap, current inline-query behavior, allowed fields, PII posture, fact semantics, and production parity. It then measures and improves batching or pre-aggregation as required by the 200 Pros/day gate.
+The rebuild reuses the existing n8n/Snowflake flow rather than creating a second warehouse path. The implementation records and verifies its payload contract, batching behavior, allowed fields, PII posture, fact semantics, and production parity.
 
 Raw Snowflake rows remain ephemeral. Only the versioned, allowlisted, condensed brief crosses the AI boundary. Durable storage contains derived run artifacts, never raw warehouse context.
 
@@ -86,7 +86,6 @@ Matching uses permitted organizational, lifecycle, product-usage, financial-cont
 - Every counterweight must clear the same Pro-fit threshold. It is related to the Pro, not a generic dissenting persona.
 - Persona snapshot version, match features, fit score, family, and rationale are persisted.
 - If enough qualifying matches do not exist, the system reports low panel fit or abstains. It does not invent representativeness.
-- This 3-person/5-person Pro-matched method changes the evaluation population from the legacy segment/action-type panels. Until it is validated or refit at the new grain, its output supports relative persona-reaction ranking only. It is an experimental proxy intended to prioritize churn-safe proposals; it does not establish per-Pro churn direction. The UI must not present legacy calibrated percentage-point, churn-direction, or causal-lift claims for these panels.
 
 ## Measurement contract
 
@@ -102,7 +101,7 @@ For an invoicing proposal, `invoices_sent` can be a leading indicator. Churn ris
 
 ## Audience and sending boundary
 
-Pathfinder accepts the supplied audience only with lineage attesting that its upstream SQL applied DNC and other suppression rules. Pathfinder validates identifiers and preserves that lineage but does not determine consent or duplicate suppression logic.
+The supplied audience is treated as clean because its SQL query already applies DNC and other suppression rules. Pathfinder validates identifiers and preserves query/run lineage but does not duplicate consent or suppression logic.
 
 Allison's LCM tool owns final copy, personalization, and sending. Its Iterable path provides the downstream DNC failsafe. Pathfinder ends after creating an idempotent handoff artifact and durable receipt.
 
@@ -134,6 +133,7 @@ Runtime values live in Railway. Names are descriptive and shorter than 20 charac
 - `RUN_COST_USD`
 - `DAY_COST_USD`
 - `WORKER_COUNT`
+- `KILL_SWITCH`
 - `MODEL_FAST`
 - `MODEL_DEEP`
 - `APP_PASSWORD`
