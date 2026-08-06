@@ -10,6 +10,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from waypoint.llm import LLMResult
 from waypoint.models import MeasurementIndicator, MeasurementPlan
 
 METRIC_CATALOG: dict[str, MeasurementIndicator] = {
@@ -53,7 +54,7 @@ class WinnerLike(Protocol):
 
 class LLMLike(Protocol):
     async def complete(self, tier: str, prompt: str, run_id: str, stage: str,
-                       system: str | None = None, max_tokens: int = 1200): ...
+                       system: str | None = None, max_tokens: int = 1200) -> LLMResult: ...
 
 
 class _Selected(BaseModel):
