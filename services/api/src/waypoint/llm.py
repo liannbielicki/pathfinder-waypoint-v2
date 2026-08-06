@@ -57,7 +57,7 @@ class Pricing:
                     "refusing to run with unmeterable spend"
                 )
 
-    def model_for(self, tier: Tier) -> str:
+    def model_for(self, tier: str) -> str:
         return self.models[tier]
 
     def cost(self, model: str, input_tokens: int, output_tokens: int,
@@ -125,7 +125,7 @@ class LLMGateway:
 
     async def complete(
         self,
-        tier: Tier,
+        tier: str,
         prompt: str,
         run_id: str,
         stage: str,

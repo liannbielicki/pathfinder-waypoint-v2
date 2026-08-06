@@ -24,6 +24,27 @@ class OrgBrief(BaseModel):
     open_invoice_count: int = Field(ge=0)
     open_due_usd: Decimal = Field(ge=0)
     lifecycle_stage: str
+    # Optional permitted matching features (allowlisted, PII-safe, banded in SQL).
+    segment: str | None = None
+    plan: str | None = None
+    tenure_bucket: str | None = None
+    org_size_bucket: str | None = None
+    trade_bucket: str | None = None
+    open_ar_band: str | None = None
+
+    def calibration_cell(self) -> str | None:
+        if self.segment and self.plan and self.tenure_bucket:
+            return f"{self.segment}|{self.plan}|{self.tenure_bucket}"
+        return None
+
+    def match_feature_map(self) -> dict[str, str]:
+        candidates = {
+            "segment": self.segment, "plan": self.plan,
+            "tenure_bucket": self.tenure_bucket, "org_size_bucket": self.org_size_bucket,
+            "trade_bucket": self.trade_bucket, "open_ar_band": self.open_ar_band,
+            "lifecycle_stage": self.lifecycle_stage,
+        }
+        return {k: v for k, v in candidates.items() if v is not None}
 
 
 class OrgContextBatch(BaseModel):
