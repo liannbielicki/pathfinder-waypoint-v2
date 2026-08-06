@@ -1,0 +1,61 @@
+{
+  "snapshot_version": "personas_2026_07",
+  "personas": [
+    {
+      "persona_id": "solo_hustler",
+      "family": "solo_operators",
+      "label": "Solo hustler",
+      "features": {"segment": "1A", "plan": "basic", "tenure_bucket": "0-3m",
+                   "org_size_bucket": "solo", "trade_bucket": "hvac",
+                   "open_ar_band": "low", "lifecycle_stage": "active"}
+    },
+    {
+      "persona_id": "new_solo_skeptic",
+      "family": "solo_operators",
+      "label": "New solo skeptic",
+      "features": {"segment": "1A", "plan": "basic", "tenure_bucket": "0-3m",
+                   "org_size_bucket": "solo", "trade_bucket": "plumbing",
+                   "open_ar_band": "low", "lifecycle_stage": "onboarding"}
+    },
+    {
+      "persona_id": "growing_crew_lead",
+      "family": "growth_teams",
+      "label": "Growing crew lead",
+      "features": {"segment": "1A", "plan": "essentials", "tenure_bucket": "0-3m",
+                   "org_size_bucket": "small_team", "trade_bucket": "hvac",
+                   "open_ar_band": "low", "lifecycle_stage": "active"}
+    },
+    {
+      "persona_id": "back_office_manager",
+      "family": "office_managers",
+      "label": "Back-office manager",
+      "features": {"segment": "1A", "plan": "basic", "tenure_bucket": "4-12m",
+                   "org_size_bucket": "small_team", "trade_bucket": "hvac",
+                   "open_ar_band": "low", "lifecycle_stage": "active"}
+    },
+    {
+      "persona_id": "established_pragmatist",
+      "family": "established_owners",
+      "label": "Established pragmatist",
+      "features": {"segment": "1A", "plan": "basic", "tenure_bucket": "0-3m",
+                   "org_size_bucket": "solo", "trade_bucket": "electrical",
+                   "open_ar_band": "high", "lifecycle_stage": "active"}
+    },
+    {
+      "persona_id": "max_plan_optimizer",
+      "family": "power_users",
+      "label": "Max-plan optimizer",
+      "features": {"segment": "1A", "plan": "max", "tenure_bucket": "13-36m",
+                   "org_size_bucket": "mid_team", "trade_bucket": "hvac",
+                   "open_ar_band": "low", "lifecycle_stage": "active"}
+    },
+    {
+      "persona_id": "distant_franchise",
+      "family": "franchise_operators",
+      "label": "Distant franchise",
+      "features": {"segment": "2B", "plan": "max", "tenure_bucket": "37m+",
+                   "org_size_bucket": "large_team", "trade_bucket": "cleaning",
+                   "open_ar_band": "none", "lifecycle_stage": "active"}
+    }
+  ]
+}
