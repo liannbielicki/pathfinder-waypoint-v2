@@ -9,3 +9,5 @@ Before building, read:
 3. `docs/plans/pathfinder-waypoint-v2-implementation.md`
 
 The legacy repository and audit branch are reference-only. Do not copy their application structure into this repository.
+
+Environment template: `.env.example`. Setup notes: `docs/environment.md`.

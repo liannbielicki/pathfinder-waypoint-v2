@@ -24,7 +24,7 @@ The frontend will be a dedicated Next.js application hosted on Vercel. A concise
 The initial production release includes:
 
 - Vercel-hosted operator UI with async run lifecycle, explicit failures, cost, kill, candidate evidence, winner review, and LCM handoff receipts.
-- Railway-hosted Python 3.12 API and horizontally scalable worker fleet.
+- Railway-hosted Python 3.14 API and horizontally scalable worker fleet.
 - Supabase/Postgres as the sole durable source of truth for runs, candidates, winners, handoffs, jobs, measurement plans, and fleet control.
 - The existing n8n flow as the Snowflake credential, batching, and pre-aggregation boundary.
 - One metered LLM gateway with client reuse, retries, backoff, pricing, prompt caching, rate control, and usage persistence.
