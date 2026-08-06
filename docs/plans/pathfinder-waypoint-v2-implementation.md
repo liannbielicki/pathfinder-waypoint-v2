@@ -621,7 +621,7 @@ git commit -m "feat: add metered recommendation gateway"
 ---
 
 ### Task 6: Implement Pro-matched persona panels and canonical scoring
-
+- use ponytail audit 
 **Files:**
 - Create: `services/api/src/waypoint/personas.py`
 - Create: `services/api/src/waypoint/scoring.py`
