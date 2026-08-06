@@ -1,0 +1,48 @@
+[project]
+name = "waypoint"
+version = "0.1.0"
+description = "Pathfinder Waypoint V2 API and workers"
+readme = "README.md"
+authors = [
+    { name = "Liann Bielicki", email = "liann.bielicki@housecallpro.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.19.0",
+    "anthropic>=0.120.2",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "pydantic-settings>=2.14.2",
+    "sqlalchemy>=2.0.51",
+    "uvicorn[standard]>=0.52.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-httpx>=0.36.2",
+    "ruff>=0.16.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "live: tests that call real external services (deselect by default)",
+    "load: production-shaped capacity tests",
+]
+addopts = "-m 'not live and not load'"
+
+[tool.mypy]
+strict = true
+
+[tool.ruff]
+line-length = 100
