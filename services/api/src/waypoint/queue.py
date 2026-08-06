@@ -35,15 +35,41 @@ RETURNING id
 RESERVE_RUN_SQL = text("""
 UPDATE runs SET cost_reserved = cost_reserved + :amount
 WHERE id = :run_id
+  AND status NOT IN ('stopped', 'failed')
   AND cost_reserved + :amount <= cost_limit
   AND NOT EXISTS (SELECT 1 FROM fleet_control WHERE id = 1 AND killed)
 RETURNING id
 """)
 
+# Rolls the reservation ledger over when the calendar day changes, atomically
+# with the reservation itself.
 RESERVE_DAY_SQL = text("""
-UPDATE fleet_control SET day_cost_reserved = day_cost_reserved + :amount
+UPDATE fleet_control
+SET day_cost_reserved =
+      CASE WHEN day IS DISTINCT FROM current_date::text THEN 0
+           ELSE day_cost_reserved END + :amount,
+    day = current_date::text
 WHERE id = 1 AND NOT killed
-  AND day_cost_reserved + :amount <= day_cost_limit
+  AND (CASE WHEN day IS DISTINCT FROM current_date::text THEN 0
+            ELSE day_cost_reserved END) + :amount <= day_cost_limit
+RETURNING id
+""")
+
+HEARTBEAT_SQL = text("""
+UPDATE jobs
+SET lease_until = now() + make_interval(secs => :lease_seconds)
+WHERE id = :job_id AND worker_id = :worker_id AND status = 'running'
+RETURNING id
+""")
+
+FAIL_STALE_SQL = text("""
+WITH stale AS (
+  UPDATE jobs SET status = 'failed'
+  WHERE status = 'running' AND lease_until < now() AND attempts >= max_attempts
+  RETURNING run_id
+)
+UPDATE runs SET status = 'failed', stop_reason = 'attempts_exhausted'
+WHERE id IN (SELECT run_id FROM stale)
 RETURNING id
 """)
 
@@ -78,6 +104,29 @@ async def claim_job(
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
+
+
+async def heartbeat_job(
+    session: AsyncSession, job_id: str, worker_id: str, lease_seconds: int = 600
+) -> bool:
+    """Extend the lease. False means ownership was lost — stop working."""
+    row = (
+        await session.execute(
+            HEARTBEAT_SQL,
+            {"job_id": job_id, "worker_id": worker_id, "lease_seconds": lease_seconds},
+        )
+    ).first()
+    return row is not None
+
+
+async def fail_stale_jobs(session: AsyncSession) -> int:
+    """Fail jobs (and their runs) that expired with no attempts left.
+
+    Without this, an attempts-exhausted job leaves its run 'running' forever —
+    a hidden failure.
+    """
+    rows = (await session.execute(FAIL_STALE_SQL)).all()
+    return len(rows)
 
 
 async def checkpoint_job(

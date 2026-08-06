@@ -98,6 +98,15 @@ async def test_429_exhaustion_raises_and_never_fabricates(db_session: AsyncSessi
     assert len(fake.calls) == 3
 
 
+async def test_usage_survives_a_caller_rollback(db_session: AsyncSession) -> None:
+    # The gateway owns its transaction: a paid call's usage row must survive
+    # the pipeline rolling back its own work.
+    gateway = LLMGateway(FakeAnthropic(), db_session, pricing=TEST_PRICING)
+    await gateway.complete("fast", "p", "run-roll", "generate")
+    await db_session.rollback()
+    assert await usage_count(db_session, "run-roll", "generate") == 1
+
+
 async def test_deep_tier_uses_deep_model(db_session: AsyncSession) -> None:
     fake = FakeAnthropic()
     gateway = LLMGateway(fake, db_session, pricing=TEST_PRICING)

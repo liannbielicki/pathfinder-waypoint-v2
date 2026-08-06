@@ -92,11 +92,15 @@ def select_panel(
         raise InsufficientPanelFit(size=size, available=len(closest))
 
     used_families = {item.family for item in closest}
-    counterweights = [
-        item.model_copy(update={"role": "counterweight"})
-        for item in ranked[closest_count:]
-        if item.fit_score >= FIT_THRESHOLD and item.family not in used_families
-    ][:counter_count]
+    counterweights: list[PanelItem] = []
+    for item in ranked[closest_count:]:
+        if len(counterweights) == counter_count:
+            break
+        # Each counterweight must clear the fit threshold and bring a family
+        # not already on the panel (closest or prior counterweight).
+        if item.fit_score >= FIT_THRESHOLD and item.family not in used_families:
+            counterweights.append(item.model_copy(update={"role": "counterweight"}))
+            used_families.add(item.family)
     if len(counterweights) != counter_count:
         raise InsufficientPanelFit(size=size, available=len(closest) + len(counterweights))
 

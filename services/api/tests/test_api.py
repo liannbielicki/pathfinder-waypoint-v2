@@ -174,3 +174,43 @@ async def test_handoff_creates_durable_receipt(
 
 async def test_health_has_no_secret_or_dependency_payload(client: httpx.AsyncClient) -> None:
     assert (await client.get("/health")).json() == {"status": "ok"}
+
+
+async def test_kill_switch_env_applies_to_the_existing_fleet_row(
+    db_session_factory, db_session: AsyncSession,
+) -> None:
+    from decimal import Decimal as D
+
+    from waypoint.tables import FleetControlRow
+
+    db_session.add(FleetControlRow(id=1, killed=False, day_cost_limit=D("1.00")))
+    await db_session.commit()
+
+    killed_settings = TEST_SETTINGS.model_copy(update={"KILL_SWITCH": True})
+    app = create_app(settings=killed_settings, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://t") as client:
+        await client.post("/api/auth/login", json={"password": "operator-password"})
+        response = await client.post("/api/runs", json=RUN_REQUEST)
+        assert response.status_code == 202
+    fleet = await db_session.get(FleetControlRow, 1)
+    assert fleet is not None
+    await db_session.refresh(fleet)
+    assert fleet.killed is True  # Railway env flip + redeploy engages the kill
+
+
+async def test_run_detail_reports_real_spend_from_usage_rows(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession,
+) -> None:
+    from decimal import Decimal as D
+
+    from waypoint.tables import UsageRow
+
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    db_session.add(UsageRow(run_id=created["id"], stage="generate", model="m",
+                            input_tokens=10, output_tokens=5, cost_usd=D("0.75")))
+    db_session.add(UsageRow(run_id=created["id"], stage="screen", model="m",
+                            input_tokens=10, output_tokens=5, cost_usd=D("0.25")))
+    await db_session.commit()
+    detail = (await auth_client.get(f"/api/runs/{created['id']}")).json()
+    assert detail["cost_spent_usd"] == "1.0000"

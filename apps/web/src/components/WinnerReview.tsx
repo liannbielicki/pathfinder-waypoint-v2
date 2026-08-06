@@ -6,6 +6,14 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   const reduction = score.reduction_pp as number | null;
   const lo = score.ci_lower_pp as number | null;
   const hi = score.ci_upper_pp as number | null;
+  if (reduction == null || lo == null || hi == null) {
+    return (
+      <p>
+        No calibrated estimate — the panel abstained
+        {score.abstain_reason ? ` (${String(score.abstain_reason)})` : ""}.
+      </p>
+    );
+  }
   return (
     <p>
       Estimated churn reduction: <strong>{reduction?.toFixed(1)} pp</strong>{" "}

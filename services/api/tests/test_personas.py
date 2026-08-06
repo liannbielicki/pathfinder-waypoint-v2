@@ -41,6 +41,8 @@ def test_five_person_final_is_three_plus_two() -> None:
     assert [item.role for item in panel.items].count("closest") == 3
     assert [item.role for item in panel.items].count("counterweight") == 2
     closest_families = {i.family for i in panel.items if i.role == "closest"}
+    counterweight_families = [i.family for i in panel.items if i.role == "counterweight"]
+    assert len(set(counterweight_families)) == len(counterweight_families)
     for item in panel.items:
         if item.role == "counterweight":
             assert item.fit_score >= panel.fit_threshold

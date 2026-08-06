@@ -9,7 +9,9 @@ from waypoint.queue import (
     checkpoint_job,
     claim_job,
     enqueue,
+    fail_stale_jobs,
     fleet_is_killed,
+    heartbeat_job,
     reserve_cost,
     set_kill,
 )
@@ -112,6 +114,85 @@ async def test_failed_reservation_reserves_nothing(db_session) -> None:
     fleet = await db_session.get(FleetControlRow, 1)
     assert run is not None and run.cost_reserved == Decimal(0)
     assert fleet is not None and fleet.day_cost_reserved == Decimal(0)
+
+
+async def test_heartbeat_extends_the_lease_for_the_owner(db_session) -> None:
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="recommend")
+    await db_session.commit()
+    job = await claim_job(db_session, "worker-a", lease_seconds=60)
+    assert job is not None
+    old_lease = job.lease_until
+    assert await heartbeat_job(db_session, job_id, "worker-a", lease_seconds=600) is True
+    await db_session.refresh(job)
+    assert job.lease_until is not None and old_lease is not None
+    assert job.lease_until > old_lease
+
+
+async def test_heartbeat_fails_when_ownership_was_lost(db_session) -> None:
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="recommend")
+    await db_session.commit()
+    job = await claim_job(db_session, "worker-a")
+    assert job is not None
+    job.lease_until = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    reclaimed = await claim_job(db_session, "worker-b")
+    assert reclaimed is not None
+    # The original worker must notice it no longer owns the job.
+    assert await heartbeat_job(db_session, job_id, "worker-a", lease_seconds=600) is False
+
+
+async def test_day_budget_rolls_over_to_a_new_day(db_session) -> None:
+    db_session.add(RunRow(
+        id="run-1", pro_ids=["pro_1"], audience_query="q", audience_run="r",
+        channels=["email"], cost_limit=Decimal("100.00"),
+    ))
+    db_session.add(FleetControlRow(
+        id=1, day="2020-01-01", day_cost_limit=Decimal("1.00"),
+        day_cost_reserved=Decimal("1.00"),
+    ))
+    await db_session.commit()
+    # Yesterday's exhausted budget must not brick today.
+    assert await reserve_cost(db_session, "run-1", Decimal("0.75")) is True
+    fleet = await db_session.get(FleetControlRow, 1)
+    await db_session.refresh(fleet)
+    assert fleet.day_cost_reserved == Decimal("0.75")
+    assert fleet.day != "2020-01-01"
+    # And the fresh day still enforces its own limit.
+    assert await reserve_cost(db_session, "run-1", Decimal("0.26")) is False
+
+
+async def test_reservation_refuses_a_stopped_run(db_session) -> None:
+    await seed_run(db_session)
+    run = await db_session.get(RunRow, "run-1")
+    assert run is not None
+    run.status = "stopped"
+    await db_session.commit()
+    assert await reserve_cost(db_session, "run-1", Decimal("0.01")) is False
+
+
+async def test_attempts_exhausted_jobs_are_reaped_as_failed(db_session) -> None:
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="recommend")
+    await db_session.commit()
+    job = await db_session.get(JobRow, job_id)
+    assert job is not None
+    job.status = "running"
+    job.attempts = job.max_attempts
+    job.lease_until = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    assert await claim_job(db_session, "worker-a") is None  # unclaimable
+    reaped = await fail_stale_jobs(db_session)
+    await db_session.commit()
+    assert reaped == 1
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    run = await db_session.get(RunRow, "run-1")
+    assert run is not None
+    await db_session.refresh(run)
+    assert run.status == "failed"
+    assert run.stop_reason == "attempts_exhausted"
 
 
 async def test_checkpoint_persists_stage_payload(db_session) -> None:

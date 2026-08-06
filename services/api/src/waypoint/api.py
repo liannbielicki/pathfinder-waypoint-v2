@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
@@ -47,15 +47,26 @@ class HandoffResponse(BaseModel):
     receipts: list[HandoffReceipt]
 
 
-def _view(run: RunRow) -> RunView:
+def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
     return RunView(
         id=run.id, status=run.status, pro_ids=run.pro_ids,
         audience_query=run.audience_query, audience_run=run.audience_run,
         channels=run.channels, config_version=run.config_version,
         cost_limit_usd=run.cost_limit, cost_reserved_usd=run.cost_reserved,
-        cost_spent_usd=run.cost_spent, stop_reason=run.stop_reason,
-        created_at=run.created_at,
+        cost_spent_usd=run.cost_spent if spent is None else spent,
+        stop_reason=run.stop_reason, created_at=run.created_at,
     )
+
+
+async def _spent(session: AsyncSession, run_id: str) -> Decimal:
+    """Real spend is the sum of persisted usage rows — never a stored zero."""
+    from waypoint.tables import UsageRow
+
+    total = (await session.execute(
+        select(func.coalesce(func.sum(UsageRow.cost_usd), 0))
+        .where(UsageRow.run_id == run_id)
+    )).scalar_one()
+    return Decimal(total or 0)
 
 
 @asynccontextmanager
@@ -79,13 +90,15 @@ AuthDep = Annotated[None, Depends(auth.require_session)]
 
 
 async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
-    if await session.get(FleetControlRow, 1) is None:
+    """The KILL_SWITCH env value is authoritative — it must engage (and clear)
+    the shared kill state on the existing row, not just at first creation."""
+    fleet = await session.get(FleetControlRow, 1)
+    if fleet is None:
         session.add(FleetControlRow(
             id=1, killed=settings.KILL_SWITCH, day_cost_limit=settings.DAY_COST_USD,
         ))
     else:
-        fleet = await session.get(FleetControlRow, 1)
-        assert fleet is not None
+        fleet.killed = settings.KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
 
 
@@ -149,7 +162,7 @@ def create_app(
             select(HandoffRow).where(HandoffRow.run_id == run_id)
         )).scalars().all()
         return RunDetail(
-            **_view(run).model_dump(),
+            **_view(run, spent=await _spent(session, run_id)).model_dump(),
             stages=dict(job.checkpoint) if job is not None else {},
             candidates=[{
                 "id": c.id, "pro_id": c.pro_id, "recommendation": c.recommendation,
@@ -181,7 +194,7 @@ def create_app(
         )).scalars():
             job.status = "stopped"
         await session.commit()
-        return _view(run)
+        return _view(run, spent=await _spent(session, run_id))
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(request: Request, run_id: str, session: SessionDep,

@@ -146,6 +146,9 @@ class LLMGateway:
             backoff_seconds=self.backoff_seconds,
         )
         result = self._result_from_response(model, response)
+        # The gateway owns this transaction: a paid call's usage must survive
+        # the caller rolling back its own work. Give the gateway a session that
+        # is not carrying uncommitted pipeline writes.
         self.session.add(UsageRow(
             run_id=run_id, stage=stage, model=result.model,
             input_tokens=result.input_tokens, output_tokens=result.output_tokens,
@@ -153,7 +156,7 @@ class LLMGateway:
             cache_write_tokens=result.cache_write_tokens,
             cost_usd=result.cost_usd,
         ))
-        await self.session.flush()
+        await self.session.commit()
         return result
 
     def _result_from_response(self, model: str, response: Any) -> LLMResult:

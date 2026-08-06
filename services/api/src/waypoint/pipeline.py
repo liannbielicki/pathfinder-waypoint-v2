@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.llm import LLMResult
+from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import Recommendation
 from waypoint.n8n import ContextUnavailable, OrgBrief, OrgContextBatch
 from waypoint.personas import (
@@ -67,6 +68,10 @@ ESTIMATED_CALL_COST_USD = Decimal("0.10")
 
 class BudgetExhausted(Exception):
     pass
+
+
+class LeaseLost(Exception):
+    """Another worker owns this job now; stop quietly, it will finish the work."""
 
 
 class PipelineFailure(Exception):
@@ -179,6 +184,8 @@ class PipelineDeps:
     calibration: Calibration
     create_plan: Any  # async (winner, llm, catalog) -> MeasurementPlan
     metric_catalog: dict[str, Any] = field(default_factory=dict)
+    worker_id: str | None = None  # set by the worker; None disables heartbeats
+    lease_seconds: int = 600
 
 
 @dataclass
@@ -195,7 +202,19 @@ def _parse_json(text: str) -> Any:
     return json.loads(cleaned)
 
 
+async def _heartbeat(state: PipelineState, deps: PipelineDeps) -> None:
+    """Extend the lease before paid work; abort if another worker owns the job."""
+    if deps.worker_id is None:
+        return
+    alive = await queue.heartbeat_job(
+        deps.store.session, state.job.id, deps.worker_id, deps.lease_seconds
+    )
+    if not alive:
+        raise LeaseLost(state.job.id)
+
+
 async def _reserve(state: PipelineState, deps: PipelineDeps, calls: int) -> None:
+    await _heartbeat(state, deps)
     amount = ESTIMATED_CALL_COST_USD * calls
     if calls and not await deps.queue.reserve(state.run.id, amount):
         raise BudgetExhausted
@@ -212,6 +231,7 @@ async def _abstain_pro(state: PipelineState, deps: PipelineDeps, pro_id: str,
 
 async def _react(state: PipelineState, deps: PipelineDeps, panel: PanelSelection,
                  concept: str, stage: str, tier: str) -> list[float]:
+    await _heartbeat(state, deps)
     panel_json = json.dumps([
         {"persona_id": i.persona_id, "label": i.label, "family": i.family,
          "role": i.role} for i in panel.items
@@ -220,7 +240,13 @@ async def _react(state: PipelineState, deps: PipelineDeps, panel: PanelSelection
         tier, reaction_prompt(panel_json, concept), state.run.id, stage,
         system=REACTION_SYSTEM,
     )
-    by_id = {item["persona_id"]: float(item["reaction"]) for item in _parse_json(result.text)}
+    try:
+        by_id = {
+            item["persona_id"]: float(item["reaction"]) for item in _parse_json(result.text)
+        }
+    except (ValueError, KeyError, TypeError) as error:
+        # A garbled panel abstains this candidate; it must not crash the job.
+        raise PipelineFailure(f"{stage}_reactions_unparseable: {error}") from error
     missing = [i.persona_id for i in panel.items if i.persona_id not in by_id]
     if missing:
         raise PipelineFailure(f"{stage}_reactions_missing: {missing}")
@@ -339,6 +365,10 @@ def _clears_screen_floor(row: CandidateRow | None) -> bool:
 
 async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     missing = [p for p in state.run.pro_ids if p not in state.briefs]
+    for pro_id in missing:
+        # A pro the context flow cannot describe abstains visibly; it never
+        # silently vanishes from the run.
+        await _abstain_pro(state, deps, pro_id, "context missing: no org brief returned")
     return {"orgs": len(state.briefs), "missing": missing}
 
 
@@ -477,10 +507,10 @@ async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, 
         )
         try:
             plan = await deps.create_plan(context, deps.llm, deps.metric_catalog)
-        except BudgetExhausted:
-            raise
-        except Exception as error:  # noqa: BLE001 — any measurement failure must abstain
+        except UnmeasurableWinner as error:
             # Never invent a measurement source: an unmeasurable winner abstains.
+            # Transient failures (429 storms, outages) propagate instead — a
+            # validated winner must survive retryable infrastructure trouble.
             winner.kind = "abstained"
             winner.rationale = f"unmeasurable: {error}"
             await deps.store.session.commit()
@@ -496,7 +526,17 @@ async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, 
 async def _stage_ready(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     winners = await deps.store.winners(state.run.id)
     kinds = {w.kind for w in winners}
-    if "winner" in kinds:
+    job = (await deps.store.session.execute(
+        select(JobRow).where(JobRow.id == state.job.id).execution_options(populate_existing=True)
+    )).scalar_one()  # checkpoint is written via raw SQL; bypass the identity map
+    context_missing = bool((job.checkpoint.get("context") or {}).get("missing"))
+    stop_reason = None
+    if context_missing:
+        # Infrastructure gaps are degradation, not a legitimate abstention.
+        status = "degraded"
+        missing = job.checkpoint["context"]["missing"]
+        stop_reason = f"context_missing: {len(missing)} pros had no org brief"
+    elif "winner" in kinds:
         status = "complete"
     elif "no_action" in kinds:
         status = "no_action"
@@ -504,7 +544,7 @@ async def _stage_ready(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         status = "abstained"
     else:
         status = "no_action"
-    await deps.store.set_run_status(state.run.id, status)
+    await deps.store.set_run_status(state.run.id, status, stop_reason)
     await deps.store.finish_job(state.job.id, "done")
     return {"status": status}
 
@@ -569,9 +609,20 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             return
         try:
             payload = await STAGE_HANDLERS[stage](state, deps)
+        except LeaseLost:
+            await store.session.rollback()
+            return  # the new owner resumes from the durable checkpoint
         except BudgetExhausted:
             await store.session.rollback()
-            await store.set_run_status(run_id, "stopped", "budget_exhausted")
+            # A refused reservation has three honest causes; label the real one.
+            if await deps.queue.fleet_is_killed():
+                await store.set_run_status(run_id, "stopped", "fleet_killed")
+            else:
+                status = (await store.session.execute(
+                    select(RunRow.status).where(RunRow.id == run_id)
+                )).scalar_one()
+                if status != "stopped":  # operator kill keeps its own reason
+                    await store.set_run_status(run_id, "stopped", "budget_exhausted")
             await store.finish_job(job_id, "stopped")
             return
         except PipelineFailure as error:

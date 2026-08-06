@@ -1,11 +1,14 @@
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from waypoint.llm import RateLimitExhausted
+from waypoint.measurement import UnmeasurableWinner
 from waypoint.pipeline import run_job
-from waypoint.queue import set_kill
-from waypoint.tables import CandidateRow, MeasurementRow, RunRow, WinnerRow
+from waypoint.queue import claim_job, enqueue, set_kill
+from waypoint.tables import CandidateRow, FleetControlRow, MeasurementRow, RunRow, WinnerRow
 
 from .conftest import FakeDeps, reactions_json
 
@@ -109,6 +112,111 @@ async def test_flat_reactions_resolve_to_no_action(deps: FakeDeps, seeded_job) -
     assert winner.kind == "no_action"
     # A flat screen triggers one bounded search round, never a canned fallback.
     assert deps.llm.calls_for("generate") == 2
+
+
+async def test_lost_lease_stops_paid_work_immediately(deps: FakeDeps, seeded_job) -> None:
+    # Another worker owns the claim; this worker's heartbeat must fail before
+    # the first paid call.
+    async with deps.db.begin_nested():
+        claimed = await claim_job(deps.db, "worker-other")
+        assert claimed is not None and claimed.id == seeded_job.id
+    await deps.db.commit()
+    deps.worker_id = "worker-loser"
+    await run_job(seeded_job.id, deps)
+    assert deps.llm.call_count == 0
+    assert await candidate_count(deps.db, seeded_job.run_id) == 0
+
+
+async def test_owner_heartbeats_keep_the_lease_alive(deps: FakeDeps, seeded_job) -> None:
+    job = await claim_job(deps.db, "worker-owner", lease_seconds=60)
+    assert job is not None
+    await deps.db.commit()
+    deps.worker_id = "worker-owner"
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+
+
+async def test_operator_kill_mid_run_keeps_its_honest_reason(
+    deps: FakeDeps, seeded_job,
+) -> None:
+    original = deps.store.complete_stage
+
+    async def stop_after_generate(job_id: str, stage: str, payload=None) -> None:
+        await original(job_id, stage, payload)
+        if stage == "generate":
+            run = await deps.db.get(RunRow, seeded_job.run_id)
+            run.status = "stopped"
+            run.stop_reason = "operator_kill"
+            await deps.db.commit()
+
+    deps.store.complete_stage = stop_after_generate  # type: ignore[method-assign]
+    await run_job(seeded_job.id, deps)
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    assert run is not None
+    await deps.db.refresh(run)
+    assert run.status == "stopped"
+    assert run.stop_reason == "operator_kill"  # never relabeled budget_exhausted
+    assert deps.llm.calls_for("screen") == 0
+
+
+async def test_missing_context_pro_abstains_and_run_degrades(
+    deps: FakeDeps, db_session: AsyncSession,
+) -> None:
+    run = RunRow(
+        id="run-ghost", pro_ids=["pro_1", "pro_ghost"], audience_query="q",
+        audience_run="r", channels=["sms"], cost_limit=Decimal("100.00"),
+    )
+    db_session.add(run)
+    db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await db_session.flush()
+    job_id = await enqueue(db_session, run.id, stage="recommend")
+    await db_session.commit()
+    await run_job(job_id, deps)
+    assert await run_status(db_session, run.id) == "degraded"
+    winners = {(w.pro_id): w for w in (await db_session.execute(
+        select(WinnerRow).where(WinnerRow.run_id == run.id)
+    )).scalars()}
+    assert winners["pro_1"].kind == "winner"
+    assert winners["pro_ghost"].kind == "abstained"
+    assert "context" in winners["pro_ghost"].rationale
+
+
+async def test_unmeasurable_winner_abstains(deps: FakeDeps, seeded_job) -> None:
+    async def unmeasurable(winner, llm, catalog):
+        raise UnmeasurableWinner("unknown metric: imaginary")
+
+    deps.create_plan = unmeasurable
+    await run_job(seeded_job.id, deps)
+    winner = (await deps.db.execute(
+        select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id)
+    )).scalar_one()
+    assert winner.kind == "abstained"
+    assert "unmeasurable" in winner.rationale
+
+
+async def test_transient_measure_failure_retries_instead_of_abstaining(
+    deps: FakeDeps, seeded_job,
+) -> None:
+    async def flaky(winner, llm, catalog):
+        raise RateLimitExhausted("429 storm")
+
+    deps.create_plan = flaky
+    with pytest.raises(RateLimitExhausted):
+        await run_job(seeded_job.id, deps)
+    winner = (await deps.db.execute(
+        select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id)
+    )).scalar_one()
+    assert winner.kind == "winner"  # a validated winner survives a 429 storm
+    assert await run_status(deps.db, seeded_job.run_id) not in ("abstained", "failed")
+
+
+async def test_malformed_reactions_abstain_candidates_not_the_job(
+    deps: FakeDeps, seeded_job,
+) -> None:
+    deps.llm.responses["screen"] = "not json at all"
+    deps.llm.responses["final"] = "not json at all"
+    await run_job(seeded_job.id, deps)  # must not raise
+    assert await run_status(deps.db, seeded_job.run_id) == "no_action"
 
 
 async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:

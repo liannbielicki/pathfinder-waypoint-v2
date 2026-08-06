@@ -81,6 +81,20 @@ Docker was not installed on the build machine, so
 5. Verify startup fails loudly with a missing variable (delete one, redeploy,
    confirm the crash names it) and that no secret appears in logs, health
    responses, or the browser bundle.
+6. Kill-switch drill: set `KILL_SWITCH=true` in Railway and restart either
+   service — worker startup and every run creation apply it to the shared
+   fleet row. Emergency fallback if no deploy is possible:
+   `UPDATE fleet_control SET killed = true WHERE id = 1;` against Postgres.
+
+**Known operational limits to accept or schedule:**
+
+- The operator login is one shared password with no rate limiting or logout;
+  acceptable behind the rewrite for an internal tool, but decide whether that
+  stands for launch.
+- `POST /api/runs/{id}/handoff` hands off all ready winners synchronously; a
+  very large run could exceed the Vercel proxy timeout. Rows are durable and
+  idempotent, so retrying the request is safe — but batch-handoff UX may need
+  a queued job later.
 
 ## Production evidence
 
@@ -111,6 +125,9 @@ Docker was not installed on the build machine, so
   keys) matches what the warehouse can actually report.
 - Confirm the persona snapshot source of truth and its regeneration cadence
   (panels pin `snapshot_version` per run).
+- Confirm the missing-pro presentation: a pro the n8n flow returns no brief
+  for now gets a visible `abstained` outcome (`context missing`) and the run
+  finishes `degraded` instead of silently dropping the pro.
 
 ## Deferred until after validation
 

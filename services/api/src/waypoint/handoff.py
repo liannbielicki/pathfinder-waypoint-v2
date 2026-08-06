@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import HandoffReceipt, MeasurementPlan
@@ -64,7 +65,19 @@ class LCMClient:
                 idempotency_key=key, payload=payload, status="pending",
             )
             self.session.add(row)
-            await self.session.commit()
+            try:
+                await self.session.commit()
+            except IntegrityError:
+                # A concurrent request won the insert; adopt its row.
+                await self.session.rollback()
+                row = (await self.session.execute(
+                    select(HandoffRow).where(HandoffRow.idempotency_key == key)
+                )).scalar_one()
+                if row.response is not None:
+                    return HandoffReceipt(
+                        handoff_id=row.id, idempotency_key=key,
+                        status="accepted" if row.status == "accepted" else "rejected",
+                    )
 
         try:
             response = await self._client.post(self.url, json=payload)
