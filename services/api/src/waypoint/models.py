@@ -34,6 +34,18 @@ class RunView(BaseModel):
     created_at: datetime
 
 
+class Recommendation(BaseModel):
+    """Structured recommendation. Prose is composed in the view layer, never stored."""
+
+    title: str = Field(min_length=1)
+    mechanism: str = Field(min_length=1)
+    actions: list[str] = Field(min_length=1)
+    pro_facing_concept: str = Field(min_length=1)
+    manager_rationale: str = Field(min_length=1)
+    channel: Literal["sms", "email", "none"]
+    risk: str = ""
+
+
 class MeasurementIndicator(BaseModel):
     key: str
     label: str
