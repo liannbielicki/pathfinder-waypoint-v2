@@ -12,6 +12,7 @@ dependencies = [
     "anthropic>=0.120.2",
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
+    "greenlet>=3.5.4",
     "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
     "pydantic-settings>=2.14.2",
