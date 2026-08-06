@@ -1,0 +1,19 @@
+{
+  "contract_version": "org_context_v1",
+  "organizations": [
+    {
+      "pro_id": "pro_1",
+      "org_id": "org_1",
+      "open_invoice_count": 2,
+      "open_due_usd": "430.25",
+      "lifecycle_stage": "active"
+    },
+    {
+      "pro_id": "pro_2",
+      "org_id": "org_2",
+      "open_invoice_count": 0,
+      "open_due_usd": "0",
+      "lifecycle_stage": "onboarding"
+    }
+  ]
+}
