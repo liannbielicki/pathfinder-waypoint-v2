@@ -43,11 +43,7 @@ async def load_personas(settings: Settings) -> list[Persona]:
 
 
 async def main() -> None:
-    # Lands in the measurement task; lazy import keeps the module boundary clean.
-    from waypoint.measurement import (  # type: ignore[import-untyped]
-        METRIC_CATALOG,
-        create_measurement_plan,
-    )
+    from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
 
     logging.basicConfig(level="INFO")
     settings = Settings.load()
