@@ -8,6 +8,7 @@ Start here:
 2. `FRONTEND.md` — UI principles, flows, states
 3. `docs/plans/pathfinder-waypoint-v2-implementation.md` — implementation plan
 4. `docs/environment.md` — environment ownership and setup
+5. `docs/HUMAN-TASKS.md` — remaining human-owned actions before launch
 
 ## Layout
 
