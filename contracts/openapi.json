@@ -1,0 +1,596 @@
+{
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HandoffReceipt": {
+        "properties": {
+          "handoff_id": {
+            "title": "Handoff Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handoff_id",
+          "idempotency_key",
+          "status"
+        ],
+        "title": "HandoffReceipt",
+        "type": "object"
+      },
+      "HandoffResponse": {
+        "properties": {
+          "receipts": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffReceipt"
+            },
+            "title": "Receipts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "receipts"
+        ],
+        "title": "HandoffResponse",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "RunCreate": {
+        "properties": {
+          "audience_query": {
+            "minLength": 1,
+            "title": "Audience Query",
+            "type": "string"
+          },
+          "audience_run": {
+            "minLength": 1,
+            "title": "Audience Run",
+            "type": "string"
+          },
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Channels",
+            "type": "array"
+          },
+          "pro_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Pro Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pro_ids",
+          "audience_query",
+          "audience_run",
+          "channels"
+        ],
+        "title": "RunCreate",
+        "type": "object"
+      },
+      "RunDetail": {
+        "properties": {
+          "audience_query": {
+            "title": "Audience Query",
+            "type": "string"
+          },
+          "audience_run": {
+            "title": "Audience Run",
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "config_version": {
+            "title": "Config Version",
+            "type": "string"
+          },
+          "cost_limit_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Limit Usd",
+            "type": "string"
+          },
+          "cost_reserved_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Reserved Usd",
+            "type": "string"
+          },
+          "cost_spent_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Spent Usd",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "handoffs": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Handoffs",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "killed": {
+            "title": "Killed",
+            "type": "boolean"
+          },
+          "measurements": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Measurements",
+            "type": "array"
+          },
+          "pro_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Pro Ids",
+            "type": "array"
+          },
+          "stages": {
+            "additionalProperties": true,
+            "title": "Stages",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "winners": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Winners",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "pro_ids",
+          "audience_query",
+          "audience_run",
+          "channels",
+          "config_version",
+          "cost_limit_usd",
+          "cost_reserved_usd",
+          "cost_spent_usd",
+          "stop_reason",
+          "created_at",
+          "stages",
+          "candidates",
+          "winners",
+          "measurements",
+          "handoffs",
+          "killed"
+        ],
+        "title": "RunDetail",
+        "type": "object"
+      },
+      "RunView": {
+        "properties": {
+          "audience_query": {
+            "title": "Audience Query",
+            "type": "string"
+          },
+          "audience_run": {
+            "title": "Audience Run",
+            "type": "string"
+          },
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "config_version": {
+            "title": "Config Version",
+            "type": "string"
+          },
+          "cost_limit_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Limit Usd",
+            "type": "string"
+          },
+          "cost_reserved_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Reserved Usd",
+            "type": "string"
+          },
+          "cost_spent_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Spent Usd",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "pro_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Pro Ids",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "pro_ids",
+          "audience_query",
+          "audience_run",
+          "channels",
+          "config_version",
+          "cost_limit_usd",
+          "cost_reserved_usd",
+          "cost_spent_usd",
+          "stop_reason",
+          "created_at"
+        ],
+        "title": "RunView",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Pathfinder Waypoint V2",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Login Api Auth Login Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login"
+      }
+    },
+    "/api/runs": {
+      "post": {
+        "operationId": "create_run_api_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Run"
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "operationId": "run_detail_api_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Detail"
+      }
+    },
+    "/api/runs/{run_id}/handoff": {
+      "post": {
+        "operationId": "create_handoff_api_runs__run_id__handoff_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandoffResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Handoff"
+      }
+    },
+    "/api/runs/{run_id}/kill": {
+      "post": {
+        "operationId": "kill_run_api_runs__run_id__kill_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kill Run"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    }
+  }
+}

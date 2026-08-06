@@ -448,7 +448,8 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 run_id=state.run.id, pro_id=pro_id, kind="winner",
                 candidate_id=leader.id,
                 rationale=leader.recommendation["manager_rationale"],
-                evidence={"final": final, "screen": leader.score.get("screen", {})},
+                evidence={"final": final, "screen": leader.score.get("screen", {}),
+                          "org_id": state.briefs[pro_id].org_id},
             ))
         else:
             assert isinstance(outcome, NoAction)
@@ -558,6 +559,12 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             continue
         if await deps.queue.fleet_is_killed():
             await store.set_run_status(run_id, "stopped", "fleet_killed")
+            await store.finish_job(job_id, "stopped")
+            return
+        current = (await store.session.execute(
+            select(RunRow.status).where(RunRow.id == run_id)
+        )).scalar_one()
+        if current == "stopped":  # operator killed this run mid-flight
             await store.finish_job(job_id, "stopped")
             return
         try:
