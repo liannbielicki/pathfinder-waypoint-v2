@@ -3,6 +3,7 @@
   "organizations": [
     {
       "org_uuid": "pro_1",
+      "segment": "1A",
       "plan_tier": "basic",
       "tenure_band": "0-3m",
       "org_size_band": "solo",
@@ -17,6 +18,7 @@
     },
     {
       "org_uuid": "pro_2",
+      "segment": "1A",
       "plan_tier": "essentials",
       "tenure_band": "0-3m",
       "org_size_band": "small_team",

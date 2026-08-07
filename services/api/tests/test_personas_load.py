@@ -26,29 +26,35 @@ SETTINGS = Settings(
 
 
 async def test_load_personas_posts_panel_request(httpx_mock: HTTPXMock) -> None:
-    # Flat item like the real service: no family/label/features fields.
+    # Flat item like the real service: the card's segment is under `segment_key`
+    # (NOT `segment`), plus persona_id + usage booleans.
     httpx_mock.add_response(json={
         "panel_id": "panel_1",
         "subtype_version": "v3",
-        "segment": "2B",
+        "segment": "2A",
         "n_personas": 1,
         "personas": [
-            {"persona_id": "p1", "segment": "2B", "booking_attached": False},
+            {"persona_id": "p1", "segment_key": "2A", "booking_attached": False},
         ],
     })
 
-    personas = await load_personas(SETTINGS)
+    personas = await load_personas(SETTINGS, "2A")
 
     request = httpx_mock.get_request()
     assert request is not None
     assert request.method == "POST"
     assert str(request.url) == "https://personas.example/api/persona-cards"
     assert request.headers["X-API-Key"] == "persona-key"
-    assert json.loads(request.content) == PERSONA_PANEL_REQUEST
+    # segment is supplied per-Pro at call time, merged onto the base request.
+    assert json.loads(request.content) == {**PERSONA_PANEL_REQUEST, "segment": "2A"}
     # subtype_version from the panel becomes each persona's snapshot_version.
     assert personas[0].snapshot_version == "v3"
     assert personas[0].persona_id == "p1"
     # family/label fall back to persona_id; flat fields become features.
     assert personas[0].family == "p1"
     assert personas[0].label == "p1"
-    assert personas[0].features == {"segment": "2B", "booking_attached": False}
+    # `segment_key` is exposed as the `segment` match feature (the card has no
+    # plain `segment`), so matching has its one shared key with the Pro.
+    assert personas[0].features == {
+        "segment_key": "2A", "booking_attached": False, "segment": "2A",
+    }

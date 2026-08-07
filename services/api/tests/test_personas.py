@@ -82,6 +82,26 @@ def test_counterweight_shortage_never_relaxes_the_threshold() -> None:
         select_panel(PRO_FIXTURE, same_family, size=3)
 
 
+def test_segment_is_enough_when_personas_are_flat() -> None:
+    # Regression: real persona-cards items are flat (segment + usage booleans),
+    # sharing ONLY `segment` with a Pro. With segment fed, fit is 1.0 for the
+    # whole pool and a panel forms; without it, no key is shared -> 0 available.
+    flat = [
+        Persona(persona_id=f"p{i}", family=f"p{i}", label=f"p{i}",
+                snapshot_version="v3",
+                features={"segment": "2B", "booking_attached": bool(i % 2)})
+        for i in range(5)
+    ]
+    with_segment = ProMatchInput(pro_id="pro_a", features={"segment": "2B", "plan": "grow"})
+    panel = select_panel(with_segment, flat, size=3)
+    assert [item.role for item in panel.items] == ["closest", "closest", "counterweight"]
+    assert all(item.fit_score == 1.0 for item in panel.items)
+
+    without_segment = ProMatchInput(pro_id="pro_b", features={"plan": "grow"})
+    with pytest.raises(InsufficientPanelFit):
+        select_panel(without_segment, flat, size=3)
+
+
 def test_panel_selection_is_deterministic() -> None:
     first = select_panel(PRO_FIXTURE, PERSONAS, size=5)
     second = select_panel(PRO_FIXTURE, list(reversed(PERSONAS)), size=5)

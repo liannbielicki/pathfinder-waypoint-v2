@@ -5,6 +5,7 @@ Run with: python -m waypoint.worker
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
 
@@ -42,10 +43,10 @@ async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> Non
     await session.commit()
 
 
-# ponytail: panel request is fixed to the documented default; lift to
-# Settings when a second segment/size/seed is actually needed.
+# ponytail: base request is fixed to the documented default; segment is
+# supplied per-Pro at call time. Lift size/seed to Settings only if a second
+# value is actually needed.
 PERSONA_PANEL_REQUEST = {
-    "segment": "2B",
     "panel_size": 24,
     "seed": 42,
     "subtype_ids": None,
@@ -53,8 +54,8 @@ PERSONA_PANEL_REQUEST = {
 }
 
 
-async def load_personas(settings: Settings) -> list[Persona]:
-    """Create a frozen persona panel from the persona-cards service."""
+async def load_personas(settings: Settings, segment: str) -> list[Persona]:
+    """Create a persona panel for `segment` from the persona-cards service."""
     async with httpx.AsyncClient(
         timeout=30.0,
         follow_redirects=False,
@@ -62,7 +63,7 @@ async def load_personas(settings: Settings) -> list[Persona]:
     ) as client:
         response = await client.post(
             f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
-            json=PERSONA_PANEL_REQUEST,
+            json={**PERSONA_PANEL_REQUEST, "segment": segment},
         )
         response.raise_for_status()
         payload = response.json()
@@ -72,21 +73,39 @@ async def load_personas(settings: Settings) -> list[Persona]:
         # shape isn't documented here. Log the real keys once and tighten the
         # picks below if a field lands in the wrong slot.
         log.info("persona-cards item keys: %s", sorted(items[0].keys()))
-    return [_adapt_persona(item, payload["subtype_version"]) for item in items]
+    return [_adapt_persona(item, payload["subtype_version"], segment) for item in items]
 
 
-def _adapt_persona(item: dict, snapshot_version: str) -> Persona:
+def _adapt_persona(item: dict, snapshot_version: str, segment: str) -> Persona:
     """Map a persona-cards item onto waypoint's Persona. `family` and `label`
     fall back through likely names, then to persona_id; every non-id field is
     kept as a feature (scoring reads only the permitted subset)."""
     pid = str(item["persona_id"])
     family = item.get("family") or item.get("subtype_id") or item.get("subtype") or pid
     label = item.get("label") or item.get("name") or item.get("title") or pid
+    # The card carries its segment under `segment_key` (e.g. "2A"), not the
+    # `segment` name the Pro matches on — so expose it as `segment`, or every
+    # card lacks the one shared key and the panel abstains at 0 fit. Fall back
+    # to the requested pool segment if a card ever omits segment_key.
     features = {k: v for k, v in item.items() if k != "persona_id"}
+    features["segment"] = item.get("segment_key") or segment
     return Persona(
         persona_id=pid, family=str(family), label=str(label),
         features=features, snapshot_version=snapshot_version,
     )
+
+
+def make_persona_source(settings: Settings) -> Callable[[str], Awaitable[list[Persona]]]:
+    """Per-segment persona pools, fetched once per segment and cached for the
+    worker's lifetime (segments are stable within a run)."""
+    cache: dict[str, list[Persona]] = {}
+
+    async def get_personas(segment: str) -> list[Persona]:
+        if segment not in cache:
+            cache[segment] = await load_personas(settings, segment)
+        return cache[segment]
+
+    return get_personas
 
 
 async def main() -> None:
@@ -99,7 +118,7 @@ async def main() -> None:
     factory = make_session_factory(engine)
     anthropic = AsyncAnthropic(api_key=settings.LLM_API_KEY.get_secret_value())
     pricing = Pricing(models={"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP})
-    personas = await load_personas(settings)
+    persona_source = make_persona_source(settings)
     calibration = load_calibration(CALIBRATION_PATH)
     context = N8NContextClient(
         url=str(settings.N8N_CONTEXT_URL), token=settings.N8N_TOKEN.get_secret_value()
@@ -131,7 +150,7 @@ async def main() -> None:
                     llm=LLMGateway(anthropic, usage_session, pricing),
                     context=context,
                     queue=QueueOps(session),
-                    personas=personas,
+                    get_personas=persona_source,
                     calibration=calibration,
                     create_plan=create_measurement_plan,
                     metric_catalog=METRIC_CATALOG,

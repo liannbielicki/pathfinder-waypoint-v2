@@ -87,6 +87,11 @@ PERSONAS = [
     for p in PERSONA_FIXTURE["personas"]
 ]
 
+
+async def _fake_get_personas(segment: str) -> list[Persona]:
+    # Fixture personas are all segment "1A"; the fake pool ignores the arg.
+    return PERSONAS
+
 IDEAS_JSON = json.dumps([
     {
         "title": f"Idea {i}",
@@ -184,7 +189,7 @@ class FakeDeps(PipelineDeps):
             llm=FakeLLM(),
             context=FakeContext(),
             queue=QueueOps(session),
-            personas=PERSONAS,
+            get_personas=_fake_get_personas,
             calibration=load_calibration(
                 Path(__file__).parents[1] / "data" / "reaction_churn_calibration_cards.json"
             ),

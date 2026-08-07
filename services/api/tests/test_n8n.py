@@ -9,6 +9,7 @@ from waypoint.n8n import (
     CONTRACT_VERSION,
     ContextUnavailable,
     N8NContextClient,
+    OrgBrief,
     OrgContextBatch,
 )
 
@@ -37,6 +38,15 @@ def test_n8n_fixture_obeys_ai_egress_contract() -> None:
         assert set(org.model_dump()) <= permitted
     # No raw email/phone values leak: an address would carry an "@".
     assert "@" not in batch.model_dump_json()
+
+
+def test_segment_reaches_match_features() -> None:
+    # segment is the only key a Pro and a (flat) persona can share; it must
+    # survive the v2 -> match-feature mapping or every panel abstains at 0 fit.
+    brief = OrgBrief(org_uuid="pro_1", segment="1A", plan_tier="basic")
+    features = brief.match_feature_map()
+    assert features["segment"] == "1A"
+    assert features["plan"] == "basic"
 
 
 async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> None:

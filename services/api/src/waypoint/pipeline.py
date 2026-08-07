@@ -9,6 +9,7 @@ There is no canned fallback anywhere: a model failure is a failed run.
 """
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Protocol
@@ -180,7 +181,7 @@ class PipelineDeps:
     llm: LLMLike
     context: ContextLike
     queue: QueueOps
-    personas: list[Persona]
+    get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
     create_plan: Any  # async (winner, llm, catalog) -> MeasurementPlan
     metric_catalog: dict[str, Any] = field(default_factory=dict)
@@ -253,10 +254,15 @@ async def _react(state: PipelineState, deps: PipelineDeps, panel: PanelSelection
     return [by_id[i.persona_id] for i in panel.items]
 
 
-def _panel_for(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
-               size: Any) -> PanelSelection:
+async def _panel_for(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
+                     size: Any) -> PanelSelection:
+    if brief.segment is None:
+        # No segment => no shared match key => never a real panel. Abstain
+        # honestly instead of guessing a wrong-segment pool.
+        raise InsufficientPanelFit(size=size, available=0)
+    personas = await deps.get_personas(brief.segment)
     pro = ProMatchInput(pro_id=brief.pro_id, features=dict(brief.match_feature_map()))
-    return select_panel(pro, deps.personas, size=size)
+    return select_panel(pro, personas, size=size)
 
 
 async def _generate_for_pro(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
@@ -322,7 +328,7 @@ async def _screen_pro(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
     if not pending:
         return
     try:
-        panel = _panel_for(state, deps, brief, 3)
+        panel = await _panel_for(state, deps, brief, 3)
     except InsufficientPanelFit as error:
         await _abstain_pro(state, deps, brief.pro_id, f"low panel fit: {error}")
         return
@@ -436,7 +442,7 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         if "final" in leader.score:
             continue  # resume
         try:
-            panel = _panel_for(state, deps, brief, 5)
+            panel = await _panel_for(state, deps, brief, 5)
         except InsufficientPanelFit as error:
             await _abstain_pro(state, deps, pro_id, f"low panel fit: {error}")
             continue

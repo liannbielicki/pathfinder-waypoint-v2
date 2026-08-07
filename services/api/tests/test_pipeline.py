@@ -10,7 +10,7 @@ from waypoint.pipeline import run_job
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import CandidateRow, FleetControlRow, MeasurementRow, RunRow, WinnerRow
 
-from .conftest import FakeDeps, reactions_json
+from .conftest import PERSONAS, FakeDeps, reactions_json
 
 
 async def run_status(session: AsyncSession, run_id: str) -> str:
@@ -220,7 +220,14 @@ async def test_malformed_reactions_abstain_candidates_not_the_job(
 
 
 async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
-    deps.personas = [p for p in deps.personas if p.family == "solo_operators"]
+    # A single-family pool can't supply a distinct-family counterweight, so the
+    # panel abstains rather than relaxing the rule.
+    solo = [p for p in PERSONAS if p.family == "solo_operators"]
+
+    async def _solo(segment: str):
+        return solo
+
+    deps.get_personas = _solo
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "abstained"
     winner = (await deps.db.execute(

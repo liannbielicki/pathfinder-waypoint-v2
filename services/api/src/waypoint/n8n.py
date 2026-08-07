@@ -38,13 +38,16 @@ ALLOWED_FIELDS = (
     "feature_time_tracking_state", "feature_flat_rate_pricing_state",
     "recommended_focus", "recommended_focus_value_band",
     "recommended_focus_retention_lift_band", "top_unused_paid_feature",
-    "vertical", "plan_tier", "org_size_band", "tenure_band",
+    "vertical", "plan_tier", "org_size_band", "tenure_band", "segment",
 )
 
 # v2 band field -> the permitted persona-match feature key it maps onto
-# (personas.PERMITTED_MATCH_FEATURES). Best-effort: v2 has no segment /
-# lifecycle_stage / features_active_count source, so those keys are simply absent.
+# (personas.PERMITTED_MATCH_FEATURES). segment is the load-bearing key: real
+# persona-cards items are flat and share only segment with a Pro, so without it
+# every fit is 0.0. v2 has no lifecycle_stage / features_active_count source,
+# so those keys stay absent.
 _MATCH_FEATURE_MAP = {
+    "segment": "segment",
     "plan_tier": "plan",
     "tenure_band": "tenure_bucket",
     "org_size_band": "org_size_bucket",
@@ -64,6 +67,7 @@ class OrgBrief(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     org_uuid: str
+    segment: str | None = None
     feature_adoption_band: str | None = None
     plan_gap_band: str | None = None
     ltv_score_band: str | None = None
