@@ -42,20 +42,51 @@ async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> Non
     await session.commit()
 
 
+# ponytail: panel request is fixed to the documented default; lift to
+# Settings when a second segment/size/seed is actually needed.
+PERSONA_PANEL_REQUEST = {
+    "segment": "2B",
+    "panel_size": 24,
+    "seed": 42,
+    "subtype_ids": None,
+    "subtype_version": None,
+}
+
+
 async def load_personas(settings: Settings) -> list[Persona]:
-    """Fetch the versioned persona snapshot from the persona service."""
+    """Create a frozen persona panel from the persona-cards service."""
     async with httpx.AsyncClient(
         timeout=30.0,
         follow_redirects=False,
-        headers={"authorization": f"Bearer {settings.PERSONA_TOKEN.get_secret_value()}"},
+        headers={"X-API-Key": settings.PERSONA_TOKEN.get_secret_value()},
     ) as client:
-        response = await client.get(str(settings.PERSONA_URL))
+        response = await client.post(
+            f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
+            json=PERSONA_PANEL_REQUEST,
+        )
         response.raise_for_status()
         payload = response.json()
-    return [
-        Persona(snapshot_version=payload["snapshot_version"], **item)
-        for item in payload["personas"]
-    ]
+    items = payload["personas"]
+    if items:
+        # ponytail: heuristic field mapping — the persona-cards service's item
+        # shape isn't documented here. Log the real keys once and tighten the
+        # picks below if a field lands in the wrong slot.
+        log.info("persona-cards item keys: %s", sorted(items[0].keys()))
+    return [_adapt_persona(item, payload["subtype_version"]) for item in items]
+
+
+def _adapt_persona(item: dict, snapshot_version: str) -> Persona:
+    """Map a persona-cards item onto waypoint's Persona. `family` and `label`
+    fall back through likely names, then to persona_id; every non-id field is
+    kept as a feature (scoring reads only the permitted subset)."""
+    pid = str(item["persona_id"])
+    family = item.get("family") or item.get("subtype_id") or item.get("subtype") or pid
+    label = item.get("label") or item.get("name") or item.get("title") or pid
+    features = {k: v for k, v in item.items() if k != "persona_id"}
+    return Persona(
+        persona_id=pid, family=str(family), label=str(label),
+        features=features, snapshot_version=snapshot_version,
+    )
 
 
 async def main() -> None:
