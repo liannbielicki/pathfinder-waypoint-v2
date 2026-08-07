@@ -24,6 +24,6 @@ async def test_existing_n8n_flow_matches_the_recorded_contract(
     live_client: N8NContextClient,
 ) -> None:
     batch = await live_client.fetch([os.environ["LIVE_TEST_PRO"]])
-    assert batch.contract_version == "org_context_v1"
+    assert batch.contract_version == "org-context-v2"
     assert batch.organizations
-    assert "email" not in batch.model_dump_json().lower()
+    assert "@" not in batch.model_dump_json()

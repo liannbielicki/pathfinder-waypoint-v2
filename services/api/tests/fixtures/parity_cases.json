@@ -3,8 +3,8 @@
     "case": "invoice_opportunity",
     "pro_id": "pro_1",
     "expected_outcome": "winner",
-    "expected_org_id": "org_1",
-    "expected_context_version": "org_context_v1",
+    "expected_org_id": "pro_1",
+    "expected_context_version": "org-context-v2",
     "expected_panel_sizes": [3, 5],
     "expected_metric": "invoices_sent",
     "expected_handoff_fields": ["pro_id", "org_id", "winner", "measurement_plan", "audience_lineage"]
@@ -13,8 +13,8 @@
     "case": "low_panel_fit_abstention",
     "pro_id": "pro_2",
     "expected_outcome": "abstained",
-    "expected_org_id": "org_2",
-    "expected_context_version": "org_context_v1",
+    "expected_org_id": "pro_2",
+    "expected_context_version": "org-context-v2",
     "expected_panel_sizes": [],
     "expected_metric": null,
     "expected_handoff_fields": []

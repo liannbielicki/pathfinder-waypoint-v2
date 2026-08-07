@@ -80,7 +80,7 @@ class ProductionStack:
 
         if winner.kind != "winner":
             return ParityResult(
-                outcome=winner.kind, org_id=batch.organizations[0].org_id,
+                outcome=winner.kind, org_id=batch.organizations[0].org_uuid,
                 context_version=batch.contract_version, panel_sizes=[],
                 measurement_plan=None, handoff=None,
             )

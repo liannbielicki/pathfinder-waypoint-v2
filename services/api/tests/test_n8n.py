@@ -1,12 +1,16 @@
 import json
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
-from waypoint.n8n import ContextUnavailable, N8NContextClient, OrgContextBatch
+from waypoint.n8n import (
+    ALLOWED_FIELDS,
+    CONTRACT_VERSION,
+    ContextUnavailable,
+    N8NContextClient,
+    OrgContextBatch,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "n8n_context.json"
 
@@ -17,43 +21,76 @@ def make_client(batch_size: int = 5) -> N8NContextClient:
     return N8NContextClient(url=N8N_URL, token="test-token", batch_size=batch_size)
 
 
+def _rows() -> list[dict]:
+    """Wire format is a bare array of rows, each stamped with the contract."""
+    batch = json.loads(FIXTURE.read_text())
+    return [{"contract_version": CONTRACT_VERSION, **org} for org in batch["organizations"]]
+
+
 def test_n8n_fixture_obeys_ai_egress_contract() -> None:
     batch = OrgContextBatch.model_validate_json(FIXTURE.read_text())
-    assert batch.contract_version == "org_context_v1"
-    serialized = batch.model_dump_json().lower()
-    for forbidden in ("email", "phone", "first_name", "last_name", "address"):
-        assert forbidden not in serialized
+    assert batch.contract_version == CONTRACT_VERSION
+    # Every field that crosses is on the allowlist (consent *state* bands like
+    # email_consent_state are allowlisted; raw contact data is not).
+    permitted = set(ALLOWED_FIELDS) | {"org_uuid"}
+    for org in batch.organizations:
+        assert set(org.model_dump()) <= permitted
+    # No raw email/phone values leak: an address would carry an "@".
+    assert "@" not in batch.model_dump_json()
 
 
-def test_contract_rejects_unknown_fields() -> None:
-    payload = json.loads(FIXTURE.read_text())
-    payload["organizations"][0]["email"] = "leak@example.com"
-    with pytest.raises(ValidationError):
-        OrgContextBatch.model_validate(payload)
+async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> None:
+    # A stray raw/PII column must never survive the allowlist projection.
+    row = {**_rows()[0], "customer_email": "leak@example.com", "raw_due_usd": 4302}
+    httpx_mock.add_response(json=[row])
+    batch = await make_client().fetch(["pro_1"])
+    dumped = batch.model_dump_json().lower()
+    assert "leak@example.com" not in dumped
+    assert "raw_due_usd" not in dumped
+    assert batch.organizations[0].open_ar_band == "low"
 
 
-async def test_n8n_fetch_batches_ids(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(json=json.loads(FIXTURE.read_text()))
+async def test_wrong_contract_version_is_refused(httpx_mock: HTTPXMock) -> None:
+    row = {**_rows()[0], "contract_version": "org-context-v1"}
+    httpx_mock.add_response(json=[row])
+    with pytest.raises(ContextUnavailable):
+        await make_client().fetch(["pro_1"])
+
+
+async def test_missing_org_uuid_is_refused(httpx_mock: HTTPXMock) -> None:
+    row = {k: v for k, v in _rows()[0].items() if k != "org_uuid"}
+    httpx_mock.add_response(json=[row])
+    with pytest.raises(ContextUnavailable):
+        await make_client().fetch(["pro_1"])
+
+
+async def test_non_object_rows_are_refused_not_crashed(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json=["not-an-object"])
+    with pytest.raises(ContextUnavailable):
+        await make_client().fetch(["pro_1"])
+
+
+async def test_n8n_fetch_posts_org_uuids(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json=_rows())
     client = make_client()
     result = await client.fetch(["pro_1", "pro_2"])
-    assert result.organizations[0].open_due_usd == Decimal("430.25")
+    assert result.organizations[0].plan_tier == "basic"
     request = httpx_mock.get_request()
     assert request is not None
-    assert json.loads(request.content) == {"pro_ids": ["pro_1", "pro_2"]}
+    assert json.loads(request.content) == {"org_uuids": ["pro_1", "pro_2"]}
     assert request.headers["authorization"] == "Bearer test-token"
 
 
 async def test_n8n_fetch_chunks_large_audiences(httpx_mock: HTTPXMock) -> None:
-    fixture = json.loads(FIXTURE.read_text())
-    httpx_mock.add_response(json=fixture)
-    httpx_mock.add_response(json=fixture)
+    httpx_mock.add_response(json=_rows())
+    httpx_mock.add_response(json=_rows()[:1])
     client = make_client(batch_size=2)
     result = await client.fetch(["pro_1", "pro_2", "pro_3"])
     requests = httpx_mock.get_requests()
-    assert [json.loads(r.content)["pro_ids"] for r in requests] == [
+    assert [json.loads(r.content)["org_uuids"] for r in requests] == [
         ["pro_1", "pro_2"], ["pro_3"],
     ]
-    assert len(result.organizations) == 4
+    assert len(result.organizations) == 3
 
 
 async def test_n8n_refuses_redirects(httpx_mock: HTTPXMock) -> None:

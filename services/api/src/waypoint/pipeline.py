@@ -479,7 +479,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 candidate_id=leader.id,
                 rationale=leader.recommendation["manager_rationale"],
                 evidence={"final": final, "screen": leader.score.get("screen", {}),
-                          "org_id": state.briefs[pro_id].org_id},
+                          "org_id": state.briefs[pro_id].org_uuid},
             ))
         else:
             assert isinstance(outcome, NoAction)

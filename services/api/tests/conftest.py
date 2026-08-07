@@ -67,7 +67,7 @@ from decimal import Decimal
 
 from waypoint.llm import LLMResult, RateLimitExhausted
 from waypoint.models import MeasurementIndicator, MeasurementPlan
-from waypoint.n8n import ContextUnavailable, OrgContextBatch
+from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgContextBatch
 from waypoint.personas import Persona
 from waypoint.pipeline import PipelineDeps, PostgresStore, QueueOps
 from waypoint.queue import enqueue
@@ -155,7 +155,7 @@ class FakeContext:
         if self.unavailable:
             raise ContextUnavailable("injected outage")
         orgs = [o for o in self.batch.organizations if o.pro_id in pro_ids]
-        return OrgContextBatch(contract_version="org_context_v1", organizations=orgs)
+        return OrgContextBatch(contract_version=CONTRACT_VERSION, organizations=orgs)
 
 
 class CrashableStore(PostgresStore):

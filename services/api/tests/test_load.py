@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint.handoff import LCMClient
-from waypoint.n8n import OrgBrief, OrgContextBatch
+from waypoint.n8n import CONTRACT_VERSION, OrgBrief, OrgContextBatch
 from waypoint.pipeline import STAGES, run_job
 from waypoint.queue import claim_job, enqueue
 from waypoint.tables import (
@@ -44,13 +44,11 @@ class SyntheticContext(FakeContext):
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
         return OrgContextBatch(
-            contract_version="org_context_v1",
+            contract_version=CONTRACT_VERSION,
             organizations=[
                 OrgBrief(
-                    pro_id=pro_id, org_id=f"org_{pro_id}", open_invoice_count=2,
-                    open_due_usd=Decimal("430.25"), lifecycle_stage="active",
-                    segment="1A", plan="basic", tenure_bucket="0-3m",
-                    org_size_bucket="solo", trade_bucket="hvac", open_ar_band="low",
+                    org_uuid=pro_id, plan_tier="basic", tenure_band="0-3m",
+                    org_size_band="solo", vertical="hvac", open_ar_band="low",
                 )
                 for pro_id in pro_ids
             ],

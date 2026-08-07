@@ -1,31 +1,31 @@
 {
-  "contract_version": "org_context_v1",
+  "contract_version": "org-context-v2",
   "organizations": [
     {
-      "pro_id": "pro_1",
-      "org_id": "org_1",
-      "open_invoice_count": 2,
-      "open_due_usd": "430.25",
-      "lifecycle_stage": "active",
-      "segment": "1A",
-      "plan": "basic",
-      "tenure_bucket": "0-3m",
-      "org_size_bucket": "solo",
-      "trade_bucket": "hvac",
-      "open_ar_band": "low"
+      "org_uuid": "pro_1",
+      "plan_tier": "basic",
+      "tenure_band": "0-3m",
+      "org_size_band": "solo",
+      "vertical": "hvac",
+      "open_ar_band": "low",
+      "ar_aging_band": "past_30",
+      "feature_adoption_band": "medium",
+      "sms_consent_state": "opted_in",
+      "email_consent_state": "never_asked",
+      "feature_online_booking_state": "attached_unused",
+      "recommended_focus": "online_booking"
     },
     {
-      "pro_id": "pro_2",
-      "org_id": "org_2",
-      "open_invoice_count": 0,
-      "open_due_usd": "0",
-      "lifecycle_stage": "onboarding",
-      "segment": "1A",
-      "plan": "essentials",
-      "tenure_bucket": "0-3m",
-      "org_size_bucket": "small_team",
-      "trade_bucket": "plumbing",
-      "open_ar_band": "none"
+      "org_uuid": "pro_2",
+      "plan_tier": "essentials",
+      "tenure_band": "0-3m",
+      "org_size_band": "small_team",
+      "vertical": "plumbing",
+      "open_ar_band": "none",
+      "ar_aging_band": "current",
+      "feature_adoption_band": "low",
+      "sms_consent_state": "never_asked",
+      "email_consent_state": "never_asked"
     }
   ]
 }
