@@ -1,27 +1,37 @@
-"""Resumable worker state machine.
+"""Resumable per-Pro worker state machine.
 
-claim → guard → context → generate → critics → 3-person screen → search →
-5-person final check → score/no-action → measurement plan → persist.
+claim → guard → context → evolve (win-stay/lose-shift loop) → 5-person final
+check → score/no-action → measurement plan → finalize.
 
-Every durable stage checkpoints to Postgres. A crash or deployment resumes
-from the checkpoint without duplicating candidates, charges, or winners.
-There is no canned fallback anywhere: a model failure is a failed run.
+Each Pro is an independently leased durable job. Every stage checkpoints to
+Postgres; the evolve loop additionally writes an authoritative round ledger so
+a crash or deployment resumes mid-loop without duplicating candidates, charges,
+or winners. Every paid call flows through the recorded MeteredLLM path. There
+is no canned fallback anywhere: a model failure is a failed job.
 """
 
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
+from waypoint.calls import BudgetExhausted, MeteredLLM
 from waypoint.llm import LLMResult
+from waypoint.loop import (
+    LoopConfig,
+    apply_round,
+    is_win,
+    next_mode,
+    replay,
+    stop_reason,
+)
 from waypoint.measurement import UnmeasurableWinner
-from waypoint.models import Recommendation
-from waypoint.n8n import ContextUnavailable, OrgBrief, OrgContextBatch
+from waypoint.models import TERMINAL_RUN_STATUSES, Recommendation
+from waypoint.n8n import ContextUnavailable, OrgBrief
 from waypoint.personas import (
     InsufficientPanelFit,
     PanelSelection,
@@ -31,12 +41,11 @@ from waypoint.personas import (
 )
 from waypoint.prompts import (
     CRITIC_SYSTEM,
-    GENERATOR_SYSTEM,
+    EVOLVE_SYSTEM,
     REACTION_SYSTEM,
     critic_prompt,
-    generator_prompt,
+    evolve_prompt,
     reaction_prompt,
-    search_directive_prompt,
 )
 from waypoint.scoring import (
     MIN_REDUCTION_FLOOR_PP,
@@ -47,28 +56,28 @@ from waypoint.scoring import (
     score_candidate,
     select_winner,
 )
-from waypoint.tables import CandidateRow, JobRow, MeasurementRow, RunRow, WinnerRow
+from waypoint.tables import (
+    CandidateRow,
+    EvolveRoundRow,
+    JobRow,
+    MeasurementRow,
+    RunRow,
+    WinnerRow,
+)
 
-STAGES = ("context", "generate", "critics", "screen", "search", "final",
-          "score", "measure", "ready")
+STAGES = ("context", "evolve", "final", "score", "measure", "ready")
 
 TERMINAL_STATES = {
-    "complete", "no_action", "abstained", "stopped", "failed",
-    "budget_exhausted", "context_unavailable", "panel_unavailable",
+    "complete",
+    "no_action",
+    "abstained",
+    "stopped",
+    "failed",
+    "budget_exhausted",
+    "context_unavailable",
+    "panel_unavailable",
 }
 
-# UI-visible run statuses are the FRONTEND.md set; the specific taxonomy above
-# is carried in stop_reason.
-_TERMINAL_RUN_STATUSES = {"complete", "no_action", "abstained", "stopped", "failed"}
-
-N_IDEAS = 3
-# ponytail: flat per-call reservation estimate; refine from measured usage if
-# real spend diverges.
-ESTIMATED_CALL_COST_USD = Decimal("0.10")
-
-
-class BudgetExhausted(Exception):
-    pass
 
 
 class LeaseLost(Exception):
@@ -81,13 +90,8 @@ class PipelineFailure(Exception):
         self.reason = reason
 
 
-class LLMLike(Protocol):
-    async def complete(self, tier: str, prompt: str, run_id: str, stage: str,
-                       system: str | None = None, max_tokens: int = 1200) -> LLMResult: ...
-
-
 class ContextLike(Protocol):
-    async def fetch(self, pro_ids: list[str]) -> OrgContextBatch: ...
+    async def fetch(self, pro_ids: list[str]) -> Any: ...
 
 
 class QueueOps:
@@ -97,9 +101,6 @@ class QueueOps:
     async def fleet_is_killed(self) -> bool:
         return await queue.fleet_is_killed(self.session)
 
-    async def reserve(self, run_id: str, amount: Decimal) -> bool:
-        return await queue.reserve_cost(self.session, run_id, amount)
-
 
 class PostgresStore:
     """Durable pipeline writes. Stage completion commits atomically."""
@@ -108,25 +109,33 @@ class PostgresStore:
         self.session = session
 
     async def load(self, job_id: str) -> tuple[JobRow, RunRow]:
-        job = (await self.session.execute(
-            select(JobRow).where(JobRow.id == job_id).execution_options(populate_existing=True)
-        )).scalar_one()
-        run = (await self.session.execute(
-            select(RunRow).where(RunRow.id == job.run_id).execution_options(populate_existing=True)
-        )).scalar_one()
+        job = (
+            await self.session.execute(
+                select(JobRow).where(JobRow.id == job_id).execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        run = (
+            await self.session.execute(
+                select(RunRow)
+                .where(RunRow.id == job.run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
         return job, run
 
     async def stage_complete(self, job_id: str, stage: str) -> bool:
         job = await self.session.get(JobRow, job_id)
         return job is not None and stage in job.checkpoint
 
-    async def complete_stage(self, job_id: str, stage: str,
-                             payload: dict[str, Any] | None = None) -> None:
+    async def complete_stage(
+        self, job_id: str, stage: str, payload: dict[str, Any] | None = None
+    ) -> None:
         await queue.checkpoint_job(self.session, job_id, stage, payload or {"done": True})
         await self.session.commit()
 
-    async def set_run_status(self, run_id: str, status: str,
-                             stop_reason: str | None = None) -> None:
+    async def set_run_status(
+        self, run_id: str, status: str, stop_reason: str | None = None
+    ) -> None:
         run = await self.session.get(RunRow, run_id)
         assert run is not None
         run.status = status
@@ -152,33 +161,36 @@ class PostgresStore:
         await self.session.commit()
         return True
 
-    async def candidates_for(self, run_id: str, pro_id: str) -> list[CandidateRow]:
-        return list((await self.session.execute(
-            select(CandidateRow).where(
-                CandidateRow.run_id == run_id, CandidateRow.pro_id == pro_id
-            ).order_by(CandidateRow.created_at, CandidateRow.id)
-        )).scalars())
+    async def rounds_for(self, run_id: str, pro_id: str) -> list[EvolveRoundRow]:
+        return list(
+            (
+                await self.session.execute(
+                    select(EvolveRoundRow)
+                    .where(EvolveRoundRow.run_id == run_id, EvolveRoundRow.pro_id == pro_id)
+                    .order_by(EvolveRoundRow.round)
+                )
+            ).scalars()
+        )
 
     async def winner_for(self, run_id: str, pro_id: str) -> WinnerRow | None:
-        return (await self.session.execute(
-            select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.pro_id == pro_id)
-        )).scalar_one_or_none()
-
-    async def winners(self, run_id: str) -> list[WinnerRow]:
-        return list((await self.session.execute(
-            select(WinnerRow).where(WinnerRow.run_id == run_id)
-        )).scalars())
+        return (
+            await self.session.execute(
+                select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.pro_id == pro_id)
+            )
+        ).scalar_one_or_none()
 
     async def measurement_for(self, winner_id: str) -> MeasurementRow | None:
-        return (await self.session.execute(
-            select(MeasurementRow).where(MeasurementRow.winner_id == winner_id)
-        )).scalar_one_or_none()
+        return (
+            await self.session.execute(
+                select(MeasurementRow).where(MeasurementRow.winner_id == winner_id)
+            )
+        ).scalar_one_or_none()
 
 
 @dataclass
 class PipelineDeps:
     store: PostgresStore
-    llm: LLMLike
+    llm: MeteredLLM
     context: ContextLike
     queue: QueueOps
     get_personas: Callable[[str], Awaitable[list[Persona]]]
@@ -193,7 +205,8 @@ class PipelineDeps:
 class PipelineState:
     job: JobRow
     run: RunRow
-    briefs: dict[str, OrgBrief] = field(default_factory=dict)
+    pro_id: str
+    brief: OrgBrief | None = None
 
 
 def _parse_json(text: str) -> Any:
@@ -214,37 +227,79 @@ async def _heartbeat(state: PipelineState, deps: PipelineDeps) -> None:
         raise LeaseLost(state.job.id)
 
 
-async def _reserve(state: PipelineState, deps: PipelineDeps, calls: int) -> None:
+async def _guard(state: PipelineState, deps: PipelineDeps) -> None:
+    """Heartbeat + kill/stop check, run before EVERY round and paid stage —
+    MeteredLLM does not heartbeat, so a long loop would otherwise let the lease
+    lapse and a second worker double-pay. A raised BudgetExhausted routes
+    through run_job's honest-label handler (fleet kill vs operator stop vs
+    budget)."""
     await _heartbeat(state, deps)
-    amount = ESTIMATED_CALL_COST_USD * calls
-    if calls and not await deps.queue.reserve(state.run.id, amount):
-        raise BudgetExhausted
+    if await deps.queue.fleet_is_killed():
+        raise BudgetExhausted("fleet_killed")
+    current = (
+        await deps.store.session.execute(select(RunRow.status).where(RunRow.id == state.run.id))
+    ).scalar_one()
+    if current == "stopped":
+        raise BudgetExhausted("operator_stop")
 
 
-async def _abstain_pro(state: PipelineState, deps: PipelineDeps, pro_id: str,
-                       rationale: str) -> None:
+async def _abstain_pro(
+    state: PipelineState, deps: PipelineDeps, pro_id: str, rationale: str
+) -> None:
     if await deps.store.winner_for(state.run.id, pro_id) is None:
-        deps.store.session.add(WinnerRow(
-            run_id=state.run.id, pro_id=pro_id, kind="abstained", rationale=rationale,
-        ))
+        deps.store.session.add(
+            WinnerRow(
+                run_id=state.run.id,
+                pro_id=pro_id,
+                kind="abstained",
+                rationale=rationale,
+            )
+        )
         await deps.store.session.commit()
 
 
-async def _react(state: PipelineState, deps: PipelineDeps, panel: PanelSelection,
-                 concept: str, stage: str, tier: str) -> list[float]:
-    await _heartbeat(state, deps)
-    panel_json = json.dumps([
-        {"persona_id": i.persona_id, "label": i.label, "family": i.family,
-         "role": i.role} for i in panel.items
-    ])
+async def _react(
+    state: PipelineState,
+    deps: PipelineDeps,
+    panel: PanelSelection,
+    cards: dict[str, dict[str, Any]],
+    concept: str,
+    channel: str,
+    stage: str,
+    tier: str,
+    call_key: str,
+) -> list[float]:
+    # The FULL persona card goes to the model — a bare label + role produced
+    # constant role-driven ratings ([6,6,4] every round). data_provenance is
+    # metadata, and empty values are dead tokens.
+    panel_json = json.dumps(
+        [
+            {
+                "persona_id": i.persona_id,
+                "role": i.role,
+                "card": {
+                    k: v
+                    for k, v in cards.get(i.persona_id, {}).items()
+                    if k != "data_provenance" and v not in (None, "", [], {})
+                },
+            }
+            for i in panel.items
+        ]
+    )
+    # Evaluation is the frozen metric: temperature 0 so the same idea scores
+    # the same number every round (Problem 1 in the design spec).
     result = await deps.llm.complete(
-        tier, reaction_prompt(panel_json, concept), state.run.id, stage,
+        call_key=call_key,
+        tier=tier,
+        prompt=reaction_prompt(panel_json, concept, channel),
+        run_id=state.run.id,
+        pro_id=state.pro_id,
+        stage=stage,
         system=REACTION_SYSTEM,
+        temperature=0.0,
     )
     try:
-        by_id = {
-            item["persona_id"]: float(item["reaction"]) for item in _parse_json(result.text)
-        }
+        by_id = {item["persona_id"]: float(item["reaction"]) for item in _parse_json(result.text)}
     except (ValueError, KeyError, TypeError) as error:
         # A garbled panel abstains this candidate; it must not crash the job.
         raise PipelineFailure(f"{stage}_reactions_unparseable: {error}") from error
@@ -254,294 +309,436 @@ async def _react(state: PipelineState, deps: PipelineDeps, panel: PanelSelection
     return [by_id[i.persona_id] for i in panel.items]
 
 
-async def _panel_for(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
-                     size: Any) -> PanelSelection:
+async def _panel_for(
+    state: PipelineState, deps: PipelineDeps, brief: OrgBrief, size: Any
+) -> tuple[PanelSelection, dict[str, dict[str, Any]]]:
+    """Select the panel AND return each member's full card features, keyed by
+    persona_id — the reaction prompt needs the substance, not just the labels
+    that panel evidence stores."""
     if brief.segment is None:
         # No segment => no shared match key => never a real panel. Abstain
         # honestly instead of guessing a wrong-segment pool.
         raise InsufficientPanelFit(size=size, available=0)
     personas = await deps.get_personas(brief.segment)
     pro = ProMatchInput(pro_id=brief.pro_id, features=dict(brief.match_feature_map()))
-    return select_panel(pro, personas, size=size)
+    panel = select_panel(pro, personas, size=size)
+    features = {p.persona_id: p.features for p in personas}
+    return panel, {i.persona_id: features.get(i.persona_id, {}) for i in panel.items}
 
 
-async def _generate_for_pro(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
-                            prompt: str, status: str) -> list[CandidateRow]:
-    await _reserve(state, deps, 1)
-    try:
-        result = await deps.llm.complete(
-            "fast", prompt, state.run.id, "generate", system=GENERATOR_SYSTEM,
-            max_tokens=N_IDEAS * 1200,
-        )
-        ideas = [Recommendation.model_validate(item) for item in _parse_json(result.text)]
-    except BudgetExhausted:
-        raise
-    except Exception as error:
-        raise PipelineFailure(f"generate_failed: {error}") from error
-    if not ideas:
-        raise PipelineFailure("generate_failed: model returned zero ideas")
-    rows = [
-        CandidateRow(
-            run_id=state.run.id, pro_id=brief.pro_id,
-            recommendation=idea.model_dump(), status=status,
-        )
-        for idea in ideas
-    ]
-    deps.store.session.add_all(rows)
-    await deps.store.session.commit()
-    return rows
+async def _resolve_abandoned_calls(state: PipelineState, deps: PipelineDeps) -> None:
+    """A crashed attempt's pending calls may have been paid without a visible
+    response: convert their worst-case reservations to honest recorded spend."""
+    session = deps.llm.records.session
+    abandoned = await deps.llm.records.abandon_stale(state.run.id, state.pro_id)
+    for row in abandoned:
+        await queue.convert_reservation_to_spend(session, state.run.id, row.reserved_usd)
+    if abandoned:
+        await session.commit()
 
 
-async def _critic_pass(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
-                       rows: list[CandidateRow]) -> None:
-    pending = [row for row in rows if not row.critics]
-    if not pending:
-        return
-    await _reserve(state, deps, 1)
-    ideas_json = json.dumps([
-        {"idea_index": i, **row.recommendation} for i, row in enumerate(pending)
-    ])
-    try:
-        result = await deps.llm.complete(
-            "fast", critic_prompt(brief.model_dump_json(), ideas_json),
-            state.run.id, "critics", system=CRITIC_SYSTEM,
-        )
-        verdicts = {int(v["idea_index"]): v for v in _parse_json(result.text)}
-    except BudgetExhausted:
-        raise
-    except Exception as error:
-        # Fail closed: a dead critic must never silently disable the only
-        # grounding gate (legacy incident class).
-        raise PipelineFailure(f"critics_failed: {error}") from error
-    for i, row in enumerate(pending):
-        verdict = verdicts.get(i, {"block_kind": "unreviewed", "reason": "no verdict returned"})
-        row.critics = {"block_kind": verdict["block_kind"], "reason": verdict.get("reason", "")}
-        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data"):
-            row.status = "suppressed"
-    await deps.store.session.commit()
-
-
-async def _screen_pro(state: PipelineState, deps: PipelineDeps, brief: OrgBrief,
-                      rows: list[CandidateRow]) -> None:
-    live = [row for row in rows if row.status in ("generated", "search")]
-    pending = [row for row in live if "screen" not in row.score]
-    if not pending:
-        return
-    try:
-        panel = await _panel_for(state, deps, brief, 3)
-    except InsufficientPanelFit as error:
-        await _abstain_pro(state, deps, brief.pro_id, f"low panel fit: {error}")
-        return
-    await _reserve(state, deps, len(pending))
-    cell = brief.calibration_cell()
-    for row in pending:
-        concept = row.recommendation["pro_facing_concept"]
-        try:
-            reactions = await _react(state, deps, panel, concept, "screen", "fast")
-        except PipelineFailure:
-            score = score_candidate([], cell or "", deps.calibration)
-        else:
-            score = score_candidate(reactions, cell or "", deps.calibration)
-            row.persona_evidence = {**row.persona_evidence, "screen": {
-                "panel": panel.model_dump(), "reactions": reactions,
-            }}
-        row.score = {**row.score, "screen": score.model_dump()}
-        await deps.store.session.commit()
-
-
-def _screen_leader(rows: list[CandidateRow]) -> CandidateRow | None:
-    scored = [
-        row for row in rows
-        if row.status in ("generated", "search")
-        and row.score.get("screen", {}).get("reduction_pp") is not None
-    ]
-    if not scored:
+async def _champion_for(
+    state: PipelineState, deps: PipelineDeps, config: LoopConfig
+) -> CandidateRow | None:
+    """Champion-authoritative lookup: the round ledger decides."""
+    ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
+    lstate = replay(ledger, config)
+    if not lstate.best_candidate_id:
         return None
-    return max(scored, key=lambda row: row.score["screen"]["reduction_pp"])
-
-
-def _clears_screen_floor(row: CandidateRow | None) -> bool:
-    if row is None:
-        return False
-    return float(row.score["screen"]["reduction_pp"]) >= MIN_REDUCTION_FLOOR_PP
+    return await deps.store.session.get(CandidateRow, lstate.best_candidate_id)
 
 
 # --- stage handlers --------------------------------------------------------
 
 
 async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    missing = [p for p in state.run.pro_ids if p not in state.briefs]
-    for pro_id in missing:
+    if state.brief is None:
         # A pro the context flow cannot describe abstains visibly; it never
         # silently vanishes from the run.
-        await _abstain_pro(state, deps, pro_id, "context missing: no org brief returned")
-    return {"orgs": len(state.briefs), "missing": missing}
+        await _abstain_pro(state, deps, state.pro_id, "context missing: no org brief returned")
+        return {"orgs": 0, "missing": [state.pro_id]}
+    return {"orgs": 1, "missing": []}
 
 
-async def _stage_generate(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    generated = 0
-    for pro_id, brief in state.briefs.items():
-        if await deps.store.candidates_for(state.run.id, pro_id):
-            continue  # resume: paid work already persisted
-        await _generate_for_pro(
-            state, deps, brief,
-            generator_prompt(brief.model_dump_json(), N_IDEAS), status="generated",
+async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
+    """The compounding win-stay/lose-shift loop. One challenger per round; the
+    frozen 3-panel screen decides win/lose mechanically; every round persists a
+    candidate row + a ledger row atomically, so re-entry replays the ledger and
+    the recorded calls make partially-paid rounds free to redo."""
+    brief = state.brief
+    if brief is None:
+        return {"skipped": "no_brief"}
+    config = LoopConfig.from_mapping(state.run.loop_config or {})
+    ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
+    lstate = replay(ledger, config)
+    history = [
+        {"round": r.round, "mechanism": r.mechanism, "score_pp": r.score_pp, "outcome": r.outcome}
+        for r in ledger
+    ]
+    await _resolve_abandoned_calls(state, deps)
+    cell = brief.calibration_cell() or ""
+    session = deps.store.session
+
+    while (reason := stop_reason(lstate, config)) is None:
+        await _guard(state, deps)
+        mode = next_mode(lstate, config)
+        rnd = lstate.round + 1
+        key = f"{state.run.id}:{state.pro_id}:r{rnd}"
+
+        best_json = None
+        if lstate.best_candidate_id is not None:
+            best = await session.get(CandidateRow, lstate.best_candidate_id)
+            best_json = json.dumps(best.recommendation) if best is not None else None
+        prompt = evolve_prompt(
+            brief.model_dump_json(),
+            mode=mode,
+            best_json=best_json,
+            history_json=json.dumps(history),
+            tried_mechanisms=list(lstate.tried_mechanisms),
         )
-        generated += 1
-    return {"pros_generated": generated}
+        try:
+            proposal = await deps.llm.complete(
+                call_key=f"{key}:generate",
+                tier="fast",
+                prompt=prompt,
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                stage="evolve",
+                system=EVOLVE_SYSTEM,
+            )
+            idea = Recommendation.model_validate(_parse_json(proposal.text))
+        except BudgetExhausted:
+            raise
+        except Exception as error:
+            raise PipelineFailure(f"evolve_failed: {error}") from error
 
+        try:
+            critic = await deps.llm.complete(
+                call_key=f"{key}:critic",
+                tier="fast",
+                prompt=critic_prompt(
+                    brief.model_dump_json(), json.dumps([{"idea_index": 0, **idea.model_dump()}])
+                ),
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                stage="critics",
+                system=CRITIC_SYSTEM,
+            )
+            verdicts = {int(v["idea_index"]): v for v in _parse_json(critic.text)}
+        except BudgetExhausted:
+            raise
+        except Exception as error:
+            # Fail closed: a dead critic must never silently disable the only
+            # grounding gate (legacy incident class).
+            raise PipelineFailure(f"critics_failed: {error}") from error
+        verdict = verdicts.get(0, {"block_kind": "unreviewed", "reason": "no verdict returned"})
+        if "block_kind" not in verdict:
+            # Fail closed on a verdict that parsed but is missing the field.
+            verdict = {"block_kind": "unreviewed", "reason": "malformed verdict"}
 
-async def _stage_critics(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    for pro_id, brief in state.briefs.items():
-        rows = await deps.store.candidates_for(state.run.id, pro_id)
-        await _critic_pass(state, deps, brief, rows)
-    return {}
+        score: CandidateScore | None = None
+        panel = None
+        reactions: list[float] | None = None
+        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data"):
+            outcome, score_pp = "suppressed", None  # a loss, no persona spend
+        else:
+            try:
+                panel, cards = await _panel_for(state, deps, brief, 3)
+            except InsufficientPanelFit as error:
+                await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
+                return {"rounds": lstate.round, "stop": "panel_unavailable"}
+            try:
+                reactions = await _react(
+                    state,
+                    deps,
+                    panel,
+                    cards,
+                    idea.pro_facing_concept,
+                    idea.channel,
+                    "screen",
+                    "fast",
+                    call_key=f"{key}:screen",
+                )
+            except PipelineFailure:
+                # The evaluation was unavailable this round — an honest loss
+                # with no score at all, never a fabricated one.
+                outcome, score_pp = "unavailable", None
+            else:
+                score = score_candidate(reactions, cell, deps.calibration)
+                score_pp = score.reduction_pp
+                outcome = (
+                    "win" if is_win(lstate, score_pp, config, MIN_REDUCTION_FLOOR_PP) else "lose"
+                )
 
-
-async def _stage_screen(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    for pro_id, brief in state.briefs.items():
-        rows = await deps.store.candidates_for(state.run.id, pro_id)
-        await _screen_pro(state, deps, brief, rows)
-    return {}
-
-
-async def _stage_search(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    """One bounded directive round for pros whose leader missed the floor."""
-    retried = 0
-    for pro_id, brief in state.briefs.items():
-        if await deps.store.winner_for(state.run.id, pro_id) is not None:
-            continue
-        rows = await deps.store.candidates_for(state.run.id, pro_id)
-        if _clears_screen_floor(_screen_leader(rows)):
-            continue
-        if any(row.status == "search" for row in rows):
-            continue  # resume: search round already ran
-        if not rows:
-            continue
-        tried = sorted({row.recommendation["mechanism"] for row in rows})
-        new_rows = await _generate_for_pro(
-            state, deps, brief,
-            search_directive_prompt(brief.model_dump_json(), N_IDEAS, tried),
-            status="search",
+        status = {"win": "champion", "suppressed": "suppressed"}.get(outcome, "discarded")
+        candidate = CandidateRow(
+            run_id=state.run.id,
+            pro_id=state.pro_id,
+            recommendation=idea.model_dump(),
+            status=status,
+            round=rnd,
+            critics={"block_kind": verdict["block_kind"], "reason": verdict.get("reason", "")},
         )
-        await _critic_pass(state, deps, brief, new_rows)
-        await _screen_pro(state, deps, brief, await deps.store.candidates_for(
-            state.run.id, pro_id))
-        retried += 1
-    return {"pros_retried": retried}
+        if score is not None:
+            candidate.score = {"screen": score.model_dump()}
+        if reactions is not None and panel is not None:
+            candidate.persona_evidence = {
+                "screen": {
+                    "panel": panel.model_dump(),
+                    "reactions": reactions,
+                }
+            }
+        if outcome == "win" and lstate.best_candidate_id is not None:
+            dethroned = await session.get(CandidateRow, lstate.best_candidate_id)
+            if dethroned is not None:
+                dethroned.status = "discarded"
+        session.add(candidate)
+        await session.flush()
+        lstate = apply_round(
+            lstate,
+            mechanism=idea.mechanism,
+            candidate_id=candidate.id,
+            score_pp=score_pp,
+            outcome=outcome,
+            config=config,
+        )
+        session.add(
+            EvolveRoundRow(
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                round=rnd,
+                mechanism=idea.mechanism,
+                candidate_id=candidate.id,
+                outcome=outcome,
+                score_pp=score_pp,
+            )
+        )
+        await session.commit()  # candidate + ledger row land atomically
+        history.append(
+            {"round": rnd, "mechanism": idea.mechanism, "score_pp": score_pp, "outcome": outcome}
+        )
+
+    return {"rounds": lstate.round, "stop": reason, "best_score": lstate.best_score}
 
 
 async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    for pro_id, brief in state.briefs.items():
-        if await deps.store.winner_for(state.run.id, pro_id) is not None:
-            continue
-        leader = _screen_leader(await deps.store.candidates_for(state.run.id, pro_id))
-        if not _clears_screen_floor(leader):
-            continue  # resolves to no_action at score
-        assert leader is not None
-        if "final" in leader.score:
-            continue  # resume
-        try:
-            panel = await _panel_for(state, deps, brief, 5)
-        except InsufficientPanelFit as error:
-            await _abstain_pro(state, deps, pro_id, f"low panel fit: {error}")
-            continue
-        await _reserve(state, deps, 1)
-        cell = brief.calibration_cell()
-        try:
-            reactions = await _react(
-                state, deps, panel, leader.recommendation["pro_facing_concept"],
-                "final", "deep",
-            )
-        except PipelineFailure:
-            score = score_candidate([], cell or "", deps.calibration)
-        else:
-            score = score_candidate(reactions, cell or "", deps.calibration)
-            leader.persona_evidence = {**leader.persona_evidence, "final": {
-                "panel": panel.model_dump(), "reactions": reactions,
-            }}
-        leader.score = {**leader.score, "final": score.model_dump()}
-        await deps.store.session.commit()
+    """Held-out confirmation: the champion faces the 5-persona panel once.
+    ponytail: the loop optimizes the cheap 3-panel proxy; this single held-out
+    check catches the catastrophic proxy/judge disagreement (→ no_action). No
+    mid-loop revalidation until the proxy is proven to drift."""
+    brief = state.brief
+    if brief is None or await deps.store.winner_for(state.run.id, state.pro_id) is not None:
+        return {}
+    config = LoopConfig.from_mapping(state.run.loop_config or {})
+    champion = await _champion_for(state, deps, config)
+    if champion is None:
+        return {}  # resolves to no_action at score
+    if "final" in champion.score:
+        return {}  # resume
+    await _resolve_abandoned_calls(state, deps)  # a crashed final call may have paid
+    try:
+        panel, cards = await _panel_for(state, deps, brief, 5)
+    except InsufficientPanelFit as error:
+        await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
+        return {}
+    await _guard(state, deps)
+    cell = brief.calibration_cell() or ""
+    try:
+        reactions = await _react(
+            state,
+            deps,
+            panel,
+            cards,
+            champion.recommendation["pro_facing_concept"],
+            champion.recommendation.get("channel", "none"),
+            "final",
+            "deep",
+            call_key=f"{state.run.id}:{state.pro_id}:final",
+        )
+    except PipelineFailure:
+        score = score_candidate([], cell, deps.calibration)
+    else:
+        score = score_candidate(reactions, cell, deps.calibration)
+        champion.persona_evidence = {
+            **champion.persona_evidence,
+            "final": {
+                "panel": panel.model_dump(),
+                "reactions": reactions,
+            },
+        }
+    champion.score = {**champion.score, "final": score.model_dump()}
+    await deps.store.session.commit()
     return {}
 
 
 async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    for pro_id in state.briefs:
-        if await deps.store.winner_for(state.run.id, pro_id) is not None:
-            continue
-        leader = _screen_leader(await deps.store.candidates_for(state.run.id, pro_id))
-        final = leader.score.get("final") if leader is not None else None
-        if leader is None or final is None:
-            deps.store.session.add(WinnerRow(
-                run_id=state.run.id, pro_id=pro_id, kind="no_action",
+    if await deps.store.winner_for(state.run.id, state.pro_id) is not None:
+        return {}
+    config = LoopConfig.from_mapping(state.run.loop_config or {})
+    champion = await _champion_for(state, deps, config)
+    final = champion.score.get("final") if champion is not None else None
+    if champion is None or final is None:
+        deps.store.session.add(
+            WinnerRow(
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                kind="no_action",
                 rationale="no_candidate_cleared_floor",
-            ))
-            await deps.store.session.commit()
-            continue
-        outcome = select_winner({leader.id: CandidateScore.model_validate(final)})
-        if isinstance(outcome, Winner):
-            deps.store.session.add(WinnerRow(
-                run_id=state.run.id, pro_id=pro_id, kind="winner",
-                candidate_id=leader.id,
-                rationale=leader.recommendation["manager_rationale"],
-                evidence={"final": final, "screen": leader.score.get("screen", {}),
-                          "org_id": state.briefs[pro_id].org_uuid},
-            ))
-        else:
-            assert isinstance(outcome, NoAction)
-            deps.store.session.add(WinnerRow(
-                run_id=state.run.id, pro_id=pro_id, kind="no_action",
-                rationale=outcome.reason,
-            ))
+            )
+        )
         await deps.store.session.commit()
+        return {}
+    outcome = select_winner({champion.id: CandidateScore.model_validate(final)})
+    if isinstance(outcome, Winner):
+        deps.store.session.add(
+            WinnerRow(
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                kind="winner",
+                candidate_id=champion.id,
+                rationale=champion.recommendation["manager_rationale"],
+                evidence={
+                    "final": final,
+                    "screen": champion.score.get("screen", {}),
+                    "org_id": state.brief.org_uuid if state.brief else "",
+                },
+            )
+        )
+    else:
+        assert isinstance(outcome, NoAction)
+        deps.store.session.add(
+            WinnerRow(
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                kind="no_action",
+                rationale=outcome.reason,
+            )
+        )
+    await deps.store.session.commit()
     return {}
 
 
-async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    for winner in await deps.store.winners(state.run.id):
-        if winner.kind != "winner":
-            continue
-        if await deps.store.measurement_for(winner.id) is not None:
-            continue  # resume
-        candidate = await deps.store.session.get(CandidateRow, winner.candidate_id)
-        assert candidate is not None
-        await _reserve(state, deps, 1)
-        context = WinnerContext(
-            run_id=state.run.id, pro_id=winner.pro_id, winner_id=winner.id,
-            mechanism=candidate.recommendation["mechanism"],
-            title=candidate.recommendation["title"],
+class _KeyedMeasureLLM:
+    """Adapts the metered facade to measurement.py's legacy signature, pinning
+    the deterministic call key — measurement.py stays untouched."""
+
+    def __init__(self, llm: MeteredLLM, pro_id: str) -> None:
+        self.llm = llm
+        self.pro_id = pro_id
+
+    async def complete(
+        self,
+        tier: str,
+        prompt: str,
+        run_id: str,
+        stage: str,
+        system: str | None = None,
+        max_tokens: int = 1200,
+    ) -> LLMResult:
+        return await self.llm.complete(
+            call_key=f"{run_id}:{self.pro_id}:measure",
+            tier=tier,
+            prompt=prompt,
+            run_id=run_id,
+            pro_id=self.pro_id,
+            stage=stage,
+            system=system,
+            max_tokens=max_tokens,
         )
-        try:
-            plan = await deps.create_plan(context, deps.llm, deps.metric_catalog)
-        except UnmeasurableWinner as error:
-            # Never invent a measurement source: an unmeasurable winner abstains.
-            # Transient failures (429 storms, outages) propagate instead — a
-            # validated winner must survive retryable infrastructure trouble.
-            winner.kind = "abstained"
-            winner.rationale = f"unmeasurable: {error}"
-            await deps.store.session.commit()
-            continue
-        deps.store.session.add(MeasurementRow(
-            run_id=state.run.id, winner_id=winner.id,
-            indicators=[item.model_dump() for item in plan.indicators],
-        ))
+
+
+async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
+    winner = await deps.store.winner_for(state.run.id, state.pro_id)
+    if winner is None or winner.kind != "winner":
+        return {}
+    if await deps.store.measurement_for(winner.id) is not None:
+        return {}  # resume
+    await _resolve_abandoned_calls(state, deps)  # a crashed measure call may have paid
+    candidate = await deps.store.session.get(CandidateRow, winner.candidate_id)
+    assert candidate is not None
+    await _guard(state, deps)
+    context = WinnerContext(
+        run_id=state.run.id,
+        pro_id=winner.pro_id,
+        winner_id=winner.id,
+        mechanism=candidate.recommendation["mechanism"],
+        title=candidate.recommendation["title"],
+    )
+    try:
+        plan = await deps.create_plan(
+            context,
+            _KeyedMeasureLLM(deps.llm, state.pro_id),
+            deps.metric_catalog,
+        )
+    except UnmeasurableWinner as error:
+        # Never invent a measurement source: an unmeasurable winner abstains.
+        # Transient failures (429 storms, outages) propagate instead — a
+        # validated winner must survive retryable infrastructure trouble.
+        winner.kind = "abstained"
+        winner.rationale = f"unmeasurable: {error}"
         await deps.store.session.commit()
+        return {}
+    deps.store.session.add(
+        MeasurementRow(
+            run_id=state.run.id,
+            winner_id=winner.id,
+            indicators=[item.model_dump() for item in plan.indicators],
+        )
+    )
+    await deps.store.session.commit()
     return {}
 
 
 async def _stage_ready(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
-    winners = await deps.store.winners(state.run.id)
+    # Ordering rule: commit this job's terminal status FIRST, then finalize
+    # from committed rows only — two concurrent finishers either both compute
+    # the identical aggregate or the later one does.
+    await deps.store.finish_job(state.job.id, "done")
+    status = await finalize_run(deps.store.session, state.run.id)
+    return {"run_status": status or "pending_siblings"}
+
+
+async def finalize_run(session: AsyncSession, run_id: str) -> str | None:
+    """Champion-authoritative, idempotent run finalization. Computes the
+    aggregate status from committed job + winner rows once every per-Pro job is
+    terminal; a no-op otherwise or when the run is already terminal."""
+    run = (
+        await session.execute(
+            select(RunRow).where(RunRow.id == run_id).execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status in TERMINAL_RUN_STATUSES:
+        return None
+    jobs = list(
+        (
+            await session.execute(
+                select(JobRow)
+                .where(JobRow.run_id == run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    )
+    if not jobs or any(j.status not in ("done", "failed", "stopped") for j in jobs):
+        return None
+    winners = list(
+        (await session.execute(select(WinnerRow).where(WinnerRow.run_id == run_id))).scalars()
+    )
     kinds = {w.kind for w in winners}
-    job = (await deps.store.session.execute(
-        select(JobRow).where(JobRow.id == state.job.id).execution_options(populate_existing=True)
-    )).scalar_one()  # checkpoint is written via raw SQL; bypass the identity map
-    context_missing = bool((job.checkpoint.get("context") or {}).get("missing"))
-    stop_reason = None
-    if context_missing:
+    failed = [j for j in jobs if j.status == "failed"]
+    context_missing = [
+        w for w in winners if w.kind == "abstained" and w.rationale.startswith("context missing")
+    ]
+    reason = None
+    if failed and len(failed) == len(jobs):
+        status = "failed"
+        reason = f"all_pro_jobs_failed: {len(failed)} of {len(jobs)}"
+    elif failed:
+        status = "degraded"
+        reason = f"pro_jobs_failed: {len(failed)} of {len(jobs)}"
+    elif context_missing:
         # Infrastructure gaps are degradation, not a legitimate abstention.
         status = "degraded"
-        missing = job.checkpoint["context"]["missing"]
-        stop_reason = f"context_missing: {len(missing)} pros had no org brief"
+        reason = f"context_missing: {len(context_missing)} pros had no org brief"
     elif "winner" in kinds:
         status = "complete"
     elif "no_action" in kinds:
@@ -550,9 +747,42 @@ async def _stage_ready(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         status = "abstained"
     else:
         status = "no_action"
-    await deps.store.set_run_status(state.run.id, status, stop_reason)
-    await deps.store.finish_job(state.job.id, "done")
-    return {"status": status}
+    first_failure = next(
+        (
+            j.checkpoint.get("failure", {}).get("reason")
+            for j in failed
+            if j.checkpoint.get("failure", {}).get("reason")
+        ),
+        None,
+    )
+    if reason is not None and first_failure:
+        reason = f"{reason}; first: {first_failure}"
+    run.status = status
+    run.stop_reason = reason
+    await session.commit()
+    return status
+
+
+# Non-terminal, non-degraded runs whose jobs are ALL terminal: the crash window
+# between the last job's terminal commit and its finalize_run call.
+_STALLED_RUNS_SQL = text("""
+SELECT r.id FROM runs r
+WHERE r.status NOT IN ('complete', 'no_action', 'abstained', 'stopped', 'failed', 'degraded')
+  AND EXISTS (SELECT 1 FROM jobs j WHERE j.run_id = r.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM jobs j
+    WHERE j.run_id = r.id AND j.status NOT IN ('done', 'failed', 'stopped')
+  )
+""")
+
+
+async def finalize_stalled_runs(session: AsyncSession) -> int:
+    """Self-heal runs stranded by a crash after their last job went terminal
+    but before finalize_run committed. Called from the worker idle beat."""
+    run_ids = [row.id for row in (await session.execute(_STALLED_RUNS_SQL)).all()]
+    for run_id in run_ids:
+        await finalize_run(session, run_id)
+    return len(run_ids)
 
 
 @dataclass
@@ -566,10 +796,7 @@ class WinnerContext:
 
 STAGE_HANDLERS = {
     "context": _stage_context,
-    "generate": _stage_generate,
-    "critics": _stage_critics,
-    "screen": _stage_screen,
-    "search": _stage_search,
+    "evolve": _stage_evolve,
     "final": _stage_final,
     "score": _stage_score,
     "measure": _stage_measure,
@@ -580,25 +807,36 @@ STAGE_HANDLERS = {
 async def run_job(job_id: str, deps: PipelineDeps) -> None:
     store = deps.store
     job, run = await store.load(job_id)
-    if run.status in _TERMINAL_RUN_STATUSES:
+    if job.stage == "recommend":
+        # ponytail: pre-evolve deploys left run-scoped jobs the new per-Pro
+        # pipeline cannot execute; fail them honestly instead of guessing.
+        await store.finish_job(job_id, "failed")
+        await store.set_run_status(run.id, "failed", "superseded_deploy")
         return
+    if run.status in TERMINAL_RUN_STATUSES:
+        if job.status not in ("done", "failed", "stopped"):
+            await store.finish_job(job_id, "stopped")
+        return
+    assert job.pro_id is not None, "per-pro jobs always carry a pro_id"
     run_id = run.id  # plain strings survive session rollbacks; ORM instances expire
-    state = PipelineState(job=job, run=run)
+    state = PipelineState(job=job, run=run, pro_id=job.pro_id)
 
     resumed = any(stage in job.checkpoint for stage in STAGES)
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
     # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
     try:
-        batch = await deps.context.fetch(list(run.pro_ids))
+        batch = await deps.context.fetch([state.pro_id])
     except ContextUnavailable as error:
         if await store.requeue_job(job_id):
             await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
         else:
             await store.set_run_status(run_id, "failed", f"context_unavailable: {error}")
         return
-    state.briefs = {brief.pro_id: brief for brief in batch.organizations
-                    if brief.pro_id in run.pro_ids}
+    state.brief = next(
+        (brief for brief in batch.organizations if brief.pro_id == state.pro_id),
+        None,
+    )
 
     for stage in STAGES:
         if await store.stage_complete(job_id, stage):
@@ -607,9 +845,9 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             await store.set_run_status(run_id, "stopped", "fleet_killed")
             await store.finish_job(job_id, "stopped")
             return
-        current = (await store.session.execute(
-            select(RunRow.status).where(RunRow.id == run_id)
-        )).scalar_one()
+        current = (
+            await store.session.execute(select(RunRow.status).where(RunRow.id == run_id))
+        ).scalar_one()
         if current == "stopped":  # operator killed this run mid-flight
             await store.finish_job(job_id, "stopped")
             return
@@ -624,16 +862,32 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             if await deps.queue.fleet_is_killed():
                 await store.set_run_status(run_id, "stopped", "fleet_killed")
             else:
-                status = (await store.session.execute(
-                    select(RunRow.status).where(RunRow.id == run_id)
-                )).scalar_one()
+                status = (
+                    await store.session.execute(select(RunRow.status).where(RunRow.id == run_id))
+                ).scalar_one()
                 if status != "stopped":  # operator kill keeps its own reason
                     await store.set_run_status(run_id, "stopped", "budget_exhausted")
             await store.finish_job(job_id, "stopped")
             return
         except PipelineFailure as error:
             await store.session.rollback()
-            await store.set_run_status(run_id, "failed", error.reason)
+            # This Pro's job fails; sibling Pros keep working. finalize_run
+            # aggregates to failed/degraded once every job is terminal.
+            await queue.checkpoint_job(store.session, job_id, "failure", {"reason": error.reason})
             await store.finish_job(job_id, "failed")
+            await finalize_run(store.session, run_id)
+            return
+        except Exception as error:  # noqa: BLE001 — the honest-failure backstop
+            # Unhandled crash: record the cause and burn the attempt NOW. The
+            # alternative is an anonymous 10-minute lease-expiry loop ending in
+            # a reaped job with no recorded reason (the persona-429 / deep-400
+            # incident). Recorded calls make the retry free to resume.
+            await store.session.rollback()
+            await queue.checkpoint_job(
+                store.session, job_id, "failure", {"reason": f"unhandled at {stage}: {error!r}"}
+            )
+            if await store.requeue_job(job_id):
+                return  # attempts remain: a fresh claim resumes from checkpoints
+            await finalize_run(store.session, run_id)
             return
         await store.complete_stage(job_id, stage, payload)

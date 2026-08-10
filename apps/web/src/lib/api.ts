@@ -100,6 +100,13 @@ export const login = (password: string) =>
 export const createRun = (body: RunCreate) =>
   api<RunView>("/runs", { method: "POST", body: JSON.stringify(body) });
 
+export interface FleetSettings {
+  loop_defaults: Record<string, number>;
+  max_in_flight_llm_calls: number;
+}
+
+export const getFleetSettings = () => api<FleetSettings>("/fleet/settings");
+
 export const getRun = (id: string) => api<RunDetail>(`/runs/${id}`);
 
 export const killRun = (id: string) =>

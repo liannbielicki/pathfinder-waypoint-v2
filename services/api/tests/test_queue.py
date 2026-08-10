@@ -18,12 +18,17 @@ from waypoint.queue import (
 from waypoint.tables import FleetControlRow, JobRow, RunRow
 
 
-async def seed_run(session: AsyncSession, run_id: str = "run-1",
-                   limit: str = "100.00") -> None:
-    session.add(RunRow(
-        id=run_id, pro_ids=["pro_1"], audience_query="q", audience_run="r",
-        channels=["email"], cost_limit=Decimal(limit),
-    ))
+async def seed_run(session: AsyncSession, run_id: str = "run-1", limit: str = "100.00") -> None:
+    session.add(
+        RunRow(
+            id=run_id,
+            pro_ids=["pro_1"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal(limit),
+        )
+    )
     session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
     await session.commit()
 
@@ -89,10 +94,16 @@ async def test_cost_reservation_never_exceeds_run_limit(db_session) -> None:
 
 
 async def test_cost_reservation_never_exceeds_day_limit(db_session) -> None:
-    db_session.add(RunRow(
-        id="run-1", pro_ids=["pro_1"], audience_query="q", audience_run="r",
-        channels=["email"], cost_limit=Decimal("100.00"),
-    ))
+    db_session.add(
+        RunRow(
+            id="run-1",
+            pro_ids=["pro_1"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal("100.00"),
+        )
+    )
     db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1.00")))
     await db_session.commit()
     assert await reserve_cost(db_session, "run-1", Decimal("0.75")) is True
@@ -144,14 +155,24 @@ async def test_heartbeat_fails_when_ownership_was_lost(db_session) -> None:
 
 
 async def test_day_budget_rolls_over_to_a_new_day(db_session) -> None:
-    db_session.add(RunRow(
-        id="run-1", pro_ids=["pro_1"], audience_query="q", audience_run="r",
-        channels=["email"], cost_limit=Decimal("100.00"),
-    ))
-    db_session.add(FleetControlRow(
-        id=1, day="2020-01-01", day_cost_limit=Decimal("1.00"),
-        day_cost_reserved=Decimal("1.00"),
-    ))
+    db_session.add(
+        RunRow(
+            id="run-1",
+            pro_ids=["pro_1"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal("100.00"),
+        )
+    )
+    db_session.add(
+        FleetControlRow(
+            id=1,
+            day="2020-01-01",
+            day_cost_limit=Decimal("1.00"),
+            day_cost_reserved=Decimal("1.00"),
+        )
+    )
     await db_session.commit()
     # Yesterday's exhausted budget must not brick today.
     assert await reserve_cost(db_session, "run-1", Decimal("0.75")) is True
@@ -174,7 +195,7 @@ async def test_reservation_refuses_a_stopped_run(db_session) -> None:
 
 async def test_attempts_exhausted_jobs_are_reaped_as_failed(db_session) -> None:
     await seed_run(db_session)
-    job_id = await enqueue(db_session, "run-1", stage="recommend")
+    job_id = await enqueue(db_session, "run-1", stage="pro", pro_id="pro_1")
     await db_session.commit()
     job = await db_session.get(JobRow, job_id)
     assert job is not None
@@ -185,14 +206,65 @@ async def test_attempts_exhausted_jobs_are_reaped_as_failed(db_session) -> None:
     assert await claim_job(db_session, "worker-a") is None  # unclaimable
     reaped = await fail_stale_jobs(db_session)
     await db_session.commit()
-    assert reaped == 1
+    assert reaped == [(job_id, "run-1")]
     await db_session.refresh(job)
     assert job.status == "failed"
+    # The run is NOT force-failed here: per-Pro sibling jobs may still be
+    # working. The caller finalizes each affected run (pipeline.finalize_run).
     run = await db_session.get(RunRow, "run-1")
     assert run is not None
     await db_session.refresh(run)
-    assert run.status == "failed"
-    assert run.stop_reason == "attempts_exhausted"
+    assert run.status == "queued"
+
+
+async def test_reconcile_moves_reserved_to_actual_spend(db_session) -> None:
+    from waypoint.queue import reconcile_cost
+
+    await seed_run(db_session)
+    assert await reserve_cost(db_session, "run-1", Decimal("2.00")) is True
+    await db_session.commit()
+    await reconcile_cost(db_session, "run-1", Decimal("2.00"), Decimal("0.30"))
+    await db_session.commit()
+    run = await db_session.get(RunRow, "run-1")
+    fleet = await db_session.get(FleetControlRow, 1)
+    await db_session.refresh(run)
+    await db_session.refresh(fleet)
+    assert run.cost_reserved == Decimal("0.00")
+    assert run.cost_spent == Decimal("0.30")
+    # The day ledger keeps the actual spend reserved, releasing only the delta.
+    assert fleet.day_cost_reserved == Decimal("0.30")
+
+
+async def test_reconcile_after_day_rollover_leaves_the_new_day_untouched(db_session) -> None:
+    from waypoint.queue import reconcile_cost
+
+    await seed_run(db_session)
+    assert await reserve_cost(db_session, "run-1", Decimal("2.00")) is True
+    fleet = await db_session.get(FleetControlRow, 1)
+    fleet.day = "2020-01-01"  # the reservation happened "yesterday"
+    fleet.day_cost_reserved = Decimal("0.00")  # rollover already zeroed it
+    await db_session.commit()
+    await reconcile_cost(db_session, "run-1", Decimal("2.00"), Decimal("0.30"))
+    await db_session.commit()
+    await db_session.refresh(fleet)
+    assert fleet.day_cost_reserved == Decimal("0.00")  # never negative, never eaten
+    run = await db_session.get(RunRow, "run-1")
+    await db_session.refresh(run)
+    assert run.cost_spent == Decimal("0.30")
+
+
+async def test_abandoned_reservation_converts_to_spend(db_session) -> None:
+    from waypoint.queue import convert_reservation_to_spend
+
+    await seed_run(db_session)
+    assert await reserve_cost(db_session, "run-1", Decimal("1.50")) is True
+    await db_session.commit()
+    await convert_reservation_to_spend(db_session, "run-1", Decimal("1.50"))
+    await db_session.commit()
+    run = await db_session.get(RunRow, "run-1")
+    await db_session.refresh(run)
+    assert run.cost_reserved == Decimal("0.00")
+    assert run.cost_spent == Decimal("1.50")  # honest upper bound: we may have paid
 
 
 async def test_checkpoint_persists_stage_payload(db_session) -> None:
@@ -202,8 +274,46 @@ async def test_checkpoint_persists_stage_payload(db_session) -> None:
     await checkpoint_job(db_session, job_id, "context", {"org_count": 1})
     await checkpoint_job(db_session, job_id, "generate", {"candidates": 3})
     await db_session.commit()
-    row = (await db_session.execute(
-        select(JobRow).where(JobRow.id == job_id)
-    )).scalar_one()
+    row = (await db_session.execute(select(JobRow).where(JobRow.id == job_id))).scalar_one()
     assert row.checkpoint["context"] == {"org_count": 1}
     assert row.checkpoint["generate"] == {"candidates": 3}
+
+
+async def test_stalled_run_with_all_terminal_jobs_is_finalized(db_session) -> None:
+    """Crash window: the last job committed terminal but finalize_run never ran.
+    The worker idle beat's sweep must heal it."""
+    from waypoint.pipeline import finalize_stalled_runs
+    from waypoint.tables import WinnerRow
+
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="pro", pro_id="pro_1")
+    await db_session.commit()
+    job = await db_session.get(JobRow, job_id)
+    job.status = "done"
+    run = await db_session.get(RunRow, "run-1")
+    run.status = "running"
+    db_session.add(WinnerRow(run_id="run-1", pro_id="pro_1", kind="winner", rationale="r"))
+    # A sibling run still working must be left alone.
+    db_session.add(
+        RunRow(
+            id="run-2",
+            pro_ids=["pro_2"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal("100.00"),
+            status="running",
+        )
+    )
+    await db_session.flush()
+    await enqueue(db_session, "run-2", stage="pro", pro_id="pro_2")
+    await db_session.commit()
+
+    assert await finalize_stalled_runs(db_session) == 1
+    run = await db_session.get(RunRow, "run-1")
+    await db_session.refresh(run)
+    assert run.status == "complete"
+    other = await db_session.get(RunRow, "run-2")
+    await db_session.refresh(other)
+    assert other.status == "running"
+    assert await finalize_stalled_runs(db_session) == 0  # idempotent

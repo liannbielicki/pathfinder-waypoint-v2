@@ -1,11 +1,9 @@
 "use client";
 
+import { Fragment, useState } from "react";
 import { TERMINAL_STATES, type RunDetail } from "@/lib/api";
 
-const PIPELINE_STAGES = [
-  "context", "generate", "critics", "screen", "search", "final",
-  "score", "measure", "ready",
-];
+const PIPELINE_STAGES = ["context", "evolve", "final", "score", "measure", "ready"];
 
 const NEXT_ACTION: Record<string, string> = {
   queued: "Waiting for a worker to claim the job.",
@@ -20,6 +18,15 @@ const NEXT_ACTION: Record<string, string> = {
   no_action: "No action is the recommendation. No handoff will be sent.",
 };
 
+// Plain-language labels for the immutable per-run loop snapshot (audit view).
+const SETTING_LABELS: [string, string][] = [
+  ["MAX_ROUNDS", "Max rounds per Pro"],
+  ["MAX_NO_IMPROVE", "Dry mechanisms before stopping"],
+  ["PATIENCE", "Refine attempts per mechanism"],
+  ["KEEP_DELTA_PP", "Min improvement to keep (pp)"],
+  ["WIN_THRESHOLD_PP", "Stop-early reduction (pp)"],
+];
+
 export function RunStatus({
   run,
   onKill,
@@ -27,18 +34,36 @@ export function RunStatus({
   run: RunDetail;
   onKill: () => void;
 }) {
+  const [killArmed, setKillArmed] = useState(false);
+  const [killConfirm, setKillConfirm] = useState("");
   const terminal = TERMINAL_STATES.has(run.status);
   const stages = run.stages ?? {};
+  const loopConfig = (run.loop_config ?? {}) as Record<string, number>;
+  const decided = run.winners.length;
+  const counts = {
+    winner: run.winners.filter((w) => w.kind === "winner").length,
+    no_action: run.winners.filter((w) => w.kind === "no_action").length,
+    abstained: run.winners.filter((w) => w.kind === "abstained").length,
+  };
+  const spentSomething = Number(run.cost_spent_usd) > 0;
+
   return (
     <section className="panel" aria-label="Run status">
       <h2>
         Run <code>{run.id}</code>
       </h2>
-      <p role="status" className={`state state-${run.status}`}>
+      <p role="status" aria-live="polite" className={`state state-${run.status}`}>
         {run.status.replace("_", " ")}
       </p>
       {run.stop_reason && <p className="stop-reason">Stop reason: {run.stop_reason}</p>}
+      {["stopped", "failed", "degraded"].includes(run.status) && spentSomething && (
+        <p className="stop-reason">Paid work may have occurred before the stop.</p>
+      )}
       <p>{NEXT_ACTION[run.status] ?? "Unknown state — treat as degraded."}</p>
+      <p>
+        {decided} of {run.pro_ids.length} Pros decided · {counts.winner} winner /{" "}
+        {counts.no_action} no-action / {counts.abstained} abstained
+      </p>
 
       <h3>Stages</h3>
       <ol className="stages">
@@ -55,6 +80,28 @@ export function RunStatus({
         <code>{run.audience_run}</code>
       </p>
 
+      {SETTING_LABELS.some(([key]) => key in loopConfig) && (
+        <section aria-label="Run settings">
+          <h3>Run settings</h3>
+          <p className="helper">
+            The immutable loop snapshot this run used. Edit defaults on the
+            start form; a running run never changes.
+          </p>
+          <dl className="run-settings">
+            {SETTING_LABELS.filter(([key]) => key in loopConfig).map(
+              ([key, label]) => (
+                <Fragment key={key}>
+                  <dt>
+                    {label} <small className="technical">{key}</small>
+                  </dt>
+                  <dd>{loopConfig[key]}</dd>
+                </Fragment>
+              ),
+            )}
+          </dl>
+        </section>
+      )}
+
       <h3>Cost</h3>
       <p>
         spent ${run.cost_spent_usd} · reserved ${run.cost_reserved_usd} · limit $
@@ -62,9 +109,28 @@ export function RunStatus({
       </p>
       {run.killed && <p className="error">Fleet kill switch is active.</p>}
 
-      <button type="button" onClick={onKill} disabled={terminal}>
-        Kill run
-      </button>
+      {!terminal && !killArmed && (
+        <button type="button" onClick={() => setKillArmed(true)}>
+          Kill run
+        </button>
+      )}
+      {!terminal && killArmed && (
+        <>
+          <label htmlFor="kill-confirm">Type &quot;kill&quot; to confirm</label>
+          <input
+            id="kill-confirm"
+            value={killConfirm}
+            onChange={(e) => setKillConfirm(e.target.value)}
+          />
+          <button
+            type="button"
+            disabled={killConfirm !== "kill"}
+            onClick={onKill}
+          >
+            Confirm kill
+          </button>
+        </>
+      )}
     </section>
   );
 }

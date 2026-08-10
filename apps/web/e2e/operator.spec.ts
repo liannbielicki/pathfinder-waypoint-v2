@@ -122,7 +122,10 @@ test("kill stops the run from the UI", async ({ page }) => {
     return route.fulfill({ json: { ...RUN_BASE, status: "stopped" } });
   });
   await page.goto("/runs/run-e2e");
-  await page.getByRole("button", { name: /kill run/i }).click();
+  // Two-step kill: arm, type the confirmation word, then confirm.
+  await page.getByRole("button", { name: /^kill run$/i }).click();
+  await page.getByLabel(/type "kill" to confirm/i).fill("kill");
+  await page.getByRole("button", { name: /confirm kill/i }).click();
   await expect(page.getByRole("status")).toHaveText(/stopped/);
   await expect(page.getByText(/operator_kill/)).toBeVisible();
 });

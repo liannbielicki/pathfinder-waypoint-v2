@@ -6,18 +6,28 @@ Run with: python -m waypoint.worker
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
 from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from waypoint import queue
+from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.db import make_engine, make_session_factory
-from waypoint.llm import LLMGateway, Pricing
+from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
-from waypoint.pipeline import PipelineDeps, PostgresStore, QueueOps, run_job
+from waypoint.pipeline import (
+    PipelineDeps,
+    PostgresStore,
+    QueueOps,
+    finalize_stalled_runs,
+    run_job,
+)
 from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import load_calibration
 from waypoint.settings import Settings
@@ -34,9 +44,13 @@ async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> Non
     """KILL_SWITCH and DAY_COST_USD are env-owned; apply them on startup."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is None:
-        session.add(FleetControlRow(
-            id=1, killed=settings.KILL_SWITCH, day_cost_limit=settings.DAY_COST_USD,
-        ))
+        session.add(
+            FleetControlRow(
+                id=1,
+                killed=settings.KILL_SWITCH,
+                day_cost_limit=settings.DAY_COST_USD,
+            )
+        )
     else:
         fleet.killed = settings.KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
@@ -61,12 +75,18 @@ async def load_personas(settings: Settings, segment: str) -> list[Persona]:
         follow_redirects=False,
         headers={"X-API-Key": settings.PERSONA_TOKEN.get_secret_value()},
     ) as client:
-        response = await client.post(
-            f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
-            json={**PERSONA_PANEL_REQUEST, "segment": segment},
-        )
-        response.raise_for_status()
-        payload = response.json()
+
+        async def fetch() -> httpx.Response:
+            response = await client.post(
+                f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
+                json={**PERSONA_PANEL_REQUEST, "segment": segment},
+            )
+            response.raise_for_status()
+            return response
+
+        # The persona-cards service rate-limits aggressively until its quota
+        # is raised: back off through 429s instead of burning a job attempt.
+        payload = (await retry_rate_limit(fetch, attempts=5, backoff_seconds=3.0)).json()
     items = payload["personas"]
     if items:
         # ponytail: heuristic field mapping — the persona-cards service's item
@@ -76,7 +96,7 @@ async def load_personas(settings: Settings, segment: str) -> list[Persona]:
     return [_adapt_persona(item, payload["subtype_version"], segment) for item in items]
 
 
-def _adapt_persona(item: dict, snapshot_version: str, segment: str) -> Persona:
+def _adapt_persona(item: dict[str, Any], snapshot_version: str, segment: str) -> Persona:
     """Map a persona-cards item onto waypoint's Persona. `family` and `label`
     fall back through likely names, then to persona_id; every non-id field is
     kept as a feature (scoring reads only the permitted subset)."""
@@ -90,8 +110,11 @@ def _adapt_persona(item: dict, snapshot_version: str, segment: str) -> Persona:
     features = {k: v for k, v in item.items() if k != "persona_id"}
     features["segment"] = item.get("segment_key") or segment
     return Persona(
-        persona_id=pid, family=str(family), label=str(label),
-        features=features, snapshot_version=snapshot_version,
+        persona_id=pid,
+        family=str(family),
+        label=str(label),
+        features=features,
+        snapshot_version=snapshot_version,
     )
 
 
@@ -129,25 +152,45 @@ async def main() -> None:
     async with factory() as session:
         await apply_fleet_settings(session, settings)
 
+    # Fleet slot locks are session-level advisory locks: they belong to the
+    # CONNECTION, so the limiter owns one dedicated connection for the worker's
+    # lifetime — a crash releases the slot when the connection dies.
+    slots_connection = await engine.connect()
+    slots = FleetSlots(slots_connection)
+
     while True:
         async with factory() as session:
             job = await claim_job(session, worker_id, lease_seconds=LEASE_SECONDS)
             await session.commit()
             if job is None:
-                # Idle beat: surface any job that died with no attempts left.
+                # Idle beat: surface any job that died with no attempts left,
+                # then finalize every run whose jobs are all terminal — this
+                # covers reaped runs AND runs stranded by a crash between the
+                # last job's terminal commit and its finalize_run call.
                 reaped = await fail_stale_jobs(session)
-                if reaped:
-                    log.warning("reaped %d attempts-exhausted jobs as failed", reaped)
                 await session.commit()
+                if reaped:
+                    log.warning("reaped %d attempts-exhausted jobs as failed", len(reaped))
+                healed = await finalize_stalled_runs(session)
+                if healed:
+                    log.warning("finalized %d stalled runs", healed)
                 await asyncio.sleep(POLL_SECONDS)
                 continue
             log.info("worker %s claimed job %s (run %s)", worker_id, job.id, job.run_id)
-            # The gateway gets its own session so paid-usage rows survive
-            # pipeline rollbacks.
+            # The calls/usage session is separate from the pipeline session so
+            # paid facts (usage rows, call records, reservations, reconciles)
+            # survive pipeline rollbacks.
             async with factory() as usage_session:
                 deps = PipelineDeps(
                     store=PostgresStore(session),
-                    llm=LLMGateway(anthropic, usage_session, pricing),
+                    llm=MeteredLLM(
+                        gateway=LLMGateway(anthropic, usage_session, pricing),
+                        records=RecordedCalls(usage_session),
+                        slots=slots,
+                        pricing=pricing,
+                        reserve=partial(queue.reserve_cost, usage_session),
+                        reconcile=partial(queue.reconcile_cost, usage_session),
+                    ),
                     context=context,
                     queue=QueueOps(session),
                     get_personas=persona_source,

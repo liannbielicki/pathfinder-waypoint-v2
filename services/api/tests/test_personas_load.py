@@ -25,6 +25,35 @@ SETTINGS = Settings(
 )
 
 
+async def test_load_personas_backs_off_through_rate_limits(
+    httpx_mock: HTTPXMock, monkeypatch
+) -> None:
+    """A persona-cards 429 must be retried with backoff, not crash the job."""
+    sleeps: list[float] = []
+
+    async def instant(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("waypoint.llm.asyncio.sleep", instant)
+    httpx_mock.add_response(status_code=429)
+    httpx_mock.add_response(status_code=429)
+    httpx_mock.add_response(
+        json={
+            "panel_id": "panel_1",
+            "subtype_version": "v3",
+            "segment": "2A",
+            "n_personas": 1,
+            "personas": [{"persona_id": "p1", "segment_key": "2A"}],
+        }
+    )
+
+    personas = await load_personas(SETTINGS, "2A")
+
+    assert personas[0].persona_id == "p1"
+    assert len(httpx_mock.get_requests()) == 3
+    assert sleeps == [3.0, 6.0]  # exponential backoff between attempts
+
+
 async def test_load_personas_posts_panel_request(httpx_mock: HTTPXMock) -> None:
     # Flat item like the real service: the card's segment is under `segment_key`
     # (NOT `segment`), plus persona_id + usage booleans.

@@ -147,3 +147,43 @@ button:disabled {
 code {
   font-size: 0.9em;
 }
+
+/* Run-setup groups: hierarchy over decoration. */
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-block: 1rem;
+  padding: 0.5rem 1rem 1rem;
+}
+
+legend {
+  font-weight: 600;
+  padding-inline: 0.25rem;
+}
+
+.helper {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  margin-block: 0.25rem 0.5rem;
+}
+
+.technical {
+  font-weight: 400;
+  opacity: 0.65;
+}
+
+.fleet-safety p {
+  margin-block: 0.25rem;
+}
+
+.run-settings {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.run-settings dd {
+  margin: 0;
+  text-align: right;
+}

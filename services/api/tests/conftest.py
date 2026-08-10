@@ -15,8 +15,16 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 _TABLES = (
-    "measurements", "handoffs", "winners", "jobs", "candidates",
-    "runs", "llm_usage", "fleet_control",
+    "measurements",
+    "handoffs",
+    "winners",
+    "jobs",
+    "evolve_rounds",
+    "llm_calls",
+    "candidates",
+    "runs",
+    "llm_usage",
+    "fleet_control",
 )
 
 
@@ -65,7 +73,10 @@ async def db_session(
 import json
 from decimal import Decimal
 
-from waypoint.llm import LLMResult, RateLimitExhausted
+from waypoint import queue as queue_module
+from waypoint.calls import MeteredLLM, RecordedCalls
+from waypoint.llm import LLMResult, Pricing, RateLimitExhausted
+from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
 from waypoint.models import MeasurementIndicator, MeasurementPlan
 from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgContextBatch
 from waypoint.personas import Persona
@@ -75,6 +86,14 @@ from waypoint.scoring import load_calibration
 from waypoint.tables import FleetControlRow, RunRow
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+FAKE_PRICING = Pricing(
+    models={"fast": "model-fast", "deep": "model-deep"},
+    usd_per_mtok={
+        "model-fast": (Decimal(10), Decimal(20)),
+        "model-deep": (Decimal(30), Decimal(60)),
+    },
+)
 
 
 class InjectedCrash(Exception):
@@ -92,40 +111,50 @@ async def _fake_get_personas(segment: str) -> list[Persona]:
     # Fixture personas are all segment "1A"; the fake pool ignores the arg.
     return PERSONAS
 
-IDEAS_JSON = json.dumps([
-    {
-        "title": f"Idea {i}",
-        "mechanism": mech,
-        "actions": [f"do_{mech}"],
-        "pro_facing_concept": f"Concept {i} the pro would experience.",
-        "manager_rationale": f"Rationale {i} for the manager.",
-        "channel": "sms",
-        "risk": "May not land.",
-    }
-    for i, mech in enumerate(["invoice_delivery", "feature_adoption", "review_requests"])
-])
 
-CRITICS_JSON = json.dumps([
-    {"idea_index": i, "block_kind": "none", "reason": "grounded"} for i in range(3)
-])
+def idea_json(mechanism: str, i: int = 0) -> str:
+    """One evolve-round challenger, as the model would return it."""
+    return json.dumps(
+        {
+            "title": f"Idea {i} via {mechanism}",
+            "mechanism": mechanism,
+            "actions": [f"do_{mechanism}"],
+            "pro_facing_concept": f"Concept {i} the pro would experience.",
+            "manager_rationale": f"Rationale {i} for the manager.",
+            "channel": "sms",
+            "risk": "May not land.",
+        }
+    )
+
+
+CRITIC_OK = json.dumps([{"idea_index": 0, "block_kind": "none", "reason": "grounded"}])
+CRITIC_BLOCK = json.dumps(
+    [{"idea_index": 0, "block_kind": "ungrounded", "reason": "invented AR balance"}]
+)
+MEASURE_JSON = json.dumps({"indicators": [{"key": "invoices_sent"}]})
 
 
 def reactions_json(value: float) -> str:
-    return json.dumps([
-        {"persona_id": p.persona_id, "reaction": value} for p in PERSONAS
-    ])
+    return json.dumps([{"persona_id": p.persona_id, "reaction": value} for p in PERSONAS])
 
 
 class FakeLLM:
+    """Scriptable per-stage gateway fake.
+
+    A response value may be a str (returned every call), a list (consumed one
+    per call; the last entry repeats), or an Exception inside a list (raised
+    on that call). Stages: evolve (generation), critics, screen, final, measure.
+    """
+
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[dict] = []  # stage, tier, temperature, prompt
         self._fail: set[str] = set()
-        self.responses: dict[str, str] = {
-            "generate": IDEAS_JSON,
-            "critics": CRITICS_JSON,
-            "screen": reactions_json(5.3),
+        self.responses: dict[str, object] = {
+            "evolve": [idea_json("invoice_delivery")],
+            "critics": CRITIC_OK,
+            "screen": [reactions_json(5.3)],
             "final": reactions_json(5.3),
-            "search": IDEAS_JSON,
+            "measure": MEASURE_JSON,
         }
 
     @property
@@ -133,19 +162,46 @@ class FakeLLM:
         return len(self.calls)
 
     def calls_for(self, stage: str) -> int:
-        return sum(1 for s, _ in self.calls if s == stage)
+        return sum(1 for c in self.calls if c["stage"] == stage)
+
+    def prompts_for(self, stage: str) -> list[str]:
+        return [c["prompt"] for c in self.calls if c["stage"] == stage]
 
     def fail_stage(self, stage: str) -> None:
         self._fail.add(stage)
 
-    async def complete(self, tier: str, prompt: str, run_id: str, stage: str,
-                       system: str | None = None, max_tokens: int = 1200) -> LLMResult:
-        self.calls.append((stage, tier))
+    def _next(self, stage: str) -> str:
+        value = self.responses[stage]
+        if isinstance(value, list):
+            item = value.pop(0) if len(value) > 1 else value[0]
+        else:
+            item = value
+        if isinstance(item, Exception):
+            raise item
+        assert isinstance(item, str)
+        return item
+
+    async def complete(
+        self,
+        tier: str,
+        prompt: str,
+        run_id: str,
+        stage: str,
+        system: str | None = None,
+        max_tokens: int = 1200,
+        temperature: float | None = None,
+    ) -> LLMResult:
+        self.calls.append(
+            {"stage": stage, "tier": tier, "temperature": temperature, "prompt": prompt}
+        )
         if stage in self._fail:
             raise RateLimitExhausted("injected model failure")
         return LLMResult(
-            text=self.responses[stage], model=f"fake-{tier}",
-            input_tokens=10, output_tokens=5, cost_usd=Decimal("0.001"),
+            text=self._next(stage),
+            model=f"fake-{tier}",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=Decimal("0.001"),
         )
 
 
@@ -175,27 +231,62 @@ class CrashableStore(PostgresStore):
 
 
 async def fake_create_plan(winner, llm, catalog) -> MeasurementPlan:
-    return MeasurementPlan(indicators=[MeasurementIndicator(
-        key="invoices_sent", label="Invoices sent", direction="increase",
-        source="billing", window_days=30, rationale="The proposal sends invoices.",
-    )])
+    return MeasurementPlan(
+        indicators=[
+            MeasurementIndicator(
+                key="invoices_sent",
+                label="Invoices sent",
+                direction="increase",
+                source="billing",
+                window_days=30,
+                rationale="The proposal sends invoices.",
+            )
+        ]
+    )
+
+
+class NoFleetSlots:
+    """No-op stand-in for the fleet limiter; tests don't exercise the cap."""
+
+    async def acquire(self) -> int:
+        return 0
+
+    async def release(self, slot: int) -> None:
+        pass
 
 
 class FakeDeps(PipelineDeps):
     def __init__(self, session) -> None:
         store = CrashableStore(session)
+        gateway = FakeLLM()
+
+        async def reserve(run_id: str, amount: Decimal) -> bool:
+            return await queue_module.reserve_cost(session, run_id, amount)
+
+        async def reconcile(run_id: str, reserved: Decimal, actual: Decimal) -> None:
+            await queue_module.reconcile_cost(session, run_id, reserved, actual)
+
         super().__init__(
             store=store,
-            llm=FakeLLM(),
+            llm=MeteredLLM(
+                gateway=gateway,
+                records=RecordedCalls(session),
+                slots=NoFleetSlots(),
+                pricing=FAKE_PRICING,
+                reserve=reserve,
+                reconcile=reconcile,
+            ),
             context=FakeContext(),
             queue=QueueOps(session),
             get_personas=_fake_get_personas,
             calibration=load_calibration(
                 Path(__file__).parents[1] / "data" / "reaction_churn_calibration_cards.json"
             ),
-            create_plan=fake_create_plan,
+            create_plan=create_measurement_plan,
+            metric_catalog=METRIC_CATALOG,
         )
         self.db = session
+        self.gateway = gateway
 
     def fail_after(self, stage: str) -> None:
         self.store.crash_after_stage = stage
@@ -212,18 +303,22 @@ async def deps(db_session: AsyncSession) -> FakeDeps:
 @pytest.fixture
 async def seeded_job(db_session: AsyncSession):
     run = RunRow(
-        id="run-pipe", pro_ids=["pro_1"], audience_query="audience_v7",
-        audience_run="2026-08-06T18:00:00Z", channels=["sms"],
+        id="run-pipe",
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms"],
         cost_limit=Decimal("100.00"),
     )
     db_session.add(run)
     db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
     await db_session.flush()
-    job_id = await enqueue(db_session, run.id, stage="recommend")
+    job_id = await enqueue(db_session, run.id, stage="pro", pro_id="pro_1")
     await db_session.commit()
 
     class Seeded:
         id = job_id
         run_id = run.id
+        pro_id = "pro_1"
 
     return Seeded()
