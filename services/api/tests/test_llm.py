@@ -6,8 +6,21 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import waypoint.llm as llm_module
-from waypoint.llm import LLMGateway, Pricing, RateLimitExhausted, UsageMissing
+from waypoint.llm import LLMGateway, Pricing, RateLimitExhausted, UsageMissing, extract_json
 from waypoint.tables import UsageRow
+
+
+def test_extract_json_handles_clean_fenced_and_prose_wrapped_output() -> None:
+    assert extract_json('{"a": 1}') == {"a": 1}
+    assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert extract_json('Here you go:\n```json\n[{"a": 1}]\n```\nHope that helps!') == [{"a": 1}]
+    assert extract_json('Sure! {"a": 1} is my pick.') == {"a": 1}
+    assert extract_json('{"a": 1} (note the trailing "}" in prose)') == {"a": 1}
+
+
+def test_extract_json_raises_on_no_json_at_all() -> None:
+    with pytest.raises(ValueError):
+        extract_json("I would pick the invoices metric.")
 
 TEST_PRICING = Pricing(
     models={"fast": "model-fast", "deep": "model-deep"},

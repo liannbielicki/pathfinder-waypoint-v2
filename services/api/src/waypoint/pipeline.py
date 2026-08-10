@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.llm import LLMResult
+from waypoint.llm import LLMResult, extract_json
 from waypoint.loop import (
     LoopConfig,
     apply_round,
@@ -209,13 +209,6 @@ class PipelineState:
     brief: OrgBrief | None = None
 
 
-def _parse_json(text: str) -> Any:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
-    return json.loads(cleaned)
-
-
 async def _heartbeat(state: PipelineState, deps: PipelineDeps) -> None:
     """Extend the lease before paid work; abort if another worker owns the job."""
     if deps.worker_id is None:
@@ -299,7 +292,7 @@ async def _react(
         temperature=0.0,
     )
     try:
-        by_id = {item["persona_id"]: float(item["reaction"]) for item in _parse_json(result.text)}
+        by_id = {item["persona_id"]: float(item["reaction"]) for item in extract_json(result.text)}
     except (ValueError, KeyError, TypeError) as error:
         # A garbled panel abstains this candidate; it must not crash the job.
         raise PipelineFailure(f"{stage}_reactions_unparseable: {error}") from error
@@ -406,7 +399,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 stage="evolve",
                 system=EVOLVE_SYSTEM,
             )
-            idea = Recommendation.model_validate(_parse_json(proposal.text))
+            idea = Recommendation.model_validate(extract_json(proposal.text))
         except BudgetExhausted:
             raise
         except Exception as error:
@@ -424,7 +417,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 stage="critics",
                 system=CRITIC_SYSTEM,
             )
-            verdicts = {int(v["idea_index"]): v for v in _parse_json(critic.text)}
+            verdicts = {int(v["idea_index"]): v for v in extract_json(critic.text)}
         except BudgetExhausted:
             raise
         except Exception as error:
@@ -521,6 +514,53 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     return {"rounds": lstate.round, "stop": reason, "best_score": lstate.best_score}
 
 
+async def _final_reactions(
+    state: PipelineState,
+    deps: PipelineDeps,
+    panel: PanelSelection,
+    cards: dict[str, dict[str, Any]],
+    champion: CandidateRow,
+) -> tuple[list[float], str, str | None]:
+    """Held-out reactions: deep tier first, downgrading to the fast tier on any
+    deep failure (provider error or garbled output) instead of losing the Pro.
+    Returns (reactions, tier_used, deep_failure). Budget/ownership exceptions
+    re-raise untouched; a both-tiers failure raises PipelineFailure carrying
+    both causes."""
+
+    async def react(tier: str, key_suffix: str) -> list[float]:
+        return await _react(
+            state,
+            deps,
+            panel,
+            cards,
+            champion.recommendation["pro_facing_concept"],
+            champion.recommendation.get("channel", "none"),
+            "final",
+            tier,
+            call_key=f"{state.run.id}:{state.pro_id}:{key_suffix}",
+        )
+
+    try:
+        return await react("deep", "final"), "deep", None
+    except (BudgetExhausted, LeaseLost):
+        raise  # budget/ownership semantics, never a model failure
+    except Exception as error:  # noqa: BLE001 — any deep failure downgrades
+        deep_failure = (
+            error.reason
+            if isinstance(error, PipelineFailure)
+            else f"{type(error).__name__}: {error}"
+        )[:500]
+        # The deep failure may have outlived the lease or a kill-switch flip:
+        # re-guard before paying for the fallback (every paid call is guarded).
+        await _guard(state, deps)
+        try:
+            return await react("fast", "final_fast"), "fast", deep_failure
+        except PipelineFailure as fast_error:
+            raise PipelineFailure(
+                f"deep: {deep_failure}; fast: {fast_error.reason}"
+            ) from fast_error
+
+
 async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     """Held-out confirmation: the champion faces the 5-persona panel once.
     ponytail: the loop optimizes the cheap 3-panel proxy; this single held-out
@@ -544,19 +584,15 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     await _guard(state, deps)
     cell = brief.calibration_cell() or ""
     try:
-        reactions = await _react(
-            state,
-            deps,
-            panel,
-            cards,
-            champion.recommendation["pro_facing_concept"],
-            champion.recommendation.get("channel", "none"),
-            "final",
-            "deep",
-            call_key=f"{state.run.id}:{state.pro_id}:final",
+        reactions, tier_used, deep_failure = await _final_reactions(
+            state, deps, panel, cards, champion
         )
-    except PipelineFailure:
-        score = score_candidate([], cell, deps.calibration)
+    except PipelineFailure as error:
+        # Keep the REAL cause on the stored score: a bare "no_reactions" reads
+        # as "the panel said no" downstream, when the evaluation just failed.
+        score = score_candidate([], cell, deps.calibration).model_copy(
+            update={"abstain_reason": error.reason}
+        )
     else:
         score = score_candidate(reactions, cell, deps.calibration)
         champion.persona_evidence = {
@@ -564,6 +600,8 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
             "final": {
                 "panel": panel.model_dump(),
                 "reactions": reactions,
+                "tier": tier_used,
+                **({"deep_failure": deep_failure} if deep_failure else {}),
             },
         }
     champion.score = {**champion.score, "final": score.model_dump()}
@@ -606,12 +644,17 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         )
     else:
         assert isinstance(outcome, NoAction)
+        # "all_candidates_abstained" alone reads as a panel judgment when the
+        # evaluation may simply have failed — surface the recorded cause.
+        abstain_reason = final.get("abstain_reason")
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
                 kind="no_action",
-                rationale=outcome.reason,
+                rationale=(
+                    f"{outcome.reason}: {abstain_reason}" if abstain_reason else outcome.reason
+                ),
             )
         )
     await deps.store.session.commit()

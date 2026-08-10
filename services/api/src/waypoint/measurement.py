@@ -10,7 +10,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from waypoint.llm import LLMResult
+from waypoint.llm import LLMResult, extract_json
 from waypoint.models import MeasurementIndicator, MeasurementPlan
 
 METRIC_CATALOG: dict[str, MeasurementIndicator] = {
@@ -91,7 +91,9 @@ async def create_measurement_plan(
         "fast", measurement_prompt(winner, list(catalog)), winner.run_id, "measure",
     )
     try:
-        selected = MeasurementSelection.model_validate_json(proposal.text)
+        # extract_json tolerates markdown fences and surrounding prose — raw
+        # model_validate_json here turned real winners into "unmeasurable".
+        selected = MeasurementSelection.model_validate(extract_json(proposal.text))
     except ValueError as error:
         raise UnmeasurableWinner(f"unparseable indicator selection: {error}") from error
     if not 1 <= len(selected.indicators) <= 2:

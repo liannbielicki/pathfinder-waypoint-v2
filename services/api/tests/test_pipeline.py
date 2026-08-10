@@ -3,7 +3,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.calls import BudgetExhausted  # noqa: F401 — re-exported contract
+from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.measurement import UnmeasurableWinner
 from waypoint.pipeline import finalize_run, run_job
@@ -542,3 +542,61 @@ async def test_transient_measure_failure_retries_instead_of_abstaining(
     ).scalar_one()
     assert winner.kind == "winner"  # a validated winner survives a 429 storm
     assert await run_status(deps.db, seeded_job.run_id) not in ("abstained", "failed")
+
+
+async def test_deep_final_failure_falls_back_to_fast_tier(deps: FakeDeps, seeded_job) -> None:
+    # The deep tier dying must not lose the Pro: the held-out check downgrades
+    # to the fast tier, honestly labeled, and the run still produces a winner.
+    deps.gateway.responses["final"] = [RateLimitExhausted("deep tier down"), reactions_json(GOOD)]
+    await run_job(seeded_job.id, deps)
+    final_tiers = [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"]
+    assert final_tiers == ["deep", "fast"]
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"
+    champion = (
+        await deps.db.execute(
+            select(CandidateRow).where(
+                CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "champion"
+            )
+        )
+    ).scalar_one()
+    assert champion.persona_evidence["final"]["tier"] == "fast"
+    assert "deep tier down" in champion.persona_evidence["final"]["deep_failure"]
+
+
+async def test_both_final_tiers_failing_abstains_with_both_reasons(
+    deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["final"] = [RateLimitExhausted("deep down"), "no json here at all"]
+    await run_job(seeded_job.id, deps)
+    champion = (
+        await deps.db.execute(
+            select(CandidateRow).where(
+                CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "champion"
+            )
+        )
+    ).scalar_one()
+    final_score = champion.score["final"]
+    assert final_score["abstained"] is True
+    assert "deep down" in final_score["abstain_reason"]  # the deep failure survives
+    assert "unparseable" in final_score["abstain_reason"]  # and the fast one
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "no_action"
+    # The winner-level rationale carries the real cause, not just the label
+    # the incident was named after.
+    assert "deep down" in winner.rationale
+
+
+async def test_budget_exhausted_on_deep_final_never_falls_back(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # The fallback must not spend past an exhausted budget: BudgetExhausted
+    # re-raises untouched, with no fast-tier attempt.
+    deps.gateway.responses["final"] = [BudgetExhausted("out of budget")]
+    await run_job(seeded_job.id, deps)
+    assert [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"] == ["deep"]
+    assert await run_status(deps.db, seeded_job.run_id) == "stopped"
