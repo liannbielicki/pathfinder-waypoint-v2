@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import waypoint.llm as llm_module
 from waypoint.llm import LLMGateway, Pricing, RateLimitExhausted, UsageMissing
 from waypoint.tables import UsageRow
 
@@ -142,6 +143,13 @@ class FakeTemperatureRejected(Exception):
         return "invalid_request_error: temperature: Extra inputs are not permitted"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_temperature_memo() -> None:
+    # The rejection memo is module-level (process lifetime in prod); tests
+    # must not leak learned models into each other.
+    llm_module._temperature_rejected.clear()
+
+
 async def test_temperature_400_retries_once_without_it(db_session: AsyncSession) -> None:
     fake = FakeAnthropic([FakeTemperatureRejected(), _response("ok", 10, 5)])
     gateway = LLMGateway(fake, db_session, pricing=TEST_PRICING)
@@ -149,6 +157,17 @@ async def test_temperature_400_retries_once_without_it(db_session: AsyncSession)
     assert result.text == "ok"
     assert fake.calls[0]["temperature"] == 0.0  # first attempt as requested
     assert "temperature" not in fake.calls[1]  # retried without the param
+
+
+async def test_temperature_rejection_is_remembered_per_model(db_session: AsyncSession) -> None:
+    # After one live rejection the gateway stops sending temperature to that
+    # model — no doomed 400 round trip on every deep call.
+    fake = FakeAnthropic([FakeTemperatureRejected(), _response("ok", 10, 5), _response("ok2", 10, 5)])
+    gateway = LLMGateway(fake, db_session, pricing=TEST_PRICING)
+    await gateway.complete("deep", "p", "run-1", "final", temperature=0.0)
+    await gateway.complete("deep", "p", "run-1", "final", temperature=0.0)
+    assert len(fake.calls) == 3  # 400 + clean retry, then ONE clean call
+    assert "temperature" not in fake.calls[2]
 
 
 async def test_unrelated_400_still_raises(db_session: AsyncSession) -> None:

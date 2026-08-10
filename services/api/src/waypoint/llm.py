@@ -131,6 +131,12 @@ class AnthropicLike(Protocol):
     def messages(self) -> Any: ...
 
 
+# Models learned (from a live 400) to reject the temperature param. Process
+# lifetime on purpose: gateways are built per job, and re-learning costs one
+# free failed request, so a set beats config that would go stale.
+_temperature_rejected: set[str] = set()
+
+
 class LLMGateway:
     def __init__(
         self,
@@ -164,7 +170,7 @@ class LLMGateway:
         }
         if system is not None:
             kwargs["system"] = system
-        if temperature is not None:
+        if temperature is not None and model not in _temperature_rejected:
             kwargs["temperature"] = temperature
         try:
             response = await retry_rate_limit(
@@ -178,11 +184,12 @@ class LLMGateway:
             # not exist there; drop the param and retry once rather than
             # crash-looping the job (the deep-tier final-call incident).
             if (
-                temperature is None
+                "temperature" not in kwargs
                 or getattr(error, "status_code", None) != 400
                 or "temperature" not in str(error)
             ):
                 raise
+            _temperature_rejected.add(model)  # skip the doomed attempt next time
             kwargs.pop("temperature")
             response = await retry_rate_limit(
                 lambda: self.client.messages.create(**kwargs),

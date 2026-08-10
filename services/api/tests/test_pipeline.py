@@ -120,6 +120,8 @@ async def test_reaction_prompts_carry_full_persona_cards(deps: FakeDeps, seeded_
         prompt = deps.gateway.prompts_for(stage)[0]
         assert '"card"' in prompt
         assert "trade_bucket" in prompt  # a card fact, not just a label
+        assert "BECOME that persona" in prompt  # embodiment, not outside judging
+        assert "SMS text message" in prompt  # the idea's channel frames delivery
 
 
 async def test_round_ledger_is_written_per_round(deps: FakeDeps, seeded_job) -> None:

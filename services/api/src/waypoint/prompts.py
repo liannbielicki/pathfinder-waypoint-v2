@@ -6,7 +6,7 @@ the grounding hard rule, seeds-not-final-copy, and the internal-jargon ban.
 Org context is untrusted input and is always fenced.
 """
 
-PROMPT_VERSION = "waypoint_v1"
+PROMPT_VERSION = "waypoint_v2"  # v2: reaction embodiment + delivery-channel framing
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -67,8 +67,18 @@ REACTION_SYSTEM = (
 )
 
 
-def reaction_prompt(panel_json: str, concept: str) -> str:
-    return f"""For EACH persona below, react to the proposed touch as that persona would.
+_CHANNEL_FRAMING = {
+    "sms": "an SMS text message on your phone, read in a spare moment between jobs",
+    "email": "an email in your inbox, skimmed alongside the day's other mail",
+}
+
+
+def reaction_prompt(panel_json: str, concept: str, channel: str) -> str:
+    framing = _CHANNEL_FRAMING.get(channel, "a message from Housecall Pro")
+    return f"""For EACH persona below, BECOME that persona: you run their business, carry
+their concerns, and use (or ignore) HCP the way their card says. You just
+received the proposed touch as {framing}. React as
+that person actually would in that moment — not as an outside judge.
 
 Each persona carries a full card: business facts, primary concerns, HCP usage
 patterns, objection profile, tech comfort, communication style, and stance.
