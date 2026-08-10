@@ -31,9 +31,7 @@ LCM_URL = "https://lcm.example/handoff"
 
 
 def load_parity_cases() -> list[dict[str, Any]]:
-    return json.loads(
-        (Path(__file__).parent / "fixtures" / "parity_cases.json").read_text()
-    )
+    return json.loads((Path(__file__).parent / "fixtures" / "parity_cases.json").read_text())
 
 
 @dataclass
@@ -57,32 +55,35 @@ class ProductionStack:
         deps = FakeDeps(self.session)
         deps.create_plan = create_measurement_plan
         deps.metric_catalog = METRIC_CATALOG
-        deps.llm.responses["measure"] = json.dumps(
-            {"indicators": [{"key": "invoices_sent"}]}
-        )
+        deps.gateway.responses["measure"] = json.dumps({"indicators": [{"key": "invoices_sent"}]})
         run = RunRow(
-            pro_ids=[pro_id], audience_query="audience_v7",
-            audience_run="2026-08-06T18:00:00Z", channels=["sms"],
+            pro_ids=[pro_id],
+            audience_query="audience_v7",
+            audience_run="2026-08-06T18:00:00Z",
+            channels=["sms"],
             cost_limit=Decimal("100.00"),
         )
         self.session.add(run)
         if await self.session.get(FleetControlRow, 1) is None:
             self.session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
         await self.session.flush()
-        job_id = await enqueue(self.session, run.id, stage="recommend")
+        job_id = await enqueue(self.session, run.id, stage="pro", pro_id=pro_id)
         await self.session.commit()
         await run_job(job_id, deps)
 
-        winner = (await self.session.execute(
-            select(WinnerRow).where(WinnerRow.run_id == run.id)
-        )).scalar_one()
+        winner = (
+            await self.session.execute(select(WinnerRow).where(WinnerRow.run_id == run.id))
+        ).scalar_one()
         batch = await deps.context.fetch([pro_id])
 
         if winner.kind != "winner":
             return ParityResult(
-                outcome=winner.kind, org_id=batch.organizations[0].org_uuid,
-                context_version=batch.contract_version, panel_sizes=[],
-                measurement_plan=None, handoff=None,
+                outcome=winner.kind,
+                org_id=batch.organizations[0].org_uuid,
+                context_version=batch.contract_version,
+                panel_sizes=[],
+                measurement_plan=None,
+                handoff=None,
             )
 
         candidate = await self.session.get(CandidateRow, winner.candidate_id)
@@ -91,16 +92,20 @@ class ProductionStack:
             len(candidate.persona_evidence["screen"]["panel"]["items"]),
             len(candidate.persona_evidence["final"]["panel"]["items"]),
         ]
-        measurement = (await self.session.execute(
-            select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
-        )).scalar_one()
+        measurement = (
+            await self.session.execute(
+                select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
+            )
+        ).scalar_one()
         plan = MeasurementPlan.model_validate({"indicators": measurement.indicators})
 
         self.httpx_mock.add_response(url=LCM_URL, json={"status": "accepted"})
         client = LCMClient(url=LCM_URL, token="t", session=self.session)
         await client.handoff(
             {
-                "run_id": run.id, "winner_id": winner.id, "pro_id": winner.pro_id,
+                "run_id": run.id,
+                "winner_id": winner.id,
+                "pro_id": winner.pro_id,
                 "org_id": winner.evidence["org_id"],
                 "recommendation": candidate.recommendation,
                 "score": winner.evidence["final"],
@@ -112,9 +117,12 @@ class ProductionStack:
         payload = json.loads(request.content)
         payload["winner"] = payload.pop("winner")  # keep key order irrelevant
         return ParityResult(
-            outcome="winner", org_id=winner.evidence["org_id"],
-            context_version=batch.contract_version, panel_sizes=panel_sizes,
-            measurement_plan=plan, handoff=payload,
+            outcome="winner",
+            org_id=winner.evidence["org_id"],
+            context_version=batch.contract_version,
+            panel_sizes=panel_sizes,
+            measurement_plan=plan,
+            handoff=payload,
         )
 
 
@@ -124,8 +132,9 @@ def production_stack(db_session: AsyncSession, httpx_mock: HTTPXMock) -> Product
 
 
 @pytest.mark.parametrize("case", load_parity_cases(), ids=lambda c: c["case"])
-async def test_build_contract_parity(case: dict[str, Any],
-                                     production_stack: ProductionStack) -> None:
+async def test_build_contract_parity(
+    case: dict[str, Any], production_stack: ProductionStack
+) -> None:
     result = await production_stack.run(case["pro_id"])
     assert result.outcome == case["expected_outcome"]
     assert result.org_id == case["expected_org_id"]

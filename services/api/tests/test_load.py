@@ -47,8 +47,13 @@ class SyntheticContext(FakeContext):
             contract_version=CONTRACT_VERSION,
             organizations=[
                 OrgBrief(
-                    org_uuid=pro_id, plan_tier="basic", tenure_band="0-3m",
-                    org_size_band="solo", vertical="hvac", open_ar_band="low",
+                    org_uuid=pro_id,
+                    segment="1A",
+                    plan_tier="basic",
+                    tenure_band="0-3m",
+                    org_size_band="solo",
+                    vertical="hvac",
+                    open_ar_band="low",
                 )
                 for pro_id in pro_ids
             ],
@@ -62,20 +67,24 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> list[str]:
         for chunk_start in range(0, TOTAL_PROS, PROS_PER_RUN):
             pro_ids = [f"pro_{i}" for i in range(chunk_start, chunk_start + PROS_PER_RUN)]
             run = RunRow(
-                pro_ids=pro_ids, audience_query="audience_v7",
-                audience_run="2026-08-06T18:00:00Z", channels=["sms"],
+                pro_ids=pro_ids,
+                audience_query="audience_v7",
+                audience_run="2026-08-06T18:00:00Z",
+                channels=["sms"],
                 cost_limit=Decimal("25.00"),
             )
             session.add(run)
             await session.flush()
-            await enqueue(session, run.id, stage="recommend")
+            for pro_id in pro_ids:
+                await enqueue(session, run.id, stage="pro", pro_id=pro_id)
             run_ids.append(run.id)
         await session.commit()
         return run_ids
 
 
-async def _worker(factory: async_sessionmaker[AsyncSession], worker_id: str,
-                  stats: dict[str, int]) -> None:
+async def _worker(
+    factory: async_sessionmaker[AsyncSession], worker_id: str, stats: dict[str, int]
+) -> None:
     while True:
         async with factory() as session:
             job = await claim_job(session, worker_id, lease_seconds=600)
@@ -86,7 +95,7 @@ async def _worker(factory: async_sessionmaker[AsyncSession], worker_id: str,
             deps = FakeDeps(session)
             deps.context = SyntheticContext()
             await run_job(job.id, deps)
-            stats["llm_calls"] += deps.llm.call_count
+            stats["llm_calls"] += deps.gateway.call_count
 
 
 @pytest.mark.load
@@ -99,14 +108,14 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
     stats = {"claims": 0, "llm_calls": 0}
 
     started = time.monotonic()
-    await asyncio.gather(*[
-        _worker(db_session_factory, f"load-worker-{i}", stats) for i in range(WORKERS)
-    ])
+    await asyncio.gather(
+        *[_worker(db_session_factory, f"load-worker-{i}", stats) for i in range(WORKERS)]
+    )
     pipeline_elapsed = time.monotonic() - started
 
     # --- integrity: no double claims, no lost checkpoints, no hidden failures.
     jobs = (await db_session.execute(select(JobRow))).scalars().all()
-    assert len(jobs) == TOTAL_PROS // PROS_PER_RUN
+    assert len(jobs) == TOTAL_PROS  # one leased durable job per Pro
     assert all(job.status == "done" for job in jobs)
     assert all(job.attempts == 1 for job in jobs), "a live lease was double-claimed"
     lost_checkpoints = [
@@ -141,7 +150,9 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
         candidate = await db_session.get(CandidateRow, winner.candidate_id)
         assert candidate is not None
         payload = {
-            "run_id": winner.run_id, "winner_id": winner.id, "pro_id": winner.pro_id,
+            "run_id": winner.run_id,
+            "winner_id": winner.id,
+            "pro_id": winner.pro_id,
             "org_id": winner.evidence["org_id"],
             "recommendation": candidate.recommendation,
             "score": winner.evidence["final"],
@@ -153,17 +164,21 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
 
     posts = len(httpx_mock.get_requests(url=LCM_URL))
     assert posts == TOTAL_PROS, "handoff retries must never duplicate POSTs"
-    handoff_rows = (await db_session.execute(
-        select(func.count()).select_from(HandoffRow)
-    )).scalar_one()
+    handoff_rows = (
+        await db_session.execute(select(func.count()).select_from(HandoffRow))
+    ).scalar_one()
     assert handoff_rows == TOTAL_PROS
 
     elapsed = pipeline_elapsed + handoff_elapsed
     assert elapsed < 86400, "the 200-Pro day budget was exceeded"
 
     _write_report(
-        run_count=len(run_ids), elapsed=elapsed, pipeline_elapsed=pipeline_elapsed,
-        handoff_elapsed=handoff_elapsed, stats=stats, posts=posts,
+        run_count=len(run_ids),
+        elapsed=elapsed,
+        pipeline_elapsed=pipeline_elapsed,
+        handoff_elapsed=handoff_elapsed,
+        stats=stats,
+        posts=posts,
         reserved=str(sum(run.cost_reserved for run in runs)),
     )
 
@@ -171,15 +186,29 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
 def _plan():
     from waypoint.models import MeasurementIndicator, MeasurementPlan
 
-    return MeasurementPlan(indicators=[MeasurementIndicator(
-        key="invoices_sent", label="Invoices sent", direction="increase",
-        source="billing", window_days=30, rationale="The proposal sends invoices.",
-    )])
+    return MeasurementPlan(
+        indicators=[
+            MeasurementIndicator(
+                key="invoices_sent",
+                label="Invoices sent",
+                direction="increase",
+                source="billing",
+                window_days=30,
+                rationale="The proposal sends invoices.",
+            )
+        ]
+    )
 
 
-def _write_report(run_count: int, elapsed: float, pipeline_elapsed: float,
-                  handoff_elapsed: float, stats: dict[str, int], posts: int,
-                  reserved: str) -> None:
+def _write_report(
+    run_count: int,
+    elapsed: float,
+    pipeline_elapsed: float,
+    handoff_elapsed: float,
+    stats: dict[str, int],
+    posts: int,
+    reserved: str,
+) -> None:
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     per_pro = elapsed / TOTAL_PROS
     REPORT.write_text(f"""# Launch capacity report — 200 Pros/day gate
@@ -202,7 +231,7 @@ Generated by `tests/test_load.py` on {datetime.now(UTC).isoformat()}.
 | Winners persisted | {TOTAL_PROS} |
 | Duplicate claims | 0 (every job exactly one attempt) |
 | Duplicate handoffs | 0 ({posts} POSTs for {TOTAL_PROS} winners handed off twice) |
-| Lost checkpoints | 0 (all 9 stages durable on every job) |
+| Lost checkpoints | 0 (all {len(STAGES)} stages durable on every per-Pro job) |
 | Hidden failures | 0 (every run terminal state `complete`) |
 | Budget overshoot | none (reserved ${reserved} within run and day limits) |
 | Pipeline elapsed | {pipeline_elapsed:.2f}s |

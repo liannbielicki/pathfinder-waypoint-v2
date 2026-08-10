@@ -45,6 +45,7 @@ class RunRow(Base):
     audience_run: Mapped[str]
     channels: Mapped[list[str]]
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
+    loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
     cost_reserved: Mapped[Decimal] = mapped_column(default=Decimal(0))
     cost_spent: Mapped[Decimal] = mapped_column(default=Decimal(0))
@@ -55,11 +56,12 @@ class RunRow(Base):
 
 class JobRow(Base):
     __tablename__ = "jobs"
-    __table_args__ = (UniqueConstraint("run_id", "stage", name="uq_jobs_run_stage"),)
+    __table_args__ = (UniqueConstraint("run_id", "stage", "pro_id", name="uq_jobs_run_stage_pro"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     stage: Mapped[str]
+    pro_id: Mapped[str | None] = mapped_column(default=None)
     status: Mapped[str] = mapped_column(default="queued")
     worker_id: Mapped[str | None] = mapped_column(default=None)
     lease_until: Mapped[datetime | None] = mapped_column(default=None)
@@ -81,7 +83,53 @@ class CandidateRow(Base):
     score: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_usd: Mapped[Decimal | None] = mapped_column(default=None)
     status: Mapped[str] = mapped_column(default="generated")
+    round: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class EvolveRoundRow(Base):
+    """Authoritative per-Pro round ledger; loop state is replayed from these rows."""
+
+    __tablename__ = "evolve_rounds"
+    __table_args__ = (
+        UniqueConstraint("run_id", "pro_id", "round", name="uq_evolve_rounds_run_pro_round"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    pro_id: Mapped[str]
+    round: Mapped[int] = mapped_column(Integer)
+    mode: Mapped[str]  # stay | shift
+    mechanism: Mapped[str]
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"), default=None)
+    outcome: Mapped[str]  # win | lose | suppressed | unavailable
+    score_pp: Mapped[float | None] = mapped_column(Numeric(8, 4, asdecimal=False), default=None)
+    best_score_after: Mapped[float | None] = mapped_column(
+        Numeric(8, 4, asdecimal=False), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class LlmCallRow(Base):
+    """Durable paid-call lifecycle: pending → committed → reconciled | abandoned."""
+
+    __tablename__ = "llm_calls"
+    __table_args__ = (UniqueConstraint("call_key", name="uq_llm_calls_key"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    call_key: Mapped[str]
+    run_id: Mapped[str]
+    pro_id: Mapped[str | None] = mapped_column(default=None)
+    stage: Mapped[str]
+    status: Mapped[str] = mapped_column(default="pending")
+    model: Mapped[str]
+    reserved_usd: Mapped[Decimal]
+    actual_usd: Mapped[Decimal | None] = mapped_column(default=None)
+    provider_request_id: Mapped[str | None] = mapped_column(default=None)
+    usage_id: Mapped[str | None] = mapped_column(default=None)
+    response_text: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
 class WinnerRow(Base):
@@ -132,6 +180,7 @@ class FleetControlRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     killed: Mapped[bool] = mapped_column(Boolean, default=False)
+    loop_defaults: Mapped[dict[str, Any]] = mapped_column(default=dict)
     day: Mapped[str | None] = mapped_column(default=None)
     day_cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
     day_cost_reserved: Mapped[Decimal] = mapped_column(default=Decimal(0))

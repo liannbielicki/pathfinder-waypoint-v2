@@ -49,3 +49,48 @@ def test_recommendation_is_structured_not_preformatted_prose() -> None:
     value = Recommendation.model_validate(RECOMMENDATION_FIXTURE)
     assert value.mechanism == "invoice_delivery"
     assert value.actions == ["send_open_invoices"]
+
+
+HISTORY = '[{"round": 1, "mechanism": "invoice_delivery", "score_pp": 2.0, "outcome": "win"}]'
+BEST = '{"title": "Send open invoices reminder", "mechanism": "invoice_delivery"}'
+
+
+def test_evolve_prompt_stay_refines_the_best_mechanism() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        '{"open_due_usd": "430.25"}',
+        mode="stay",
+        best_json=BEST,
+        history_json=HISTORY,
+        tried_mechanisms=["invoice_delivery"],
+    )
+    assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
+    assert "exactly ONE" in prompt or "exactly one" in prompt
+    assert "invoice_delivery" in prompt  # the mechanism being refined
+    assert BEST in prompt
+    assert HISTORY in prompt
+    assert "refine" in prompt.lower()
+    # The two-layer + grounding rules survive in the evolve prompt too.
+    assert "pro_facing_concept" in prompt
+    assert "manager_rationale" in prompt
+
+
+def test_evolve_prompt_shift_forbids_tried_mechanisms() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="shift",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=["invoice_delivery", "review_requests"],
+    )
+    assert "forbidden" in prompt.lower()
+    assert "invoice_delivery" in prompt and "review_requests" in prompt
+
+
+def test_search_directive_prompt_is_deleted() -> None:
+    from waypoint import prompts
+
+    assert not hasattr(prompts, "search_directive_prompt")

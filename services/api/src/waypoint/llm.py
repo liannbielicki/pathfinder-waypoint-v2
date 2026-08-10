@@ -60,8 +60,14 @@ class Pricing:
     def model_for(self, tier: str) -> str:
         return self.models[tier]
 
-    def cost(self, model: str, input_tokens: int, output_tokens: int,
-             cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> Decimal:
+    def cost(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> Decimal:
         input_rate, output_rate = self.usd_per_mtok[model]
         return (
             input_tokens * input_rate
@@ -80,6 +86,18 @@ class LLMResult:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
+    request_id: str | None = None
+    usage_id: str | None = None
+
+
+def worst_case_cost(
+    pricing: Pricing, tier: str, prompt: str, system: str | None, max_tokens: int
+) -> Decimal:
+    """Upper bound reserved before a paid call: conservative chars→tokens on
+    input (÷3 overestimates vs the true ~4 chars/token) and the full output
+    ceiling."""
+    input_estimate = (len(prompt) + len(system or "")) // 3 + 200
+    return pricing.cost(pricing.model_for(tier), input_estimate, max_tokens)
 
 
 def _is_rate_limited(error: Exception) -> bool:
@@ -131,6 +149,7 @@ class LLMGateway:
         stage: str,
         system: str | None = None,
         max_tokens: int = 1200,
+        temperature: float | None = None,
     ) -> LLMResult:
         model = self.pricing.model_for(tier)
         kwargs: dict[str, Any] = {
@@ -140,6 +159,8 @@ class LLMGateway:
         }
         if system is not None:
             kwargs["system"] = system
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         response = await retry_rate_limit(
             lambda: self.client.messages.create(**kwargs),
             attempts=self.attempts,
@@ -149,14 +170,19 @@ class LLMGateway:
         # The gateway owns this transaction: a paid call's usage must survive
         # the caller rolling back its own work. Give the gateway a session that
         # is not carrying uncommitted pipeline writes.
-        self.session.add(UsageRow(
-            run_id=run_id, stage=stage, model=result.model,
-            input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+        usage = UsageRow(
+            run_id=run_id,
+            stage=stage,
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
             cache_read_tokens=result.cache_read_tokens,
             cache_write_tokens=result.cache_write_tokens,
             cost_usd=result.cost_usd,
-        ))
+        )
+        self.session.add(usage)
         await self.session.commit()
+        result.usage_id = usage.id
         return result
 
     def _result_from_response(self, model: str, response: Any) -> LLMResult:
@@ -177,6 +203,8 @@ class LLMGateway:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
-            cost_usd=self.pricing.cost(model, input_tokens, output_tokens,
-                                       cache_read, cache_write),
+            cost_usd=self.pricing.cost(model, input_tokens, output_tokens, cache_read, cache_write),
+            request_id=(
+                getattr(response, "_request_id", None) or getattr(response, "request_id", None)
+            ),
         )

@@ -63,14 +63,33 @@ RETURNING id
 """)
 
 FAIL_STALE_SQL = text("""
-WITH stale AS (
-  UPDATE jobs SET status = 'failed'
-  WHERE status = 'running' AND lease_until < now() AND attempts >= max_attempts
-  RETURNING run_id
-)
-UPDATE runs SET status = 'failed', stop_reason = 'attempts_exhausted'
-WHERE id IN (SELECT run_id FROM stale)
-RETURNING id
+UPDATE jobs SET status = 'failed'
+WHERE status = 'running' AND lease_until < now() AND attempts >= max_attempts
+RETURNING id, run_id
+""")
+
+# Reservation → actual usage: release the worst-case hold, record real spend.
+# The day ledger keeps the actual amount reserved and releases only the delta,
+# and only while it is still the same day — rollover already zeroed it.
+RECONCILE_RUN_SQL = text("""
+UPDATE runs
+SET cost_reserved = GREATEST(cost_reserved - :reserved, 0),
+    cost_spent = cost_spent + :actual
+WHERE id = :run_id
+""")
+
+RECONCILE_DAY_SQL = text("""
+UPDATE fleet_control
+SET day_cost_reserved = GREATEST(
+      day_cost_reserved - (CAST(:reserved AS numeric) - CAST(:actual AS numeric)), 0)
+WHERE id = 1 AND day = current_date::text
+""")
+
+CONVERT_RUN_SQL = text("""
+UPDATE runs
+SET cost_reserved = GREATEST(cost_reserved - :reserved, 0),
+    cost_spent = cost_spent + :reserved
+WHERE id = :run_id
 """)
 
 CHECKPOINT_SQL = text("""
@@ -80,8 +99,8 @@ WHERE id = :job_id
 """)
 
 
-async def enqueue(session: AsyncSession, run_id: str, stage: str) -> str:
-    job = JobRow(run_id=run_id, stage=stage)
+async def enqueue(session: AsyncSession, run_id: str, stage: str, pro_id: str | None = None) -> str:
+    job = JobRow(run_id=run_id, stage=stage, pro_id=pro_id)
     session.add(job)
     await session.flush()
     return job.id
@@ -91,17 +110,13 @@ async def claim_job(
     session: AsyncSession, worker_id: str, lease_seconds: int = 120
 ) -> JobRow | None:
     claimed = (
-        await session.execute(
-            CLAIM_SQL, {"worker_id": worker_id, "lease_seconds": lease_seconds}
-        )
+        await session.execute(CLAIM_SQL, {"worker_id": worker_id, "lease_seconds": lease_seconds})
     ).first()
     if claimed is None:
         return None
     return (
         await session.execute(
-            select(JobRow)
-            .where(JobRow.id == claimed.id)
-            .execution_options(populate_existing=True)
+            select(JobRow).where(JobRow.id == claimed.id).execution_options(populate_existing=True)
         )
     ).scalar_one()
 
@@ -119,14 +134,32 @@ async def heartbeat_job(
     return row is not None
 
 
-async def fail_stale_jobs(session: AsyncSession) -> int:
-    """Fail jobs (and their runs) that expired with no attempts left.
+async def fail_stale_jobs(session: AsyncSession) -> list[tuple[str, str]]:
+    """Fail jobs that expired with no attempts left; return (job_id, run_id).
 
-    Without this, an attempts-exhausted job leaves its run 'running' forever —
-    a hidden failure.
+    The run is NOT force-failed here: per-Pro sibling jobs may still be working.
+    The caller finalizes each affected run (pipeline.finalize_run) so a reaped
+    last job still terminalizes its run instead of hiding the failure.
     """
-    rows = (await session.execute(FAIL_STALE_SQL)).all()
-    return len(rows)
+    return [(row.id, row.run_id) for row in (await session.execute(FAIL_STALE_SQL)).all()]
+
+
+async def reconcile_cost(
+    session: AsyncSession, run_id: str, reserved: Decimal, actual: Decimal
+) -> None:
+    """Move a completed call's ledger entry from worst-case to actual."""
+    await session.execute(
+        RECONCILE_RUN_SQL, {"run_id": run_id, "reserved": reserved, "actual": actual}
+    )
+    await session.execute(RECONCILE_DAY_SQL, {"reserved": reserved, "actual": actual})
+
+
+async def convert_reservation_to_spend(
+    session: AsyncSession, run_id: str, reserved: Decimal
+) -> None:
+    """An abandoned call's honest resolution: we may have paid without seeing
+    the response, so the worst-case reservation becomes recorded spend."""
+    await session.execute(CONVERT_RUN_SQL, {"run_id": run_id, "reserved": reserved})
 
 
 async def checkpoint_job(
@@ -143,9 +176,7 @@ async def reserve_cost(session: AsyncSession, run_id: str, amount: Decimal) -> b
     Reserves nothing at all unless both limits allow the amount.
     """
     savepoint = await session.begin_nested()
-    run_ok = (
-        await session.execute(RESERVE_RUN_SQL, {"run_id": run_id, "amount": amount})
-    ).first()
+    run_ok = (await session.execute(RESERVE_RUN_SQL, {"run_id": run_id, "amount": amount})).first()
     if run_ok is None:
         await savepoint.rollback()
         return False

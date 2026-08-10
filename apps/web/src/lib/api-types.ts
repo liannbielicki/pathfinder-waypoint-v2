@@ -21,6 +21,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/fleet/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fleet Settings */
+        get: operations["fleet_settings_api_fleet_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs": {
         parameters: {
             query?: never;
@@ -145,6 +162,10 @@ export interface components {
             audience_run: string;
             /** Channels */
             channels: string[];
+            /** Loop Config */
+            loop_config?: {
+                [key: string]: number;
+            } | null;
             /** Pro Ids */
             pro_ids: string[];
         };
@@ -181,6 +202,10 @@ export interface components {
             id: string;
             /** Killed */
             killed: boolean;
+            /** Loop Config */
+            loop_config: {
+                [key: string]: number;
+            };
             /** Measurements */
             measurements: {
                 [key: string]: unknown;
@@ -223,6 +248,10 @@ export interface components {
             created_at: string;
             /** Id */
             id: string;
+            /** Loop Config */
+            loop_config: {
+                [key: string]: number;
+            };
             /** Pro Ids */
             pro_ids: string[];
             /** Status */
@@ -283,6 +312,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    fleet_settings_api_fleet_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

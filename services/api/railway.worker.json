@@ -5,6 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
+    "preDeployCommand": "alembic upgrade head",
     "startCommand": "uv run python -m waypoint.worker",
     "healthcheckPath": null,
     "restartPolicyType": "ON_FAILURE",

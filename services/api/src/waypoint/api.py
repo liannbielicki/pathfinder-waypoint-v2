@@ -15,8 +15,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
+from waypoint.calls import MAX_IN_FLIGHT_LLM_CALLS
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import HandoffUnavailable, LCMClient
+from waypoint.loop import LoopConfig
 from waypoint.models import HandoffReceipt, MeasurementPlan, RunCreate, RunView
 from waypoint.settings import Settings
 from waypoint.tables import (
@@ -49,24 +51,33 @@ class HandoffResponse(BaseModel):
 
 def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
     return RunView(
-        id=run.id, status=run.status, pro_ids=run.pro_ids,
-        audience_query=run.audience_query, audience_run=run.audience_run,
-        channels=run.channels, config_version=run.config_version,
-        cost_limit_usd=run.cost_limit, cost_reserved_usd=run.cost_reserved,
+        id=run.id,
+        status=run.status,
+        pro_ids=run.pro_ids,
+        audience_query=run.audience_query,
+        audience_run=run.audience_run,
+        channels=run.channels,
+        config_version=run.config_version,
+        loop_config=dict(run.loop_config or {}),
+        cost_limit_usd=run.cost_limit,
+        cost_reserved_usd=run.cost_reserved,
         cost_spent_usd=run.cost_spent if spent is None else spent,
-        stop_reason=run.stop_reason, created_at=run.created_at,
+        stop_reason=run.stop_reason,
+        created_at=run.created_at,
     )
 
 
-async def _spent(session: AsyncSession, run_id: str) -> Decimal:
-    """Real spend is the sum of persisted usage rows — never a stored zero."""
+async def _spent(session: AsyncSession, run: RunRow) -> Decimal:
+    """Real spend: usage rows, floored by the run ledger — an abandoned call's
+    worst-case conversion has no usage row and must still be visible."""
     from waypoint.tables import UsageRow
 
-    total = (await session.execute(
-        select(func.coalesce(func.sum(UsageRow.cost_usd), 0))
-        .where(UsageRow.run_id == run_id)
-    )).scalar_one()
-    return Decimal(total or 0)
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(UsageRow.cost_usd), 0)).where(UsageRow.run_id == run.id)
+        )
+    ).scalar_one()
+    return max(Decimal(total or 0), run.cost_spent or Decimal(0))
 
 
 @asynccontextmanager
@@ -94,9 +105,13 @@ async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
     the shared kill state on the existing row, not just at first creation."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is None:
-        session.add(FleetControlRow(
-            id=1, killed=settings.KILL_SWITCH, day_cost_limit=settings.DAY_COST_USD,
-        ))
+        session.add(
+            FleetControlRow(
+                id=1,
+                killed=settings.KILL_SWITCH,
+                day_cost_limit=settings.DAY_COST_USD,
+            )
+        )
     else:
         fleet.killed = settings.KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
@@ -127,60 +142,132 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/api/runs", status_code=202, response_model=RunView)
-    async def create_run(request: Request, body: RunCreate, session: SessionDep,
-                         _: AuthDep) -> RunView:
+    async def create_run(
+        request: Request, body: RunCreate, session: SessionDep, _: AuthDep
+    ) -> RunView:
         settings: Settings = request.app.state.settings
         await _ensure_fleet(session, settings)
+        fleet = await session.get(FleetControlRow, 1)
+        assert fleet is not None
+        defaults = dict(fleet.loop_defaults or {})
+        try:
+            config = LoopConfig.from_mapping({**defaults, **(body.loop_config or {})})
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if body.loop_config:
+            # A confirmed edit becomes the persisted default for next time.
+            fleet.loop_defaults = config.to_dict()
         run = RunRow(
-            pro_ids=body.pro_ids, audience_query=body.audience_query,
-            audience_run=body.audience_run, channels=body.channels,
+            pro_ids=body.pro_ids,
+            audience_query=body.audience_query,
+            audience_run=body.audience_run,
+            channels=body.channels,
+            loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )
         session.add(run)
         await session.flush()
-        await queue.enqueue(session, run.id, stage="recommend")
+        for pro_id in body.pro_ids:
+            await queue.enqueue(session, run.id, stage="pro", pro_id=pro_id)
         await session.commit()
         return _view(run)
+
+    @app.get("/api/fleet/settings")
+    async def fleet_settings(request: Request, session: SessionDep, _: AuthDep) -> dict[str, Any]:
+        settings: Settings = request.app.state.settings
+        await _ensure_fleet(session, settings)
+        fleet = await session.get(FleetControlRow, 1)
+        assert fleet is not None
+        effective = LoopConfig.from_mapping(dict(fleet.loop_defaults or {}))
+        await session.commit()
+        return {
+            "loop_defaults": effective.to_dict(),
+            "max_in_flight_llm_calls": MAX_IN_FLIGHT_LLM_CALLS,
+        }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)
     async def run_detail(run_id: str, session: SessionDep, _: AuthDep) -> RunDetail:
         run = await _run_or_404(session, run_id)
-        job = (await session.execute(
-            select(JobRow).where(JobRow.run_id == run_id)
-        )).scalars().first()
-        candidates = (await session.execute(
-            select(CandidateRow).where(CandidateRow.run_id == run_id)
-            .order_by(CandidateRow.created_at, CandidateRow.id)
-        )).scalars().all()
-        winners = (await session.execute(
-            select(WinnerRow).where(WinnerRow.run_id == run_id)
-        )).scalars().all()
-        measurements = (await session.execute(
-            select(MeasurementRow).where(MeasurementRow.run_id == run_id)
-        )).scalars().all()
-        handoffs = (await session.execute(
-            select(HandoffRow).where(HandoffRow.run_id == run_id)
-        )).scalars().all()
+        jobs = (
+            (await session.execute(select(JobRow).where(JobRow.run_id == run_id))).scalars().all()
+        )
+        # A stage shows done only when EVERY per-Pro job checkpointed it — an
+        # honest floor; a half-done stage never shows a checkmark.
+        stages: dict[str, Any] = {}
+        if jobs:
+            shared = set(jobs[0].checkpoint)
+            for job in jobs[1:]:
+                shared &= set(job.checkpoint)
+            stages = {stage: jobs[0].checkpoint[stage] for stage in shared}
+        candidates = (
+            (
+                await session.execute(
+                    select(CandidateRow)
+                    .where(CandidateRow.run_id == run_id)
+                    .order_by(CandidateRow.created_at, CandidateRow.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        winners = (
+            (await session.execute(select(WinnerRow).where(WinnerRow.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+        measurements = (
+            (await session.execute(select(MeasurementRow).where(MeasurementRow.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+        handoffs = (
+            (await session.execute(select(HandoffRow).where(HandoffRow.run_id == run_id)))
+            .scalars()
+            .all()
+        )
         return RunDetail(
-            **_view(run, spent=await _spent(session, run_id)).model_dump(),
-            stages=dict(job.checkpoint) if job is not None else {},
-            candidates=[{
-                "id": c.id, "pro_id": c.pro_id, "recommendation": c.recommendation,
-                "critics": c.critics, "persona_evidence": c.persona_evidence,
-                "score": c.score, "status": c.status,
-            } for c in candidates],
-            winners=[{
-                "id": w.id, "pro_id": w.pro_id, "kind": w.kind,
-                "candidate_id": w.candidate_id, "rationale": w.rationale,
-                "evidence": w.evidence,
-            } for w in winners],
-            measurements=[{
-                "id": m.id, "winner_id": m.winner_id, "indicators": m.indicators,
-            } for m in measurements],
-            handoffs=[{
-                "id": h.id, "idempotency_key": h.idempotency_key, "status": h.status,
-                "response": h.response,
-            } for h in handoffs],
+            **_view(run, spent=await _spent(session, run)).model_dump(),
+            stages=stages,
+            candidates=[
+                {
+                    "id": c.id,
+                    "pro_id": c.pro_id,
+                    "recommendation": c.recommendation,
+                    "critics": c.critics,
+                    "persona_evidence": c.persona_evidence,
+                    "score": c.score,
+                    "status": c.status,
+                }
+                for c in candidates
+            ],
+            winners=[
+                {
+                    "id": w.id,
+                    "pro_id": w.pro_id,
+                    "kind": w.kind,
+                    "candidate_id": w.candidate_id,
+                    "rationale": w.rationale,
+                    "evidence": w.evidence,
+                }
+                for w in winners
+            ],
+            measurements=[
+                {
+                    "id": m.id,
+                    "winner_id": m.winner_id,
+                    "indicators": m.indicators,
+                }
+                for m in measurements
+            ],
+            handoffs=[
+                {
+                    "id": h.id,
+                    "idempotency_key": h.idempotency_key,
+                    "status": h.status,
+                    "response": h.response,
+                }
+                for h in handoffs
+            ],
             killed=await queue.fleet_is_killed(session),
         )
 
@@ -189,29 +276,37 @@ def create_app(
         run = await _run_or_404(session, run_id)
         run.status = "stopped"
         run.stop_reason = "operator_kill"
-        for job in (await session.execute(
-            select(JobRow).where(JobRow.run_id == run_id)
-        )).scalars():
+        for job in (await session.execute(select(JobRow).where(JobRow.run_id == run_id))).scalars():
             job.status = "stopped"
         await session.commit()
-        return _view(run, spent=await _spent(session, run_id))
+        return _view(run, spent=await _spent(session, run))
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
-    async def create_handoff(request: Request, run_id: str, session: SessionDep,
-                             _: AuthDep) -> HandoffResponse:
+    async def create_handoff(
+        request: Request, run_id: str, session: SessionDep, _: AuthDep
+    ) -> HandoffResponse:
         settings: Settings = request.app.state.settings
         run = await _run_or_404(session, run_id)
-        winners = (await session.execute(
-            select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
-        )).scalars().all()
+        winners = (
+            (
+                await session.execute(
+                    select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
+                )
+            )
+            .scalars()
+            .all()
+        )
         ready: list[tuple[WinnerRow, MeasurementRow, CandidateRow]] = []
         for winner in winners:
-            measurement = (await session.execute(
-                select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
-            )).scalar_one_or_none()
+            measurement = (
+                await session.execute(
+                    select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
+                )
+            ).scalar_one_or_none()
             candidate = (
                 await session.get(CandidateRow, winner.candidate_id)
-                if winner.candidate_id else None
+                if winner.candidate_id
+                else None
             )
             if measurement is not None and candidate is not None:
                 ready.append((winner, measurement, candidate))
@@ -228,16 +323,20 @@ def create_app(
         receipts = []
         try:
             for winner, measurement, candidate in ready:
-                receipts.append(await client.handoff(
-                    {
-                        "run_id": run_id, "winner_id": winner.id, "pro_id": winner.pro_id,
-                        "org_id": winner.evidence.get("org_id", ""),
-                        "recommendation": candidate.recommendation,
-                        "score": winner.evidence.get("final", {}),
-                    },
-                    MeasurementPlan.model_validate({"indicators": measurement.indicators}),
-                    lineage,
-                ))
+                receipts.append(
+                    await client.handoff(
+                        {
+                            "run_id": run_id,
+                            "winner_id": winner.id,
+                            "pro_id": winner.pro_id,
+                            "org_id": winner.evidence.get("org_id", ""),
+                            "recommendation": candidate.recommendation,
+                            "score": winner.evidence.get("final", {}),
+                        },
+                        MeasurementPlan.model_validate({"indicators": measurement.indicators}),
+                        lineage,
+                    )
+                )
         except HandoffUnavailable as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return HandoffResponse(receipts=receipts)

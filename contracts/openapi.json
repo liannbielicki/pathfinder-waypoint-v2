@@ -90,6 +90,20 @@
             "title": "Channels",
             "type": "array"
           },
+          "loop_config": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loop Config"
+          },
           "pro_ids": {
             "items": {
               "type": "string"
@@ -173,6 +187,13 @@
             "title": "Killed",
             "type": "boolean"
           },
+          "loop_config": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Loop Config",
+            "type": "object"
+          },
           "measurements": {
             "items": {
               "additionalProperties": true,
@@ -225,6 +246,7 @@
           "audience_run",
           "channels",
           "config_version",
+          "loop_config",
           "cost_limit_usd",
           "cost_reserved_usd",
           "cost_spent_usd",
@@ -285,6 +307,13 @@
             "title": "Id",
             "type": "string"
           },
+          "loop_config": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Loop Config",
+            "type": "object"
+          },
           "pro_ids": {
             "items": {
               "type": "string"
@@ -316,6 +345,7 @@
           "audience_run",
           "channels",
           "config_version",
+          "loop_config",
           "cost_limit_usd",
           "cost_reserved_usd",
           "cost_spent_usd",
@@ -413,6 +443,26 @@
           }
         },
         "summary": "Login"
+      }
+    },
+    "/api/fleet/settings": {
+      "get": {
+        "operationId": "fleet_settings_api_fleet_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Fleet Settings Api Fleet Settings Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Fleet Settings"
       }
     },
     "/api/runs": {

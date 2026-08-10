@@ -7,8 +7,16 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 RunStatus = Literal[
-    "queued", "running", "waiting", "degraded", "failed", "resumed",
-    "stopped", "complete", "abstained", "no_action",
+    "queued",
+    "running",
+    "waiting",
+    "degraded",
+    "failed",
+    "resumed",
+    "stopped",
+    "complete",
+    "abstained",
+    "no_action",
 ]
 
 
@@ -17,6 +25,10 @@ class RunCreate(BaseModel):
     audience_query: str = Field(min_length=1)
     audience_run: str = Field(min_length=1)
     channels: list[str] = Field(min_length=1)
+    # Confirmed loop-control overrides, UPPER_CASE spec keys (e.g. MAX_ROUNDS).
+    # The confirm-typing gate is a UI contract: the UI only sends confirmed
+    # fields, and the server treats any supplied key as confirmed.
+    loop_config: dict[str, float] | None = None
 
 
 class RunView(BaseModel):
@@ -27,6 +39,7 @@ class RunView(BaseModel):
     audience_run: str
     channels: list[str]
     config_version: str
+    loop_config: dict[str, float]
     cost_limit_usd: Decimal
     cost_reserved_usd: Decimal
     cost_spent_usd: Decimal
