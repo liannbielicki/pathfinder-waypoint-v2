@@ -133,6 +133,38 @@ async def test_temperature_passes_through_only_when_given(db_session: AsyncSessi
     assert "temperature" not in fake.calls[1]
 
 
+class FakeTemperatureRejected(Exception):
+    """claude-sonnet-5 and later 400 any request that sets temperature."""
+
+    status_code = 400
+
+    def __str__(self) -> str:
+        return "invalid_request_error: temperature: Extra inputs are not permitted"
+
+
+async def test_temperature_400_retries_once_without_it(db_session: AsyncSession) -> None:
+    fake = FakeAnthropic([FakeTemperatureRejected(), _response("ok", 10, 5)])
+    gateway = LLMGateway(fake, db_session, pricing=TEST_PRICING)
+    result = await gateway.complete("deep", "p", "run-1", "final", temperature=0.0)
+    assert result.text == "ok"
+    assert fake.calls[0]["temperature"] == 0.0  # first attempt as requested
+    assert "temperature" not in fake.calls[1]  # retried without the param
+
+
+async def test_unrelated_400_still_raises(db_session: AsyncSession) -> None:
+    class FakeBadRequest(Exception):
+        status_code = 400
+
+        def __str__(self) -> str:
+            return "invalid_request_error: max_tokens must be positive"
+
+    fake = FakeAnthropic([FakeBadRequest()])
+    gateway = LLMGateway(fake, db_session, pricing=TEST_PRICING)
+    with pytest.raises(Exception, match="max_tokens"):
+        await gateway.complete("deep", "p", "run-1", "final", temperature=0.0)
+    assert len(fake.calls) == 1  # no blind retry
+
+
 async def test_worst_case_cost_bounds_the_actual_cost(db_session: AsyncSession) -> None:
     from waypoint.llm import worst_case_cost
 

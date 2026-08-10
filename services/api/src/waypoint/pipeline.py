@@ -262,14 +262,26 @@ async def _react(
     state: PipelineState,
     deps: PipelineDeps,
     panel: PanelSelection,
+    cards: dict[str, dict[str, Any]],
     concept: str,
     stage: str,
     tier: str,
     call_key: str,
 ) -> list[float]:
+    # The FULL persona card goes to the model — a bare label + role produced
+    # constant role-driven ratings ([6,6,4] every round). data_provenance is
+    # metadata, and empty values are dead tokens.
     panel_json = json.dumps(
         [
-            {"persona_id": i.persona_id, "label": i.label, "family": i.family, "role": i.role}
+            {
+                "persona_id": i.persona_id,
+                "role": i.role,
+                "card": {
+                    k: v
+                    for k, v in cards.get(i.persona_id, {}).items()
+                    if k != "data_provenance" and v not in (None, "", [], {})
+                },
+            }
             for i in panel.items
         ]
     )
@@ -298,14 +310,19 @@ async def _react(
 
 async def _panel_for(
     state: PipelineState, deps: PipelineDeps, brief: OrgBrief, size: Any
-) -> PanelSelection:
+) -> tuple[PanelSelection, dict[str, dict[str, Any]]]:
+    """Select the panel AND return each member's full card features, keyed by
+    persona_id — the reaction prompt needs the substance, not just the labels
+    that panel evidence stores."""
     if brief.segment is None:
         # No segment => no shared match key => never a real panel. Abstain
         # honestly instead of guessing a wrong-segment pool.
         raise InsufficientPanelFit(size=size, available=0)
     personas = await deps.get_personas(brief.segment)
     pro = ProMatchInput(pro_id=brief.pro_id, features=dict(brief.match_feature_map()))
-    return select_panel(pro, personas, size=size)
+    panel = select_panel(pro, personas, size=size)
+    features = {p.persona_id: p.features for p in personas}
+    return panel, {i.persona_id: features.get(i.persona_id, {}) for i in panel.items}
 
 
 async def _resolve_abandoned_calls(state: PipelineState, deps: PipelineDeps) -> None:
@@ -425,7 +442,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             outcome, score_pp = "suppressed", None  # a loss, no persona spend
         else:
             try:
-                panel = await _panel_for(state, deps, brief, 3)
+                panel, cards = await _panel_for(state, deps, brief, 3)
             except InsufficientPanelFit as error:
                 await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
                 return {"rounds": lstate.round, "stop": "panel_unavailable"}
@@ -434,6 +451,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     state,
                     deps,
                     panel,
+                    cards,
                     idea.pro_facing_concept,
                     "screen",
                     "fast",
@@ -517,7 +535,7 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         return {}  # resume
     await _resolve_abandoned_calls(state, deps)  # a crashed final call may have paid
     try:
-        panel = await _panel_for(state, deps, brief, 5)
+        panel, cards = await _panel_for(state, deps, brief, 5)
     except InsufficientPanelFit as error:
         await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
         return {}
@@ -528,6 +546,7 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
             state,
             deps,
             panel,
+            cards,
             champion.recommendation["pro_facing_concept"],
             "final",
             "deep",
@@ -853,6 +872,19 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             # aggregates to failed/degraded once every job is terminal.
             await queue.checkpoint_job(store.session, job_id, "failure", {"reason": error.reason})
             await store.finish_job(job_id, "failed")
+            await finalize_run(store.session, run_id)
+            return
+        except Exception as error:  # noqa: BLE001 — the honest-failure backstop
+            # Unhandled crash: record the cause and burn the attempt NOW. The
+            # alternative is an anonymous 10-minute lease-expiry loop ending in
+            # a reaped job with no recorded reason (the persona-429 / deep-400
+            # incident). Recorded calls make the retry free to resume.
+            await store.session.rollback()
+            await queue.checkpoint_job(
+                store.session, job_id, "failure", {"reason": f"unhandled at {stage}: {error!r}"}
+            )
+            if await store.requeue_job(job_id):
+                return  # attempts remain: a fresh claim resumes from checkpoints
             await finalize_run(store.session, run_id)
             return
         await store.complete_stage(job_id, stage, payload)

@@ -101,7 +101,12 @@ def worst_case_cost(
 
 
 def _is_rate_limited(error: Exception) -> bool:
-    return getattr(error, "status_code", None) in (429, 529)
+    # Anthropic SDK errors carry status_code directly; httpx.HTTPStatusError
+    # carries it on the response.
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    return status in (429, 529)
 
 
 async def retry_rate_limit[T](
@@ -161,11 +166,29 @@ class LLMGateway:
             kwargs["system"] = system
         if temperature is not None:
             kwargs["temperature"] = temperature
-        response = await retry_rate_limit(
-            lambda: self.client.messages.create(**kwargs),
-            attempts=self.attempts,
-            backoff_seconds=self.backoff_seconds,
-        )
+        try:
+            response = await retry_rate_limit(
+                lambda: self.client.messages.create(**kwargs),
+                attempts=self.attempts,
+                backoff_seconds=self.backoff_seconds,
+            )
+        except Exception as error:
+            # Newer models (claude-sonnet-5 and later) reject sampling params
+            # with a 400 — even temperature=0. Determinism-by-temperature does
+            # not exist there; drop the param and retry once rather than
+            # crash-looping the job (the deep-tier final-call incident).
+            if (
+                temperature is None
+                or getattr(error, "status_code", None) != 400
+                or "temperature" not in str(error)
+            ):
+                raise
+            kwargs.pop("temperature")
+            response = await retry_rate_limit(
+                lambda: self.client.messages.create(**kwargs),
+                attempts=self.attempts,
+                backoff_seconds=self.backoff_seconds,
+            )
         result = self._result_from_response(model, response)
         # The gateway owns this transaction: a paid call's usage must survive
         # the caller rolling back its own work. Give the gateway a session that

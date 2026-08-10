@@ -84,8 +84,11 @@ async def test_mid_loop_crash_replays_the_ledger_without_re_paying(
         reactions_json(GREAT),
         reactions_json(LOSE),
     ]
-    with pytest.raises(RuntimeError):
-        await run_job(seeded_job.id, deps)
+    await run_job(seeded_job.id, deps)  # provider dies mid-round 2: honest requeue
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.status == "queued"
+    assert "unhandled at evolve" in job.checkpoint["failure"]["reason"]
     assert len(await rounds(deps.db, seeded_job.run_id)) == 1  # round 2 never completed
     generate_calls_at_crash = deps.gateway.calls_for("evolve")
     assert generate_calls_at_crash == 2
@@ -109,8 +112,7 @@ async def test_abandoned_call_reservation_converts_to_spend_on_resume(
         reactions_json(FIRST_WIN),
         reactions_json(LOSE),
     ]
-    with pytest.raises(RuntimeError):
-        await run_job(seeded_job.id, deps)
+    await run_job(seeded_job.id, deps)  # provider dies before responding: honest requeue
     pending = (
         (await deps.db.execute(select(LlmCallRow).where(LlmCallRow.status == "pending")))
         .scalars()

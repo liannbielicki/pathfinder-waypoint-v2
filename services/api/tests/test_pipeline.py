@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +12,7 @@ from waypoint.tables import (
     CandidateRow,
     EvolveRoundRow,
     FleetControlRow,
+    JobRow,
     LlmCallRow,
     MeasurementRow,
     RunRow,
@@ -110,6 +110,16 @@ async def test_evaluation_calls_run_at_temperature_zero(deps: FakeDeps, seeded_j
     assert by_stage["screen"] == {0.0}
     assert by_stage["final"] == {0.0}
     assert by_stage["evolve"] == {None}  # generation stays creative
+
+
+async def test_reaction_prompts_carry_full_persona_cards(deps: FakeDeps, seeded_job) -> None:
+    """A bare label+role panel produced constant role-driven ratings; the
+    reaction prompt must carry each member's card substance."""
+    await run_job(seeded_job.id, deps)
+    for stage in ("screen", "final"):
+        prompt = deps.gateway.prompts_for(stage)[0]
+        assert '"card"' in prompt
+        assert "trade_bucket" in prompt  # a card fact, not just a label
 
 
 async def test_round_ledger_is_written_per_round(deps: FakeDeps, seeded_job) -> None:
@@ -258,6 +268,33 @@ async def test_generation_failure_fails_the_run_honestly(deps: FakeDeps, seeded_
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "failed"
     assert await candidate_count(deps.db, seeded_job.run_id) == 0
+
+
+async def test_unhandled_crash_records_reason_and_requeues(deps: FakeDeps, seeded_job) -> None:
+    """A raw dependency crash (the persona-429 / deep-400 incident) must burn
+    the attempt immediately with a recorded cause — never an anonymous
+    lease-expiry loop."""
+
+    async def boom(segment: str):
+        raise RuntimeError("persona service exploded")
+
+    deps.get_personas = boom
+    await run_job(seeded_job.id, deps)  # must not raise
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.status == "queued"  # attempts remain: retriable
+    assert "unhandled at evolve" in job.checkpoint["failure"]["reason"]
+    assert "persona service exploded" in job.checkpoint["failure"]["reason"]
+
+    job.attempts = job.max_attempts  # last attempt burned
+    await deps.db.commit()
+    await run_job(seeded_job.id, deps)
+    await deps.db.refresh(job)
+    assert job.status == "failed"
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    await deps.db.refresh(run)
+    assert run.status == "failed"
+    assert "unhandled at evolve" in (run.stop_reason or "")
 
 
 async def test_critic_failure_fails_closed(deps: FakeDeps, seeded_job) -> None:
@@ -494,8 +531,10 @@ async def test_transient_measure_failure_retries_instead_of_abstaining(
         raise RateLimitExhausted("429 storm")
 
     deps.create_plan = flaky
-    with pytest.raises(RateLimitExhausted):
-        await run_job(seeded_job.id, deps)
+    await run_job(seeded_job.id, deps)  # honest requeue, not a crash
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.status == "queued"  # retriable: measure re-runs on the next claim
     winner = (
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()

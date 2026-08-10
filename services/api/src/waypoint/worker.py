@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.db import make_engine, make_session_factory
-from waypoint.llm import LLMGateway, Pricing
+from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
 from waypoint.pipeline import (
@@ -75,12 +75,18 @@ async def load_personas(settings: Settings, segment: str) -> list[Persona]:
         follow_redirects=False,
         headers={"X-API-Key": settings.PERSONA_TOKEN.get_secret_value()},
     ) as client:
-        response = await client.post(
-            f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
-            json={**PERSONA_PANEL_REQUEST, "segment": segment},
-        )
-        response.raise_for_status()
-        payload = response.json()
+
+        async def fetch() -> httpx.Response:
+            response = await client.post(
+                f"{str(settings.PERSONA_URL).rstrip('/')}/api/persona-cards",
+                json={**PERSONA_PANEL_REQUEST, "segment": segment},
+            )
+            response.raise_for_status()
+            return response
+
+        # The persona-cards service rate-limits aggressively until its quota
+        # is raised: back off through 429s instead of burning a job attempt.
+        payload = (await retry_rate_limit(fetch, attempts=5, backoff_seconds=3.0)).json()
     items = payload["personas"]
     if items:
         # ponytail: heuristic field mapping — the persona-cards service's item
