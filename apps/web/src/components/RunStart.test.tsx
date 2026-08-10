@@ -190,12 +190,15 @@ describe("RunStart", () => {
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
   });
 
-  it("stays usable with table defaults when the settings fetch fails", async () => {
-    stubFetch({ settings: new Error("network down") });
-    render(<RunStart onStarted={vi.fn()} />);
-    await waitFor(() =>
-      expect(screen.getByLabelText(/max rounds per pro/i)).toHaveValue(10),
-    );
-    expect(screen.getByText(/defaults could not be loaded/i)).toBeVisible();
+  it("disables loop controls and still submits when the settings fetch fails", async () => {
+    const { createCalls } = stubFetch({ settings: new Error("network down") });
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await screen.findByText(/defaults could not be loaded/i);
+    expect(screen.getByLabelText(/max rounds per pro/i)).toBeDisabled();
+    await fillRequiredInputs();
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0].loop_config).toBeUndefined(); // server defaults apply
   });
 });

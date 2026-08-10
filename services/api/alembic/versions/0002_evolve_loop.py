@@ -49,12 +49,10 @@ def upgrade() -> None:
         sa.Column("run_id", sa.Text(), nullable=False),
         sa.Column("pro_id", sa.Text(), nullable=False),
         sa.Column("round", sa.Integer(), nullable=False),
-        sa.Column("mode", sa.Text(), nullable=False),
         sa.Column("mechanism", sa.Text(), nullable=False),
         sa.Column("candidate_id", sa.Text(), nullable=True),
         sa.Column("outcome", sa.Text(), nullable=False),
         sa.Column("score_pp", sa.Numeric(precision=8, scale=4), nullable=True),
-        sa.Column("best_score_after", sa.Numeric(precision=8, scale=4), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

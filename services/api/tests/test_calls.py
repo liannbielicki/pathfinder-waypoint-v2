@@ -17,6 +17,8 @@ from waypoint.calls import (
 from waypoint.llm import LLMResult, Pricing
 from waypoint.tables import LlmCallRow
 
+from .conftest import NoFleetSlots
+
 PRICING = Pricing(
     models={"fast": "model-fast", "deep": "model-deep"},
     usd_per_mtok={
@@ -69,7 +71,7 @@ def metered(session: AsyncSession, gateway: FakeGateway, ledger: Ledger) -> Mete
     return MeteredLLM(
         gateway=gateway,
         records=RecordedCalls(session),
-        slots=None,
+        slots=NoFleetSlots(),
         pricing=PRICING,
         reserve=ledger.reserve,
         reconcile=ledger.reconcile,
@@ -204,3 +206,51 @@ async def test_closing_a_holders_connection_frees_its_slot(db_engine) -> None:
         assert got == slot
     finally:
         await second.close()
+
+
+async def test_reservation_survives_pipeline_rollback_on_provider_failure(
+    db_session_factory,
+) -> None:
+    """D5 (load-bearing): paid facts commit on the calls session and must be
+    visible from a FRESH session even though the pipeline session only ever
+    rolls back — a regression that rebinds reserve to the pipeline session
+    fails this test."""
+    from functools import partial
+
+    from waypoint import queue
+    from waypoint.tables import FleetControlRow, RunRow
+
+    from .conftest import NoFleetSlots
+
+    async with db_session_factory() as seed:
+        seed.add(
+            RunRow(
+                id="run-1",
+                pro_ids=["pro_1"],
+                audience_query="q",
+                audience_run="r",
+                channels=["email"],
+                cost_limit=Decimal("100.00"),
+            )
+        )
+        seed.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+        await seed.commit()
+
+    async with db_session_factory() as pipeline_session, db_session_factory() as calls_session:
+        m = MeteredLLM(
+            gateway=FakeGateway(fail=True),
+            records=RecordedCalls(calls_session),
+            slots=NoFleetSlots(),
+            pricing=PRICING,
+            reserve=partial(queue.reserve_cost, calls_session),
+            reconcile=partial(queue.reconcile_cost, calls_session),
+        )
+        with pytest.raises(RuntimeError):
+            await call(m)
+        await pipeline_session.rollback()  # the pipeline transaction dies uncommitted
+
+    async with db_session_factory() as fresh:
+        run = await fresh.get(RunRow, "run-1")
+        assert run is not None and run.cost_reserved > 0  # reservation is durable
+        row = await row_for(fresh, KEY)
+        assert row is not None and row.status == "pending"  # resolvable on resume

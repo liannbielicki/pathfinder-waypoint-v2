@@ -99,14 +99,10 @@ class EvolveRoundRow(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     pro_id: Mapped[str]
     round: Mapped[int] = mapped_column(Integer)
-    mode: Mapped[str]  # stay | shift
     mechanism: Mapped[str]
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"), default=None)
     outcome: Mapped[str]  # win | lose | suppressed | unavailable
     score_pp: Mapped[float | None] = mapped_column(Numeric(8, 4, asdecimal=False), default=None)
-    best_score_after: Mapped[float | None] = mapped_column(
-        Numeric(8, 4, asdecimal=False), default=None
-    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

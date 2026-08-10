@@ -277,3 +277,43 @@ async def test_checkpoint_persists_stage_payload(db_session) -> None:
     row = (await db_session.execute(select(JobRow).where(JobRow.id == job_id))).scalar_one()
     assert row.checkpoint["context"] == {"org_count": 1}
     assert row.checkpoint["generate"] == {"candidates": 3}
+
+
+async def test_stalled_run_with_all_terminal_jobs_is_finalized(db_session) -> None:
+    """Crash window: the last job committed terminal but finalize_run never ran.
+    The worker idle beat's sweep must heal it."""
+    from waypoint.pipeline import finalize_stalled_runs
+    from waypoint.tables import WinnerRow
+
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="pro", pro_id="pro_1")
+    await db_session.commit()
+    job = await db_session.get(JobRow, job_id)
+    job.status = "done"
+    run = await db_session.get(RunRow, "run-1")
+    run.status = "running"
+    db_session.add(WinnerRow(run_id="run-1", pro_id="pro_1", kind="winner", rationale="r"))
+    # A sibling run still working must be left alone.
+    db_session.add(
+        RunRow(
+            id="run-2",
+            pro_ids=["pro_2"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal("100.00"),
+            status="running",
+        )
+    )
+    await db_session.flush()
+    await enqueue(db_session, "run-2", stage="pro", pro_id="pro_2")
+    await db_session.commit()
+
+    assert await finalize_stalled_runs(db_session) == 1
+    run = await db_session.get(RunRow, "run-1")
+    await db_session.refresh(run)
+    assert run.status == "complete"
+    other = await db_session.get(RunRow, "run-2")
+    await db_session.refresh(other)
+    assert other.status == "running"
+    assert await finalize_stalled_runs(db_session) == 0  # idempotent

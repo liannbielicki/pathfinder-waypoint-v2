@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from waypoint.loop import DEFAULT_LOOP_CONFIG, replay
 from waypoint.pipeline import run_job
 from waypoint.tables import JobRow, LlmCallRow, RunRow, WinnerRow
 
@@ -148,4 +149,5 @@ async def test_replayed_state_matches_the_ledger_counters(deps: FakeDeps, seeded
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].outcome == "win"
     assert all(r.outcome == "lose" for r in ledger[1:])
-    assert ledger[-1].best_score_after == pytest.approx(float(ledger[0].score_pp), abs=1e-3)
+    state = replay(ledger, DEFAULT_LOOP_CONFIG)
+    assert state.best_score == pytest.approx(float(ledger[0].score_pp), abs=1e-3)

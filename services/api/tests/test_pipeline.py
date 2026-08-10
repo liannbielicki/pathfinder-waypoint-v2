@@ -150,8 +150,6 @@ async def test_win_stays_then_loss_shifts_and_forbids_tried_mechanisms(
     assert "Mode: REFINE" in prompts[1]  # after the win: stay
     assert "Mode: SHIFT" in prompts[2]  # after the loss: shift
     assert "invoice_delivery" in prompts[2]  # tried mechanism is forbidden
-    ledger = await rounds(deps.db, seeded_job.run_id)
-    assert [r.mode for r in ledger[:3]] == ["stay", "stay", "shift"]
 
 
 async def test_keep_delta_rejects_a_small_improvement(deps: FakeDeps, seeded_job) -> None:
@@ -177,8 +175,9 @@ async def test_patience_two_gives_a_mechanism_a_second_try(deps: FakeDeps, seede
     await deps.db.commit()
     deps.gateway.responses["screen"] = [reactions_json(LOSE)]
     await run_job(seeded_job.id, deps)
-    ledger = await rounds(deps.db, seeded_job.run_id)
-    assert [r.mode for r in ledger] == ["stay", "stay"]  # two tries, then dry → stop
+    prompts = deps.gateway.prompts_for("evolve")
+    assert len(prompts) == 2  # two tries on one mechanism, then dry → stop
+    assert all("Mode: REFINE" in p for p in prompts)  # never shifted
     assert await run_status(deps.db, seeded_job.run_id) == "no_action"
 
 

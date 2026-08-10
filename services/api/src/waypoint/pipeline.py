@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
@@ -30,7 +30,7 @@ from waypoint.loop import (
     stop_reason,
 )
 from waypoint.measurement import UnmeasurableWinner
-from waypoint.models import Recommendation
+from waypoint.models import TERMINAL_RUN_STATUSES, Recommendation
 from waypoint.n8n import ContextUnavailable, OrgBrief
 from waypoint.personas import (
     InsufficientPanelFit,
@@ -78,9 +78,6 @@ TERMINAL_STATES = {
     "panel_unavailable",
 }
 
-# UI-visible run statuses are the FRONTEND.md set; the specific taxonomy above
-# is carried in stop_reason.
-_TERMINAL_RUN_STATUSES = {"complete", "no_action", "abstained", "stopped", "failed"}
 
 
 class LeaseLost(Exception):
@@ -327,7 +324,7 @@ async def _champion_for(
 ) -> CandidateRow | None:
     """Champion-authoritative lookup: the round ledger decides."""
     ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
-    lstate = replay(ledger, config, MIN_REDUCTION_FLOOR_PP)
+    lstate = replay(ledger, config)
     if not lstate.best_candidate_id:
         return None
     return await deps.store.session.get(CandidateRow, lstate.best_candidate_id)
@@ -355,7 +352,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         return {"skipped": "no_brief"}
     config = LoopConfig.from_mapping(state.run.loop_config or {})
     ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
-    lstate = replay(ledger, config, MIN_REDUCTION_FLOOR_PP)
+    lstate = replay(ledger, config)
     history = [
         {"round": r.round, "mechanism": r.mechanism, "score_pp": r.score_pp, "outcome": r.outcome}
         for r in ledger
@@ -417,6 +414,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             # grounding gate (legacy incident class).
             raise PipelineFailure(f"critics_failed: {error}") from error
         verdict = verdicts.get(0, {"block_kind": "unreviewed", "reason": "no verdict returned"})
+        if "block_kind" not in verdict:
+            # Fail closed on a verdict that parsed but is missing the field.
+            verdict = {"block_kind": "unreviewed", "reason": "malformed verdict"}
 
         score: CandidateScore | None = None
         panel = None
@@ -440,9 +440,8 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     call_key=f"{key}:screen",
                 )
             except PipelineFailure:
-                # The evaluation was unavailable this round — an honest loss,
-                # never a fabricated score.
-                score = score_candidate([], cell, deps.calibration)
+                # The evaluation was unavailable this round — an honest loss
+                # with no score at all, never a fabricated one.
                 outcome, score_pp = "unavailable", None
             else:
                 score = score_candidate(reactions, cell, deps.calibration)
@@ -482,19 +481,16 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             score_pp=score_pp,
             outcome=outcome,
             config=config,
-            floor_pp=MIN_REDUCTION_FLOOR_PP,
         )
         session.add(
             EvolveRoundRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
                 round=rnd,
-                mode=mode,
                 mechanism=idea.mechanism,
                 candidate_id=candidate.id,
                 outcome=outcome,
                 score_pp=score_pp,
-                best_score_after=lstate.best_score,
             )
         )
         await session.commit()  # candidate + ledger row land atomically
@@ -519,6 +515,7 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         return {}  # resolves to no_action at score
     if "final" in champion.score:
         return {}  # resume
+    await _resolve_abandoned_calls(state, deps)  # a crashed final call may have paid
     try:
         panel = await _panel_for(state, deps, brief, 5)
     except InsufficientPanelFit as error:
@@ -634,6 +631,7 @@ async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, 
         return {}
     if await deps.store.measurement_for(winner.id) is not None:
         return {}  # resume
+    await _resolve_abandoned_calls(state, deps)  # a crashed measure call may have paid
     candidate = await deps.store.session.get(CandidateRow, winner.candidate_id)
     assert candidate is not None
     await _guard(state, deps)
@@ -687,7 +685,7 @@ async def finalize_run(session: AsyncSession, run_id: str) -> str | None:
             select(RunRow).where(RunRow.id == run_id).execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if run is None or run.status in _TERMINAL_RUN_STATUSES:
+    if run is None or run.status in TERMINAL_RUN_STATUSES:
         return None
     jobs = list(
         (
@@ -743,6 +741,28 @@ async def finalize_run(session: AsyncSession, run_id: str) -> str | None:
     return status
 
 
+# Non-terminal, non-degraded runs whose jobs are ALL terminal: the crash window
+# between the last job's terminal commit and its finalize_run call.
+_STALLED_RUNS_SQL = text("""
+SELECT r.id FROM runs r
+WHERE r.status NOT IN ('complete', 'no_action', 'abstained', 'stopped', 'failed', 'degraded')
+  AND EXISTS (SELECT 1 FROM jobs j WHERE j.run_id = r.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM jobs j
+    WHERE j.run_id = r.id AND j.status NOT IN ('done', 'failed', 'stopped')
+  )
+""")
+
+
+async def finalize_stalled_runs(session: AsyncSession) -> int:
+    """Self-heal runs stranded by a crash after their last job went terminal
+    but before finalize_run committed. Called from the worker idle beat."""
+    run_ids = [row.id for row in (await session.execute(_STALLED_RUNS_SQL)).all()]
+    for run_id in run_ids:
+        await finalize_run(session, run_id)
+    return len(run_ids)
+
+
 @dataclass
 class WinnerContext:
     run_id: str
@@ -771,7 +791,7 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
         await store.finish_job(job_id, "failed")
         await store.set_run_status(run.id, "failed", "superseded_deploy")
         return
-    if run.status in _TERMINAL_RUN_STATUSES:
+    if run.status in TERMINAL_RUN_STATUSES:
         if job.status not in ("done", "failed", "stopped"):
             await store.finish_job(job_id, "stopped")
         return

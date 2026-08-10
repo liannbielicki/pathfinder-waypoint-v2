@@ -19,7 +19,13 @@ from waypoint.calls import MAX_IN_FLIGHT_LLM_CALLS
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import HandoffUnavailable, LCMClient
 from waypoint.loop import LoopConfig
-from waypoint.models import HandoffReceipt, MeasurementPlan, RunCreate, RunView
+from waypoint.models import (
+    TERMINAL_RUN_STATUSES,
+    HandoffReceipt,
+    MeasurementPlan,
+    RunCreate,
+    RunView,
+)
 from waypoint.settings import Settings
 from waypoint.tables import (
     CandidateRow,
@@ -157,8 +163,11 @@ def create_app(
         if body.loop_config:
             # A confirmed edit becomes the persisted default for next time.
             fleet.loop_defaults = config.to_dict()
+        # Dedupe (order-preserving): duplicates would violate
+        # uq_jobs_run_stage_pro and 500 after the run row was created.
+        pro_ids = list(dict.fromkeys(body.pro_ids))
         run = RunRow(
-            pro_ids=body.pro_ids,
+            pro_ids=pro_ids,
             audience_query=body.audience_query,
             audience_run=body.audience_run,
             channels=body.channels,
@@ -167,7 +176,7 @@ def create_app(
         )
         session.add(run)
         await session.flush()
-        for pro_id in body.pro_ids:
+        for pro_id in pro_ids:
             await queue.enqueue(session, run.id, stage="pro", pro_id=pro_id)
         await session.commit()
         return _view(run)
@@ -274,10 +283,14 @@ def create_app(
     @app.post("/api/runs/{run_id}/kill", response_model=RunView)
     async def kill_run(run_id: str, session: SessionDep, _: AuthDep) -> RunView:
         run = await _run_or_404(session, run_id)
+        if run.status in TERMINAL_RUN_STATUSES:
+            # A terminal run is immutable; killing it would rewrite history.
+            raise HTTPException(status_code=409, detail=f"run is already {run.status}")
         run.status = "stopped"
         run.stop_reason = "operator_kill"
         for job in (await session.execute(select(JobRow).where(JobRow.run_id == run_id))).scalars():
-            job.status = "stopped"
+            if job.status not in ("done", "failed", "stopped"):
+                job.status = "stopped"
         await session.commit()
         return _view(run, spent=await _spent(session, run))
 

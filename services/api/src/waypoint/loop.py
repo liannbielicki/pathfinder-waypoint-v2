@@ -8,13 +8,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
-_KEYS = {
-    "MAX_ROUNDS": "max_rounds",
-    "MAX_NO_IMPROVE": "max_no_improve",
-    "PATIENCE": "patience",
-    "KEEP_DELTA_PP": "keep_delta_pp",
-    "WIN_THRESHOLD_PP": "win_threshold_pp",
-}
+_KEYS = frozenset(
+    {"MAX_ROUNDS", "MAX_NO_IMPROVE", "PATIENCE", "KEEP_DELTA_PP", "WIN_THRESHOLD_PP"}
+)
 
 
 @dataclass(frozen=True)
@@ -27,7 +23,7 @@ class LoopConfig:
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> LoopConfig:
-        unknown = set(data) - set(_KEYS)
+        unknown = set(data) - _KEYS
         if unknown:
             raise ValueError(f"unknown loop config keys: {sorted(unknown)}")
         merged = {**DEFAULT_LOOP_CONFIG.to_dict(), **dict(data)}
@@ -106,7 +102,6 @@ def apply_round(
     score_pp: float | None,
     outcome: str,
     config: LoopConfig,
-    floor_pp: float,
 ) -> LoopState:
     tried = state.tried_mechanisms
     if mechanism not in tried:
@@ -152,7 +147,7 @@ class RoundLike(Protocol):
     outcome: str
 
 
-def replay(rounds: Sequence[RoundLike], config: LoopConfig, floor_pp: float) -> LoopState:
+def replay(rounds: Sequence[RoundLike], config: LoopConfig) -> LoopState:
     """Rebuild loop state from the durable ledger — the one recovery code path."""
     state = LoopState()
     for row in rounds:
@@ -163,6 +158,5 @@ def replay(rounds: Sequence[RoundLike], config: LoopConfig, floor_pp: float) -> 
             score_pp=row.score_pp,
             outcome=row.outcome,
             config=config,
-            floor_pp=floor_pp,
         )
     return state

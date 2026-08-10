@@ -245,6 +245,16 @@ async def fake_create_plan(winner, llm, catalog) -> MeasurementPlan:
     )
 
 
+class NoFleetSlots:
+    """No-op stand-in for the fleet limiter; tests don't exercise the cap."""
+
+    async def acquire(self) -> int:
+        return 0
+
+    async def release(self, slot: int) -> None:
+        pass
+
+
 class FakeDeps(PipelineDeps):
     def __init__(self, session) -> None:
         store = CrashableStore(session)
@@ -261,7 +271,7 @@ class FakeDeps(PipelineDeps):
             llm=MeteredLLM(
                 gateway=gateway,
                 records=RecordedCalls(session),
-                slots=None,
+                slots=NoFleetSlots(),
                 pricing=FAKE_PRICING,
                 reserve=reserve,
                 reconcile=reconcile,

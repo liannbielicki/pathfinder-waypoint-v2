@@ -83,19 +83,22 @@ async def test_evolve_round_ledger_round_trips(db_session: AsyncSession) -> None
             run_id="run_3",
             pro_id="pro_1",
             round=1,
-            mode="stay",
             mechanism="invoice_delivery",
             candidate_id=None,
             outcome="win",
             score_pp=2.5,
-            best_score_after=2.5,
         )
     )
     await db_session.commit()
     row = (
         await db_session.execute(select(EvolveRoundRow).where(EvolveRoundRow.run_id == "run_3"))
     ).scalar_one()
-    assert (row.round, row.mode, row.outcome, row.score_pp) == (1, "stay", "win", 2.5)
+    assert (row.round, row.mechanism, row.outcome, row.score_pp) == (
+        1,
+        "invoice_delivery",
+        "win",
+        2.5,
+    )
 
 
 async def test_duplicate_round_number_is_rejected(db_session: AsyncSession) -> None:
@@ -107,7 +110,6 @@ async def test_duplicate_round_number_is_rejected(db_session: AsyncSession) -> N
             run_id="run_4",
             pro_id="pro_1",
             round=1,
-            mode="stay",
             mechanism="m",
             outcome="lose",
         )
@@ -118,7 +120,6 @@ async def test_duplicate_round_number_is_rejected(db_session: AsyncSession) -> N
             run_id="run_4",
             pro_id="pro_1",
             round=1,
-            mode="shift",
             mechanism="m2",
             outcome="lose",
         )

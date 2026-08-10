@@ -104,7 +104,6 @@ def test_win_stays_on_the_same_mechanism() -> None:
         score_pp=2.0,
         outcome="win",
         config=cfg(),
-        floor_pp=FLOOR,
     )
     assert state.best_score == 2.0
     assert state.current_mechanism == "invoices"
@@ -119,7 +118,6 @@ def test_lose_at_patience_one_shifts() -> None:
         score_pp=0.2,
         outcome="lose",
         config=cfg(),
-        floor_pp=FLOOR,
     )
     assert state.best_score is None
     assert state.dry_mechanisms == 1
@@ -135,7 +133,6 @@ def test_patience_two_gets_a_second_try_before_shifting() -> None:
         score_pp=0.2,
         outcome="lose",
         config=config,
-        floor_pp=FLOOR,
     )
     assert next_mode(state, config) == "stay"
     assert state.dry_mechanisms == 0
@@ -146,7 +143,6 @@ def test_patience_two_gets_a_second_try_before_shifting() -> None:
         score_pp=0.3,
         outcome="lose",
         config=config,
-        floor_pp=FLOOR,
     )
     assert next_mode(state, config) == "shift"
     assert state.dry_mechanisms == 1
@@ -169,7 +165,6 @@ def test_win_resets_tries_and_dry_counters() -> None:
         score_pp=3.0,
         outcome="win",
         config=config,
-        floor_pp=FLOOR,
     )
     assert state.tries_on_current == 0
     assert state.dry_mechanisms == 0
@@ -186,7 +181,6 @@ def test_non_scored_outcomes_consume_patience_like_losses(outcome: str) -> None:
         score_pp=None,
         outcome=outcome,
         config=cfg(),
-        floor_pp=FLOOR,
     )
     assert state.dry_mechanisms == 1
     assert next_mode(state, cfg()) == "shift"
@@ -202,7 +196,6 @@ def test_tried_mechanisms_accumulate_ordered_and_deduped() -> None:
             score_pp=0.0,
             outcome="lose",
             config=cfg(patience=5),
-            floor_pp=FLOOR,
         )
     assert state.tried_mechanisms == ("a", "b")
     assert state.round == 3
@@ -256,9 +249,8 @@ def test_replay_reproduces_the_live_folded_state() -> None:
             score_pp=row.score_pp,
             outcome=row.outcome,
             config=config,
-            floor_pp=FLOOR,
         )
-    assert replay(rounds, config, FLOOR) == live
+    assert replay(rounds, config) == live
     assert live.best_score == 3.5
     assert live.best_candidate_id == "c4"
     assert live.round == 4

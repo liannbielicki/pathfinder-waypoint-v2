@@ -24,11 +24,6 @@ const LOOP_FIELDS: LoopField[] = [
     help: "A reduction above this ends the search as a success.", min: 0 },
 ];
 
-const TABLE_DEFAULTS: Record<string, number> = {
-  MAX_ROUNDS: 10, MAX_NO_IMPROVE: 3, PATIENCE: 1,
-  KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
-};
-
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [proIds, setProIds] = useState("");
   const [audienceQuery, setAudienceQuery] = useState("");
@@ -53,26 +48,21 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         ));
       })
       .catch(() => {
-        if (cancelled) return;
-        setDefaultsError(true);
-        setDefaults(TABLE_DEFAULTS);
-        setValues(Object.fromEntries(
-          LOOP_FIELDS.map((f) => [f.key, String(TABLE_DEFAULTS[f.key])]),
-        ));
+        if (!cancelled) setDefaultsError(true);
       });
     return () => { cancelled = true; };
   }, []);
 
   const ids = proIds.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-  const effective = defaults ?? TABLE_DEFAULTS;
   const changed = (key: string) =>
-    defaults !== null && Number(values[key]) !== effective[key];
+    defaults !== null && Number(values[key]) !== defaults[key];
 
   function focusField(id: string) {
     formRef.current?.querySelector<HTMLElement>(`#${id}`)?.focus();
   }
 
   function validateLoopControls(): string | null {
+    if (defaults === null) return null; // controls disabled; no overrides possible
     for (const field of LOOP_FIELDS) {
       if (!changed(field.key)) continue;
       const value = Number(values[field.key]);
@@ -85,9 +75,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         return `Type confirm to apply the new ${field.label}.`;
       }
     }
-    const keepDelta = Number(values.KEEP_DELTA_PP ?? effective.KEEP_DELTA_PP);
+    const keepDelta = Number(values.KEEP_DELTA_PP ?? defaults.KEEP_DELTA_PP);
     const winThreshold = Number(
-      values.WIN_THRESHOLD_PP ?? effective.WIN_THRESHOLD_PP,
+      values.WIN_THRESHOLD_PP ?? defaults.WIN_THRESHOLD_PP,
     );
     if (keepDelta > winThreshold) {
       focusField("loop-KEEP_DELTA_PP");
@@ -166,11 +156,12 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         </select>
       </fieldset>
 
-      <fieldset disabled={defaults === null && !defaultsError}>
+      <fieldset disabled={defaults === null}>
         <legend>Loop behavior</legend>
         {defaultsError && (
           <p className="helper">
-            Persisted defaults could not be loaded; showing the standard defaults.
+            Loop defaults could not be loaded; controls are disabled and the run
+            uses the server defaults.
           </p>
         )}
         {LOOP_FIELDS.map((field) => (

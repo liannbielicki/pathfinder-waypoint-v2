@@ -6,7 +6,7 @@ Run with: python -m waypoint.worker
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -21,7 +21,13 @@ from waypoint.db import make_engine, make_session_factory
 from waypoint.llm import LLMGateway, Pricing
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
-from waypoint.pipeline import PipelineDeps, PostgresStore, QueueOps, finalize_run, run_job
+from waypoint.pipeline import (
+    PipelineDeps,
+    PostgresStore,
+    QueueOps,
+    finalize_stalled_runs,
+    run_job,
+)
 from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import load_calibration
 from waypoint.settings import Settings
@@ -152,13 +158,16 @@ async def main() -> None:
             await session.commit()
             if job is None:
                 # Idle beat: surface any job that died with no attempts left,
-                # then finalize its run so the failure is visible, not hidden.
+                # then finalize every run whose jobs are all terminal — this
+                # covers reaped runs AND runs stranded by a crash between the
+                # last job's terminal commit and its finalize_run call.
                 reaped = await fail_stale_jobs(session)
                 await session.commit()
                 if reaped:
                     log.warning("reaped %d attempts-exhausted jobs as failed", len(reaped))
-                    for run_id in {run_id for _, run_id in reaped}:
-                        await finalize_run(session, run_id)
+                healed = await finalize_stalled_runs(session)
+                if healed:
+                    log.warning("finalized %d stalled runs", healed)
                 await asyncio.sleep(POLL_SECONDS)
                 continue
             log.info("worker %s claimed job %s (run %s)", worker_id, job.id, job.run_id)
@@ -166,20 +175,6 @@ async def main() -> None:
             # paid facts (usage rows, call records, reservations, reconciles)
             # survive pipeline rollbacks.
             async with factory() as usage_session:
-
-                async def reserve(
-                    run_id: str, amount: Decimal, _s: AsyncSession = usage_session
-                ) -> bool:
-                    return await queue.reserve_cost(_s, run_id, amount)
-
-                async def reconcile(
-                    run_id: str,
-                    reserved: Decimal,
-                    actual: Decimal,
-                    _s: AsyncSession = usage_session,
-                ) -> None:
-                    await queue.reconcile_cost(_s, run_id, reserved, actual)
-
                 deps = PipelineDeps(
                     store=PostgresStore(session),
                     llm=MeteredLLM(
@@ -187,8 +182,8 @@ async def main() -> None:
                         records=RecordedCalls(usage_session),
                         slots=slots,
                         pricing=pricing,
-                        reserve=reserve,
-                        reconcile=reconcile,
+                        reserve=partial(queue.reserve_cost, usage_session),
+                        reconcile=partial(queue.reconcile_cost, usage_session),
                     ),
                     context=context,
                     queue=QueueOps(session),

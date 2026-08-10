@@ -19,6 +19,9 @@ RunStatus = Literal[
     "no_action",
 ]
 
+# UI-visible terminal statuses; the finer taxonomy is carried in stop_reason.
+TERMINAL_RUN_STATUSES = frozenset({"complete", "no_action", "abstained", "stopped", "failed"})
+
 
 class RunCreate(BaseModel):
     pro_ids: list[str] = Field(min_length=1)

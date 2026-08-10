@@ -126,6 +126,44 @@ async def test_kill_stops_the_run(
     assert job.status == "stopped"
 
 
+async def test_kill_of_a_terminal_run_is_409_and_rewrites_nothing(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    run = await db_session.get(RunRow, created["id"])
+    assert run is not None
+    run.status = "complete"
+    job = (
+        await db_session.execute(select(JobRow).where(JobRow.run_id == created["id"]))
+    ).scalar_one()
+    job.status = "done"
+    await db_session.commit()
+    response = await auth_client.post(f"/api/runs/{created['id']}/kill")
+    assert response.status_code == 409
+    await db_session.refresh(run)
+    await db_session.refresh(job)
+    assert run.status == "complete" and run.stop_reason is None
+    assert job.status == "done"
+
+
+async def test_duplicate_pro_ids_are_deduped_not_500(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    body = {**RUN_REQUEST, "pro_ids": ["pro_1", "pro_2", "pro_1"]}
+    response = await auth_client.post("/api/runs", json=body)
+    assert response.status_code == 202
+    created = response.json()
+    assert created["pro_ids"] == ["pro_1", "pro_2"]
+    jobs = (
+        (await db_session.execute(select(JobRow).where(JobRow.run_id == created["id"])))
+        .scalars()
+        .all()
+    )
+    assert sorted(j.pro_id for j in jobs) == ["pro_1", "pro_2"]
+
+
 async def test_handoff_without_ready_winner_is_409(
     auth_client: httpx.AsyncClient,
 ) -> None:

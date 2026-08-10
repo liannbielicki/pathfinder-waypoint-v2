@@ -165,7 +165,7 @@ class MeteredLLM:
 
     gateway: LLMLike
     records: RecordedCalls
-    slots: FleetSlots | None  # None only in unit tests without a fleet
+    slots: FleetSlots
     pricing: Pricing
     reserve: Callable[[str, Decimal], Awaitable[bool]]  # (run_id, amount)
     reconcile: Callable[[str, Decimal, Decimal], Awaitable[None]]  # (run_id, reserved, actual)
@@ -213,8 +213,11 @@ class MeteredLLM:
             # A recovered crash converted the old attempt's reservation to
             # spend; this is a NEW attempt under a new reservation. ponytail:
             # a stale owner racing commit_result here would write the same
-            # deterministic prompt's response and over-count spend slightly —
-            # honest direction, tiny window, not worth a fencing token.
+            # deterministic prompt's response, over-count spend slightly, and
+            # leave THIS attempt's reservation held until run end (our
+            # commit_result returns False, skipping the reconcile) — both
+            # effects honest-direction and self-limiting, tiny window, not
+            # worth a fencing token.
             worst = worst_case_cost(self.pricing, tier, prompt, system, max_tokens)
             if not await self.reserve(run_id, worst):
                 raise BudgetExhausted(call_key)
@@ -223,7 +226,7 @@ class MeteredLLM:
             await self.records.session.commit()
         else:  # pending from a crashed attempt: its reservation is already durable
             worst = row.reserved_usd
-        slot = await self.slots.acquire() if self.slots is not None else None
+        slot = await self.slots.acquire()
         try:
             result = await self.gateway.complete(
                 tier,
@@ -237,8 +240,7 @@ class MeteredLLM:
         finally:
             # A provider failure leaves the row pending; the durable worst-case
             # reservation is resolved by abandon_stale on resume.
-            if slot is not None and self.slots is not None:
-                await self.slots.release(slot)
+            await self.slots.release(slot)
         if await self.records.commit_result(
             row,
             result.text,

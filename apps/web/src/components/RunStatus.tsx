@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { TERMINAL_STATES, type RunDetail } from "@/lib/api";
 
 const PIPELINE_STAGES = ["context", "evolve", "final", "score", "measure", "ready"];
@@ -90,12 +90,12 @@ export function RunStatus({
           <dl className="run-settings">
             {SETTING_LABELS.filter(([key]) => key in loopConfig).map(
               ([key, label]) => (
-                <div key={key} style={{ display: "contents" }}>
+                <Fragment key={key}>
                   <dt>
                     {label} <small className="technical">{key}</small>
                   </dt>
                   <dd>{loopConfig[key]}</dd>
-                </div>
+                </Fragment>
               ),
             )}
           </dl>
