@@ -27,6 +27,7 @@ export const RUN_FIXTURE: RunDetail = {
   measurements: [],
   handoffs: [],
   killed: false,
+  agents_in_flight: 0,
 };
 
 const WINNER: Winner = {
@@ -106,6 +107,17 @@ describe("RunStatus", () => {
     expect(screen.getByText(/2 of 3 pros decided/i)).toBeVisible();
     expect(screen.getByText(/1 winner/i)).toBeVisible();
     expect(screen.getByText(/1 no-action/i)).toBeVisible();
+  });
+
+  it("shows an agents-in-parallel pill only when agents are in flight", () => {
+    const { rerender } = render(
+      <RunStatus run={{ ...RUN_FIXTURE, status: "running", agents_in_flight: 3 }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText(/3 agents in parallel/i)).toBeVisible();
+    rerender(
+      <RunStatus run={{ ...RUN_FIXTURE, status: "running", agents_in_flight: 0 }} onKill={vi.fn()} />,
+    );
+    expect(screen.queryByText(/in parallel/i)).not.toBeInTheDocument();
   });
 
   it("names possible paid work when a stop happened after spend", () => {

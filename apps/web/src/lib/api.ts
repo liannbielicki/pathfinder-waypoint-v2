@@ -69,6 +69,9 @@ export type RunDetail = Omit<
   winners: Winner[];
   measurements: Measurement[];
   handoffs: Handoff[];
+  // Per-Pro jobs a worker is actively leasing right now. Not in the generated
+  // base type; regenerate api-types.ts from the live OpenAPI schema to sync.
+  agents_in_flight: number;
 };
 
 export const TERMINAL_STATES = new Set([

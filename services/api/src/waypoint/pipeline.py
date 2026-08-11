@@ -388,6 +388,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             best_json=best_json,
             history_json=json.dumps(history),
             tried_mechanisms=list(lstate.tried_mechanisms),
+            channels=list(state.run.channels),
         )
         try:
             proposal = await deps.llm.complete(
@@ -464,6 +465,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 )
 
         status = {"win": "champion", "suppressed": "suppressed"}.get(outcome, "discarded")
+        # Exactly one CandidateRow per round, committed atomically with the
+        # ledger row below. The UI derives each result's loop count by counting
+        # candidates per Pro — keep this 1:1 with rounds or that count drifts.
         candidate = CandidateRow(
             run_id=state.run.id,
             pro_id=state.pro_id,

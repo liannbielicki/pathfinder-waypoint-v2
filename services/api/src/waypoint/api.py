@@ -49,6 +49,7 @@ class RunDetail(RunView):
     measurements: list[dict[str, Any]]
     handoffs: list[dict[str, Any]]
     killed: bool
+    agents_in_flight: int  # per-Pro jobs a worker is actively leasing right now
 
 
 class HandoffResponse(BaseModel):
@@ -200,6 +201,20 @@ def create_app(
         jobs = (
             (await session.execute(select(JobRow).where(JobRow.run_id == run_id))).scalars().all()
         )
+        # Agents in flight: per-Pro jobs a worker is actively leasing right now
+        # (running with a live lease). func.now() is DB-side so it matches the
+        # claim SQL and sidesteps client/column tz mismatch.
+        agents_in_flight = (
+            await session.execute(
+                select(func.count())
+                .select_from(JobRow)
+                .where(
+                    JobRow.run_id == run_id,
+                    JobRow.status == "running",
+                    JobRow.lease_until > func.now(),
+                )
+            )
+        ).scalar_one()
         # A stage shows done only when EVERY per-Pro job checkpointed it — an
         # honest floor; a half-done stage never shows a checkmark.
         stages: dict[str, Any] = {}
@@ -278,6 +293,7 @@ def create_app(
                 for h in handoffs
             ],
             killed=await queue.fleet_is_killed(session),
+            agents_in_flight=agents_in_flight,
         )
 
     @app.post("/api/runs/{run_id}/kill", response_model=RunView)

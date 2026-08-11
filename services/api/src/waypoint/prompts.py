@@ -27,7 +27,28 @@ def fenced_context(context: str) -> str:
     return f"{UNTRUSTED_START}\n{context}\n{UNTRUSTED_END}"
 
 
-def generator_prompt(org_context: str, count: int) -> str:
+def channel_directive(channels: list[str]) -> str:
+    """Gate idea generation to the run's operator-selected delivery channels.
+    SMS carries an extra brevity constraint so ideas are shaped for a single
+    ~160-character text, not long-form mechanics that only work in email."""
+    allowed = [c for c in channels if c in ("sms", "email")]
+    if not allowed:  # defensive: never leave the model unconstrained
+        allowed = ["sms", "email"]
+    picks = " or ".join(f'"{c}"' for c in allowed)
+    lines = [
+        f"Delivery for this Pro is gated to {picks}. Set channel to one of {picks} "
+        '(use "none" only for a monitor-only hold); never propose a channel outside that set.'
+    ]
+    if allowed == ["sms"]:
+        lines.append(
+            "This will be delivered as a single SMS: shape the concept as one brief, "
+            "self-contained ask that fits a ~160-character text — no long-form, "
+            "multi-part, or email-only mechanics."
+        )
+    return "\n".join(lines)
+
+
+def generator_prompt(org_context: str, count: int, channels: list[str]) -> str:
     return f"""Generate exactly {count} grounded retention action ideas for ONE specific Pro
 (a single HCP customer organization).
 
@@ -48,7 +69,7 @@ These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
 email or SMS copy.
 
-For channel choose sms or email (use none only for a monitor-only hold).
+{channel_directive(channels)}
 Make ideas operationally testable and meaningfully different from each other.
 
 Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
@@ -121,6 +142,7 @@ def evolve_prompt(
     best_json: str | None,
     history_json: str,
     tried_mechanisms: list[str],
+    channels: list[str],
 ) -> str:
     if mode == "stay":
         directive = f"""Mode: REFINE. The best idea so far is working. Propose ONE refined variant of
@@ -157,7 +179,7 @@ These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
 email or SMS copy.
 
-For channel choose sms or email (use none only for a monitor-only hold).
+{channel_directive(channels)}
 
 {directive}
 History of this Pro's rounds so far (score_pp is the frozen churn-reduction

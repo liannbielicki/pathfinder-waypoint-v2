@@ -29,7 +29,24 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   );
 }
 
-function WinnerCard({ winner, candidate }: { winner: Winner; candidate?: Candidate }) {
+function Rounds({ rounds }: { rounds: number }) {
+  if (rounds === 0) return null;
+  return (
+    <p>
+      <small>evolve loop: {rounds} round{rounds === 1 ? "" : "s"}</small>
+    </p>
+  );
+}
+
+function WinnerCard({
+  winner,
+  candidate,
+  rounds,
+}: {
+  winner: Winner;
+  candidate?: Candidate;
+  rounds: number;
+}) {
   if (winner.kind === "no_action") {
     return (
       <div className="card">
@@ -38,6 +55,7 @@ function WinnerCard({ winner, candidate }: { winner: Winner; candidate?: Candida
           The panel evidence does not support a touch for this pro ({winner.rationale}).
           This is a legitimate outcome; nothing will be handed off.
         </p>
+        <Rounds rounds={rounds} />
       </div>
     );
   }
@@ -46,6 +64,7 @@ function WinnerCard({ winner, candidate }: { winner: Winner; candidate?: Candida
       <div className="card">
         <h4>Abstained for {winner.pro_id}</h4>
         <p>{winner.rationale}</p>
+        <Rounds rounds={rounds} />
       </div>
     );
   }
@@ -61,6 +80,12 @@ function WinnerCard({ winner, candidate }: { winner: Winner; candidate?: Candida
           mechanism: {String(rec?.mechanism)} · channel: {String(rec?.channel)}
         </small>
       </p>
+      <p>
+        <small>
+          org uuid: <code>{String(winner.evidence?.org_id ?? winner.pro_id)}</code>
+        </small>
+      </p>
+      <Rounds rounds={rounds} />
       <h5>Why (manager rationale)</h5>
       <p>{winner.rationale}</p>
       {finalScore && <ScoreBlock score={finalScore} />}
@@ -99,6 +124,12 @@ export function WinnerReview({
     (w) => w.kind === "winner" && measuredWinnerIds.has(w.id),
   );
   const candidateById = new Map(run.candidates.map((c) => [c.id, c]));
+  // One candidate row is persisted per evolve round, so candidates-per-Pro is
+  // the loop count for that result.
+  const roundsByPro = new Map<string, number>();
+  for (const c of run.candidates) {
+    roundsByPro.set(c.pro_id, (roundsByPro.get(c.pro_id) ?? 0) + 1);
+  }
 
   return (
     <section className="panel" aria-label="Winner review">
@@ -109,6 +140,7 @@ export function WinnerReview({
           key={winner.id}
           winner={winner}
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
+          rounds={roundsByPro.get(winner.pro_id) ?? 0}
         />
       ))}
 

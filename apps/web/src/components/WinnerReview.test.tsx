@@ -78,6 +78,31 @@ describe("WinnerReview", () => {
     expect(screen.getAllByText(/invoices_sent|Invoices sent/).length).toBeGreaterThan(0);
   });
 
+  it("shows the org uuid the message is attached to", () => {
+    render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByText(/org uuid/i)).toBeInTheDocument();
+    expect(screen.getByText("org_1")).toBeInTheDocument();
+  });
+
+  it("shows how many evolve rounds the result took", () => {
+    render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
+    // One candidate row per round: the fixture's single candidate → 1 round.
+    expect(screen.getByText(/evolve loop: 1 round/i)).toBeInTheDocument();
+  });
+
+  it("counts every round for a Pro, including discarded losers", () => {
+    const loser = { ...WINNER_RUN.candidates[0], id: "cand-0", status: "discarded" };
+    render(
+      <WinnerReview
+        run={{ ...WINNER_RUN, candidates: [loser, ...WINNER_RUN.candidates] }}
+        onHandoff={vi.fn()}
+        handingOff={false}
+      />,
+    );
+    // Two candidate rows for pro_1 (one discarded loser + the winner) → 2 rounds.
+    expect(screen.getByText(/evolve loop: 2 rounds/i)).toBeInTheDocument();
+  });
+
   it("renders no-action as a legitimate outcome, not an error", () => {
     render(
       <WinnerReview

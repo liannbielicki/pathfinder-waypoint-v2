@@ -55,6 +55,11 @@ export function RunStatus({
       <p role="status" aria-live="polite" className={`state state-${run.status}`}>
         {run.status.replace("_", " ")}
       </p>
+      {run.agents_in_flight > 0 && (
+        <span className="pill" title="Per-Pro jobs a worker is processing right now">
+          {run.agents_in_flight} agent{run.agents_in_flight === 1 ? "" : "s"} in parallel
+        </span>
+      )}
       {run.stop_reason && <p className="stop-reason">Stop reason: {run.stop_reason}</p>}
       {["stopped", "failed", "degraded"].includes(run.status) && spentSomething && (
         <p className="stop-reason">Paid work may have occurred before the stop.</p>
