@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
-from waypoint.calls import MAX_IN_FLIGHT_LLM_CALLS
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import HandoffUnavailable, LCMClient
 from waypoint.loop import LoopConfig
@@ -192,7 +191,7 @@ def create_app(
         await session.commit()
         return {
             "loop_defaults": effective.to_dict(),
-            "max_in_flight_llm_calls": MAX_IN_FLIGHT_LLM_CALLS,
+            "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)

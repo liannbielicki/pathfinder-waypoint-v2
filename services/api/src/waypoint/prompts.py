@@ -36,8 +36,10 @@ def channel_directive(channels: list[str]) -> str:
         allowed = ["sms", "email"]
     picks = " or ".join(f'"{c}"' for c in allowed)
     lines = [
-        f"Delivery for this Pro is gated to {picks}. Set channel to one of {picks} "
-        '(use "none" only for a monitor-only hold); never propose a channel outside that set.'
+        (
+            f"Delivery for this Pro is gated to {picks}. Set channel to one of {picks} "
+            '(use "none" only for a monitor-only hold); never propose a channel outside that set.'
+        )
     ]
     if allowed == ["sms"]:
         lines.append(

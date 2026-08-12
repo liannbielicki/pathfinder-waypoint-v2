@@ -54,13 +54,21 @@ class FleetSlots:
     Never acquire these on a pooled session.
     """
 
-    def __init__(self, connection: AsyncConnection, poll_seconds: float = 0.25) -> None:
+    def __init__(
+        self,
+        connection: AsyncConnection,
+        max_slots: int | None = None,
+        poll_seconds: float = 0.25,
+    ) -> None:
         self.connection = connection
+        # Configurable fleet-wide cap (MAX_LLM_IN_FLIGHT); falls back to the
+        # module default when a caller doesn't override it (e.g. tests).
+        self.max_slots = max_slots if max_slots is not None else MAX_IN_FLIGHT_LLM_CALLS
         self.poll_seconds = poll_seconds
 
     async def acquire(self) -> int:
         while True:
-            for slot in range(MAX_IN_FLIGHT_LLM_CALLS):
+            for slot in range(self.max_slots):
                 got = (
                     await self.connection.execute(
                         text("SELECT pg_try_advisory_lock(hashtext(:ns), :slot)"),

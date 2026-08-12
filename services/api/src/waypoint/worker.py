@@ -239,7 +239,7 @@ async def main() -> None:
             await _worker_loop(
                 f"worker-{base_id}-{index}",
                 factory=factory,
-                slots=FleetSlots(slots_connection),
+                slots=FleetSlots(slots_connection, max_slots=settings.MAX_LLM_IN_FLIGHT),
                 context=context,
                 anthropic=anthropic,
                 pricing=pricing,

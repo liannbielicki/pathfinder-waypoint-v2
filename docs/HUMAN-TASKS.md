@@ -27,6 +27,11 @@ A human must set these values (never their values in git). All names match
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
 - `RUN_COST_USD`, `DAY_COST_USD` — budget limits
 - `WORKER_COUNT`, `KILL_SWITCH`, `MODEL_FAST`, `MODEL_DEEP`, `LOG_LEVEL`
+- `MAX_LLM_IN_FLIGHT` — fleet-wide cap on concurrent Anthropic calls
+  (optional, default 4). Governs how hard the fleet hits the API; set it from
+  the model tier's rate limit, not `WORKER_COUNT`. Raise it and watch for
+  `*_rate_limited` job failures — the value where those stop is the safe
+  ceiling. This is the real limiter on useful parallelism above 4 agents.
 - `APP_PASSWORD` — operator login
 - `SESSION_KEY` — generate with `openssl rand -hex 32`
 

@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -303,6 +304,58 @@ async def test_critic_failure_fails_closed(deps: FakeDeps, seeded_job) -> None:
     deps.gateway.fail_stage("critics")
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "failed"
+
+
+async def test_rate_limit_failure_is_labeled_for_attribution(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """A 429 storm (MAX_LLM_IN_FLIGHT too high for the tier) must be
+    attributable — the failure reason says rate_limited, not a generic fail."""
+    deps.gateway.fail_stage("evolve")  # the fake raises RateLimitExhausted
+    await run_job(seeded_job.id, deps)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert "evolve_rate_limited" in job.checkpoint["failure"]["reason"]
+
+
+# A model returning valid JSON that OMITS a required field (the prod
+# `evolve_failed: 1 validation error for Recommendation actions` incident).
+IDEA_MISSING_ACTIONS = json.dumps(
+    {
+        "title": "Operational reminder",
+        "mechanism": "invoice_delivery",
+        "pro_facing_concept": "Concept the pro would experience.",
+        "manager_rationale": "Rationale for the manager.",
+        "channel": "sms",
+        "risk": "May not land.",
+    }
+)
+
+
+async def test_evolve_retries_model_output_missing_a_required_field(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """A dropped required field must not kill the Pro: the round re-asks under a
+    fresh call key (the same key would replay the cached bad response) and the
+    run completes."""
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.loop_config = {"WIN_THRESHOLD_PP": 3.0}  # win on round 1 → single round
+    await deps.db.commit()
+    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS, idea_json("invoice_delivery")]
+    deps.gateway.responses["screen"] = [reactions_json(GREAT)]
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+    assert deps.gateway.calls_for("evolve") == 2  # bad output → exactly one retry, then win
+
+
+async def test_evolve_fails_closed_after_repeated_invalid_output(
+    deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS]  # single entry → always invalid
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "failed"
+    assert deps.gateway.calls_for("evolve") == 3  # JSON_CALL_ATTEMPTS, then give up
+    assert await candidate_count(deps.db, seeded_job.run_id) == 0
 
 
 async def test_malformed_reactions_are_unavailable_not_a_crash(

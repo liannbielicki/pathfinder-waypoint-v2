@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.llm import LLMResult, extract_json
+from waypoint.llm import LLMResult, RateLimitExhausted, extract_json
 from waypoint.loop import (
     LoopConfig,
     apply_round,
@@ -341,6 +341,58 @@ async def _champion_for(
     return await deps.store.session.get(CandidateRow, lstate.best_candidate_id)
 
 
+# A model occasionally returns valid JSON that omits a required field (the
+# `actions`-missing prod incident) or is otherwise unparseable. Re-ask under a
+# FRESH call key — the recorded-call cache is keyed by call_key, so retrying the
+# same key would just replay the bad response (and would also wedge job-level
+# resume, since the deterministic key stays poisoned). The default (non-zero)
+# temperature makes each attempt vary. Fail closed after the attempt budget.
+JSON_CALL_ATTEMPTS = 3
+
+
+async def _valid_json_call(
+    deps: PipelineDeps,
+    *,
+    base_key: str,
+    tier: str,
+    prompt: str,
+    run_id: str,
+    pro_id: str,
+    stage: str,
+    system: str,
+    parse: Callable[[str], Any],
+) -> Any:
+    last: Exception | None = None
+    for attempt in range(JSON_CALL_ATTEMPTS):
+        call_key = base_key if attempt == 0 else f"{base_key}:retry{attempt}"
+        try:
+            result = await deps.llm.complete(
+                call_key=call_key,
+                tier=tier,
+                prompt=prompt,
+                run_id=run_id,
+                pro_id=pro_id,
+                stage=stage,
+                system=system,
+            )
+        except BudgetExhausted:
+            raise
+        except RateLimitExhausted as error:
+            # Distinct label so a 429 storm is attributable: MAX_LLM_IN_FLIGHT is
+            # too high for the model tier (lower it or raise the Anthropic tier),
+            # NOT a code bug. Not retried — the gateway already backed off.
+            raise PipelineFailure(f"{stage}_rate_limited: {error}") from error
+        except Exception as error:
+            # Any other call/infra failure is an honest job failure — do not
+            # re-ask, that only hammers a struggling provider.
+            raise PipelineFailure(f"{stage}_failed: {error}") from error
+        try:
+            return parse(result.text)
+        except Exception as error:  # noqa: BLE001 — bad OUTPUT: re-ask under a fresh key
+            last = error
+    raise PipelineFailure(f"{stage}_invalid_output after {JSON_CALL_ATTEMPTS} attempts: {last}")
+
+
 # --- stage handlers --------------------------------------------------------
 
 
@@ -390,41 +442,34 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             tried_mechanisms=list(lstate.tried_mechanisms),
             channels=list(state.run.channels),
         )
-        try:
-            proposal = await deps.llm.complete(
-                call_key=f"{key}:generate",
-                tier="fast",
-                prompt=prompt,
-                run_id=state.run.id,
-                pro_id=state.pro_id,
-                stage="evolve",
-                system=EVOLVE_SYSTEM,
-            )
-            idea = Recommendation.model_validate(extract_json(proposal.text))
-        except BudgetExhausted:
-            raise
-        except Exception as error:
-            raise PipelineFailure(f"evolve_failed: {error}") from error
+        idea: Recommendation = await _valid_json_call(
+            deps,
+            base_key=f"{key}:generate",
+            tier="fast",
+            prompt=prompt,
+            run_id=state.run.id,
+            pro_id=state.pro_id,
+            stage="evolve",
+            system=EVOLVE_SYSTEM,
+            parse=lambda text: Recommendation.model_validate(extract_json(text)),
+        )
 
-        try:
-            critic = await deps.llm.complete(
-                call_key=f"{key}:critic",
-                tier="fast",
-                prompt=critic_prompt(
-                    brief.model_dump_json(), json.dumps([{"idea_index": 0, **idea.model_dump()}])
-                ),
-                run_id=state.run.id,
-                pro_id=state.pro_id,
-                stage="critics",
-                system=CRITIC_SYSTEM,
-            )
-            verdicts = {int(v["idea_index"]): v for v in extract_json(critic.text)}
-        except BudgetExhausted:
-            raise
-        except Exception as error:
-            # Fail closed: a dead critic must never silently disable the only
-            # grounding gate (legacy incident class).
-            raise PipelineFailure(f"critics_failed: {error}") from error
+        # Fail closed: a dead critic must never silently disable the only
+        # grounding gate (legacy incident class) — _valid_json_call raises
+        # PipelineFailure after retries, it never returns an empty verdict set.
+        verdicts = await _valid_json_call(
+            deps,
+            base_key=f"{key}:critic",
+            tier="fast",
+            prompt=critic_prompt(
+                brief.model_dump_json(), json.dumps([{"idea_index": 0, **idea.model_dump()}])
+            ),
+            run_id=state.run.id,
+            pro_id=state.pro_id,
+            stage="critics",
+            system=CRITIC_SYSTEM,
+            parse=lambda text: {int(v["idea_index"]): v for v in extract_json(text)},
+        )
         verdict = verdicts.get(0, {"block_kind": "unreviewed", "reason": "no verdict returned"})
         if "block_kind" not in verdict:
             # Fail closed on a verdict that parsed but is missing the field.
