@@ -69,8 +69,15 @@ Docker was not installed on the build machine, so
 
 1. Railway: create one API service and one worker service from
    `services/api` (same Dockerfile; worker command
-   `python -m waypoint.worker`, see `Procfile`), set all variables above,
-   scale workers to `WORKER_COUNT`.
+   `python -m waypoint.worker`, see `Procfile`), set all variables above.
+   `WORKER_COUNT` is the number of concurrent claim→process loops the single
+   worker process runs (each processes one Pro at a time, so N = N Pros in
+   parallel). Keep the worker service at **one replica** — Railway replicas
+   would multiply against `WORKER_COUNT`. Fleet-wide LLM concurrency stays
+   capped at `MAX_IN_FLIGHT_LLM_CALLS` regardless, so setting `WORKER_COUNT`
+   above that cap mostly adds loops that poll-wait for a slot while each still
+   holds ~3 Postgres connections — size it to `MAX_IN_FLIGHT_LLM_CALLS` and
+   mind `max_connections`.
 2. Run migrations once: `uv run alembic upgrade head` with the production
    `DATABASE_URL`.
 3. Vercel: deploy `apps/web` with `API_BASE_URL` pointing at Railway.

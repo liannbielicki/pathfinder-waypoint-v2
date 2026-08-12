@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import httpx
 from anthropic import AsyncAnthropic
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
@@ -29,7 +29,7 @@ from waypoint.pipeline import (
     run_job,
 )
 from waypoint.queue import claim_job, fail_stale_jobs
-from waypoint.scoring import load_calibration
+from waypoint.scoring import Calibration, load_calibration
 from waypoint.settings import Settings
 from waypoint.tables import FleetControlRow
 
@@ -131,49 +131,43 @@ def make_persona_source(settings: Settings) -> Callable[[str], Awaitable[list[Pe
     return get_personas
 
 
-async def main() -> None:
-    from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
-
-    logging.basicConfig(level="INFO")
-    settings = Settings.load()
-    logging.getLogger().setLevel(settings.LOG_LEVEL)
-    engine = make_engine(settings.DATABASE_URL.get_secret_value())
-    factory = make_session_factory(engine)
-    anthropic = AsyncAnthropic(api_key=settings.LLM_API_KEY.get_secret_value())
-    pricing = Pricing(models={"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP})
-    persona_source = make_persona_source(settings)
-    calibration = load_calibration(CALIBRATION_PATH)
-    context = N8NContextClient(
-        url=str(settings.N8N_CONTEXT_URL), token=settings.N8N_TOKEN.get_secret_value()
-    )
-    worker_id = f"worker-{uuid4().hex[:8]}"
+async def _worker_loop(
+    worker_id: str,
+    *,
+    factory: async_sessionmaker[AsyncSession],
+    slots: FleetSlots,
+    context: N8NContextClient,
+    anthropic: AsyncAnthropic,
+    pricing: Pricing,
+    persona_source: Callable[[str], Awaitable[list[Persona]]],
+    calibration: Calibration,
+    create_plan: Any,
+    metric_catalog: dict[str, Any],
+    maintenance: bool,
+) -> None:
+    """One claim→process loop. WORKER_COUNT of these run concurrently in-process;
+    each owns a distinct worker_id (for lease ownership) and its own fleet-slot
+    connection. Claims use FOR UPDATE SKIP LOCKED, so the loops take distinct
+    jobs and process that many Pros in parallel."""
     log.info("worker %s started", worker_id)
-
-    async with factory() as session:
-        await apply_fleet_settings(session, settings)
-
-    # Fleet slot locks are session-level advisory locks: they belong to the
-    # CONNECTION, so the limiter owns one dedicated connection for the worker's
-    # lifetime — a crash releases the slot when the connection dies.
-    slots_connection = await engine.connect()
-    slots = FleetSlots(slots_connection)
-
     while True:
         async with factory() as session:
             job = await claim_job(session, worker_id, lease_seconds=LEASE_SECONDS)
             await session.commit()
             if job is None:
-                # Idle beat: surface any job that died with no attempts left,
-                # then finalize every run whose jobs are all terminal — this
-                # covers reaped runs AND runs stranded by a crash between the
-                # last job's terminal commit and its finalize_run call.
-                reaped = await fail_stale_jobs(session)
-                await session.commit()
-                if reaped:
-                    log.warning("reaped %d attempts-exhausted jobs as failed", len(reaped))
-                healed = await finalize_stalled_runs(session)
-                if healed:
-                    log.warning("finalized %d stalled runs", healed)
+                if maintenance:
+                    # Idle beat, one loop only (idempotent, so N concurrent
+                    # sweeps would just be wasted contention): surface jobs that
+                    # died with no attempts left, then finalize runs whose jobs
+                    # are all terminal — covers reaped runs AND runs stranded by
+                    # a crash between the last terminal commit and finalize_run.
+                    reaped = await fail_stale_jobs(session)
+                    await session.commit()
+                    if reaped:
+                        log.warning("reaped %d attempts-exhausted jobs as failed", len(reaped))
+                    healed = await finalize_stalled_runs(session)
+                    if healed:
+                        log.warning("finalized %d stalled runs", healed)
                 await asyncio.sleep(POLL_SECONDS)
                 continue
             log.info("worker %s claimed job %s (run %s)", worker_id, job.id, job.run_id)
@@ -195,8 +189,8 @@ async def main() -> None:
                     queue=QueueOps(session),
                     get_personas=persona_source,
                     calibration=calibration,
-                    create_plan=create_measurement_plan,
-                    metric_catalog=METRIC_CATALOG,
+                    create_plan=create_plan,
+                    metric_catalog=metric_catalog,
                     worker_id=worker_id,
                     lease_seconds=LEASE_SECONDS,
                 )
@@ -207,6 +201,59 @@ async def main() -> None:
                     # checkpoint; attempts-exhausted jobs get reaped as failed.
                     log.exception("job %s crashed; leaving for lease recovery", job.id)
                     await session.rollback()
+
+
+async def main() -> None:
+    from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
+
+    logging.basicConfig(level="INFO")
+    settings = Settings.load()
+    logging.getLogger().setLevel(settings.LOG_LEVEL)
+    engine = make_engine(
+        settings.DATABASE_URL.get_secret_value(),
+        # Each loop holds one permanent fleet-slot connection plus, while busy,
+        # a pipeline + usage session; size the pool for all WORKER_COUNT loops.
+        pool_size=settings.WORKER_COUNT * 3 + 2,
+    )
+    factory = make_session_factory(engine)
+    anthropic = AsyncAnthropic(api_key=settings.LLM_API_KEY.get_secret_value())
+    pricing = Pricing(models={"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP})
+    persona_source = make_persona_source(settings)
+    calibration = load_calibration(CALIBRATION_PATH)
+    context = N8NContextClient(
+        url=str(settings.N8N_CONTEXT_URL), token=settings.N8N_TOKEN.get_secret_value()
+    )
+
+    async with factory() as session:
+        await apply_fleet_settings(session, settings)
+
+    base_id = uuid4().hex[:8]
+
+    async def spawn(index: int) -> None:
+        # Fleet slot locks are session-level advisory locks: they belong to the
+        # CONNECTION, so each concurrent loop needs its OWN connection — sharing
+        # one would corrupt the limiter and run concurrent statements on a single
+        # connection. A crash releases the slot when the connection dies.
+        slots_connection = await engine.connect()
+        try:
+            await _worker_loop(
+                f"worker-{base_id}-{index}",
+                factory=factory,
+                slots=FleetSlots(slots_connection),
+                context=context,
+                anthropic=anthropic,
+                pricing=pricing,
+                persona_source=persona_source,
+                calibration=calibration,
+                create_plan=create_measurement_plan,
+                metric_catalog=METRIC_CATALOG,
+                maintenance=(index == 0),
+            )
+        finally:
+            await slots_connection.close()
+
+    log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
+    await asyncio.gather(*(spawn(i) for i in range(settings.WORKER_COUNT)))
 
 
 if __name__ == "__main__":
