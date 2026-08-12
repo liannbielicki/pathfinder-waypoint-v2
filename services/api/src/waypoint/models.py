@@ -22,6 +22,11 @@ RunStatus = Literal[
 # UI-visible terminal statuses; the finer taxonomy is carried in stop_reason.
 TERMINAL_RUN_STATUSES = frozenset({"complete", "no_action", "abstained", "stopped", "failed"})
 
+# Placeholder audience_query the UI sends at run creation; the pipeline
+# replaces it with the version the n8n flow self-reports. Shared with the
+# frontend (lib/api.ts PENDING_AUDIENCE_QUERY) — keep the literals in sync.
+PENDING_AUDIENCE_QUERY = "pending_n8n"
+
 
 class RunCreate(BaseModel):
     pro_ids: list[str] = Field(min_length=1)

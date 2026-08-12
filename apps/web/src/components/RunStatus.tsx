@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useState } from "react";
-import { TERMINAL_STATES, type RunDetail } from "@/lib/api";
+import { PENDING_AUDIENCE_QUERY, TERMINAL_STATES, type RunDetail } from "@/lib/api";
 
 const PIPELINE_STAGES = ["context", "evolve", "final", "score", "measure", "ready"];
 
@@ -81,8 +81,15 @@ export function RunStatus({
 
       <h3>Audience lineage</h3>
       <p>
-        {run.pro_ids.length} pros · query <code>{run.audience_query}</code> · run{" "}
-        <code>{run.audience_run}</code>
+        {run.pro_ids.length} pros · query{" "}
+        {run.audience_query !== PENDING_AUDIENCE_QUERY ? (
+          <code>{run.audience_query}</code>
+        ) : terminal ? (
+          <em>n8n never reported a query version — lineage unresolved</em>
+        ) : (
+          <em>awaiting n8n report (stamped when the flow first responds)</em>
+        )}{" "}
+        · run <code>{run.audience_run}</code>
       </p>
 
       {SETTING_LABELS.some(([key]) => key in loopConfig) && (

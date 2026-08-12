@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createRun, getFleetSettings, type RunView } from "@/lib/api";
+import {
+  PENDING_AUDIENCE_QUERY,
+  createRun,
+  getFleetSettings,
+  type RunView,
+} from "@/lib/api";
 
 interface LoopField {
   key: string;
@@ -26,8 +31,11 @@ const LOOP_FIELDS: LoopField[] = [
 
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [proIds, setProIds] = useState("");
-  const [audienceQuery, setAudienceQuery] = useState("");
-  const [audienceRun, setAudienceRun] = useState("");
+  // Autofilled with "now" (second precision, UTC) — the operator can overwrite
+  // it when backfilling a run from an older audience pull.
+  const [audienceRun, setAudienceRun] = useState(
+    () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  );
   const [channel, setChannel] = useState("sms");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,7 +111,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       // Async by default: the API returns 202 immediately; we navigate and poll.
       const run = await createRun({
         pro_ids: ids,
-        audience_query: audienceQuery,
+        // Sentinel until the n8n flow self-reports its query version during
+        // the run; the pipeline overwrites it with the authoritative value.
+        audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
         channels: [channel],
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
@@ -133,14 +143,10 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           rows={5}
           required
         />
-        <label htmlFor="audience-query">Audience query version</label>
-        <input
-          id="audience-query"
-          value={audienceQuery}
-          onChange={(e) => setAudienceQuery(e.target.value)}
-          placeholder="audience_v7"
-          required
-        />
+        <p className="helper">
+          Audience query version is tracked automatically: the n8n flow
+          self-reports it during the run and it appears in the run status.
+        </p>
         <label htmlFor="audience-run">Audience run timestamp</label>
         <input
           id="audience-run"

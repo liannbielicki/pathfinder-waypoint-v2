@@ -19,6 +19,7 @@ from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import HandoffUnavailable, LCMClient
 from waypoint.loop import LoopConfig
 from waypoint.models import (
+    PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
     HandoffReceipt,
     MeasurementPlan,
@@ -260,6 +261,7 @@ def create_app(
                     "persona_evidence": c.persona_evidence,
                     "score": c.score,
                     "status": c.status,
+                    "round": c.round,
                 }
                 for c in candidates
             ],
@@ -347,6 +349,13 @@ def create_app(
             token=settings.HANDOFF_TOKEN.get_secret_value(),
             session=session,
         )
+        if run.audience_query == PENDING_AUDIENCE_QUERY:
+            # The n8n flow never reported its query version; refusing beats
+            # shipping the placeholder downstream as if it were real lineage.
+            raise HTTPException(
+                status_code=409,
+                detail="audience lineage unresolved: the n8n flow never reported a query version",
+            )
         lineage = {"audience_query": run.audience_query, "audience_run": run.audience_run}
         receipts = []
         try:

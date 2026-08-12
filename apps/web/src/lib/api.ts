@@ -28,6 +28,7 @@ export interface Candidate {
   persona_evidence: Record<string, PanelEvidence>;
   score: Record<string, Record<string, unknown>>;
   status: string;
+  round?: number;
 }
 
 export interface Winner {
@@ -77,6 +78,11 @@ export type RunDetail = Omit<
 export const TERMINAL_STATES = new Set([
   "complete", "no_action", "abstained", "stopped", "failed",
 ]);
+
+// Placeholder audience_query sent at run creation; the pipeline replaces it
+// with the n8n flow's self-reported version. Mirrors PENDING_AUDIENCE_QUERY
+// in services/api/src/waypoint/models.py — keep the literals in sync.
+export const PENDING_AUDIENCE_QUERY = "pending_n8n";
 
 export class ApiError extends Error {
   constructor(public status: number, detail: string) {

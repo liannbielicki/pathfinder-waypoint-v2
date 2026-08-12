@@ -29,12 +29,96 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   );
 }
 
-function Rounds({ rounds }: { rounds: number }) {
+function Rounds({ rounds, championRound }: { rounds: number; championRound?: number }) {
   if (rounds === 0) return null;
   return (
     <p>
-      <small>evolve loop: {rounds} round{rounds === 1 ? "" : "s"}</small>
+      <small>
+        evolve loop: {rounds} round{rounds === 1 ? "" : "s"}
+        {championRound != null ? `, round ${championRound} is the champion` : ""}
+      </small>
     </p>
+  );
+}
+
+// The endings a no_action can hide, keyed on the backend's recorded rationale
+// first (candidate rows only fill in detail and legacy rows), so the verdict
+// can never contradict the rationale printed on the card. Returns [title, body].
+function noActionEnding(
+  rationale: string,
+  champion: Candidate | undefined,
+  screened: number,
+  rounds: number,
+): [string, string] {
+  const finalScore = champion?.score?.final;
+  const label =
+    champion?.round != null ? `The round-${champion.round} champion` : "The champion";
+  if (rationale === "champion_final_missing" || (champion && !finalScore)) {
+    return ["Incomplete: champion never confirmed.",
+      `${label} won the screen but the run stopped before its held-out final check. ` +
+      "Treat this as an incomplete run, not a conclusion."];
+  }
+  if (rationale.startsWith("all_candidates_abstained") || finalScore?.abstained) {
+    return ["Degraded: final evidence unavailable.",
+      `${label} won the screen, but the held-out final panel could not produce a ` +
+      "calibrated estimate. This is missing evidence, not a verdict on the idea."];
+  }
+  if (champion) {
+    return ["Rejected at the final check.",
+      `${label} cleared the screen but failed the held-out final — it needed ` +
+      "≥ 1.0 pp with a positive CI lower bound. The stronger panel did not " +
+      "confirm the screen result."];
+  }
+  if (rounds > 0 && screened === 0) {
+    return ["Inconclusive: no round was ever panel-evaluated.",
+      "The bottleneck was idea generation or evaluation, not the evidence — " +
+      "treat this as inconclusive, not a clean no-action."];
+  }
+  const cleared = screened > 0
+    ? `None of the ${screened} screened round${screened === 1 ? "" : "s"} cleared`
+    : "No evolve round cleared";
+  return ["Conclusion: not worth a touch.",
+    `${cleared} the 1.0 pp support floor on the screen panel, so the loop ` +
+    "stopped and recommended no action. This is a successful decision, not a failure."];
+}
+
+function NoActionCard({
+  winner,
+  proCandidates,
+}: {
+  winner: Winner;
+  proCandidates: Candidate[];
+}) {
+  const rounds = proCandidates.length;
+  const champion = proCandidates.find((c) => c.status === "champion");
+  const finalScore = champion?.score?.final;
+  const screened = proCandidates.filter((c) => c.score?.screen).length;
+  const suppressed = proCandidates.filter((c) => c.status === "suppressed").length;
+  const unevaluated = proCandidates.filter(
+    (c) => c.status === "discarded" && !c.score?.screen,
+  ).length;
+  const ending = noActionEnding(winner.rationale, champion, screened, rounds);
+  return (
+    <div className="card">
+      <h4>No action for {winner.pro_id}</h4>
+      <p>
+        <strong>{ending[0]}</strong> {ending[1]}
+      </p>
+      {finalScore != null && <ScoreBlock score={finalScore} />}
+      {(suppressed > 0 || unevaluated > 0) && (
+        <p>
+          {suppressed > 0 && `${suppressed} round${suppressed === 1 ? "" : "s"} critic-suppressed (never panel-evaluated)`}
+          {suppressed > 0 && unevaluated > 0 && "; "}
+          {unevaluated > 0 && `${unevaluated} round${unevaluated === 1 ? "" : "s"} could not be evaluated (panel unavailable)`}
+          {" — the evidence above is partial."}
+        </p>
+      )}
+      <p>
+        Nothing will be handed off.{" "}
+        <small className="technical">{winner.rationale}</small>
+      </p>
+      <Rounds rounds={rounds} />
+    </div>
   );
 }
 
@@ -42,22 +126,15 @@ function WinnerCard({
   winner,
   candidate,
   rounds,
+  proCandidates,
 }: {
   winner: Winner;
   candidate?: Candidate;
   rounds: number;
+  proCandidates: Candidate[];
 }) {
   if (winner.kind === "no_action") {
-    return (
-      <div className="card">
-        <h4>No action for {winner.pro_id}</h4>
-        <p>
-          The panel evidence does not support a touch for this pro ({winner.rationale}).
-          This is a legitimate outcome; nothing will be handed off.
-        </p>
-        <Rounds rounds={rounds} />
-      </div>
-    );
+    return <NoActionCard winner={winner} proCandidates={proCandidates} />;
   }
   if (winner.kind === "abstained") {
     return (
@@ -85,7 +162,7 @@ function WinnerCard({
           org uuid: <code>{String(winner.evidence?.org_id ?? winner.pro_id)}</code>
         </small>
       </p>
-      <Rounds rounds={rounds} />
+      <Rounds rounds={rounds} championRound={candidate?.round} />
       <h5>Why (manager rationale)</h5>
       <p>{winner.rationale}</p>
       {finalScore && <ScoreBlock score={finalScore} />}
@@ -125,10 +202,12 @@ export function WinnerReview({
   );
   const candidateById = new Map(run.candidates.map((c) => [c.id, c]));
   // One candidate row is persisted per evolve round, so candidates-per-Pro is
-  // the loop count for that result.
-  const roundsByPro = new Map<string, number>();
+  // both the loop count and the evidence trail for that result.
+  const candidatesByPro = new Map<string, Candidate[]>();
   for (const c of run.candidates) {
-    roundsByPro.set(c.pro_id, (roundsByPro.get(c.pro_id) ?? 0) + 1);
+    const list = candidatesByPro.get(c.pro_id) ?? [];
+    list.push(c);
+    candidatesByPro.set(c.pro_id, list);
   }
 
   return (
@@ -140,7 +219,8 @@ export function WinnerReview({
           key={winner.id}
           winner={winner}
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
-          rounds={roundsByPro.get(winner.pro_id) ?? 0}
+          rounds={(candidatesByPro.get(winner.pro_id) ?? []).length}
+          proCandidates={candidatesByPro.get(winner.pro_id) ?? []}
         />
       ))}
 

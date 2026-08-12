@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.measurement import UnmeasurableWinner
+from waypoint.models import PENDING_AUDIENCE_QUERY
 from waypoint.pipeline import finalize_run, run_job
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
@@ -215,6 +216,33 @@ async def test_stop_no_improve_exhausted(deps: FakeDeps, seeded_job) -> None:
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()
     assert winner.kind == "no_action"
+    # No round ever won the screen — recorded distinctly from a champion that
+    # failed (or never reached) its final check.
+    assert winner.rationale == "no_round_cleared_screen"
+
+
+async def test_audience_query_stamped_once_from_sentinel(deps: FakeDeps, seeded_job) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.audience_query = PENDING_AUDIENCE_QUERY
+    await deps.db.commit()
+    deps.context.audience_query_version = "audience_v8"
+    await run_job(seeded_job.id, deps)
+    await deps.db.refresh(run)
+    assert run.audience_query == "audience_v8"
+
+
+async def test_reported_audience_version_never_rewrites_a_real_value(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Stamp-once: a mid-run flow redeploy (or an operator-asserted lineage on a
+    # backfill) must not be clobbered by a later job's self-report.
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    original = run.audience_query
+    assert original != PENDING_AUDIENCE_QUERY
+    deps.context.audience_query_version = "audience_v9"
+    await run_job(seeded_job.id, deps)
+    await deps.db.refresh(run)
+    assert run.audience_query == original
 
 
 async def test_stop_round_cap(deps: FakeDeps, seeded_job) -> None:

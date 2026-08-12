@@ -38,7 +38,8 @@ function stubFetch(overrides?: {
 
 async function fillRequiredInputs() {
   await userEvent.type(screen.getByLabelText(/pro ids/i), "pro_1");
-  await userEvent.type(screen.getByLabelText(/audience query/i), "audience_v7");
+  // The run timestamp is autofilled; clear it to pin a deterministic value.
+  await userEvent.clear(screen.getByLabelText(/audience run/i));
   await userEvent.type(
     screen.getByLabelText(/audience run/i), "2026-08-06T18:00:00Z",
   );
@@ -47,6 +48,13 @@ async function fillRequiredInputs() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("RunStart", () => {
+  it("autofills the audience run timestamp with now (UTC, editable)", () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    const field = screen.getByLabelText(/audience run/i) as HTMLInputElement;
+    expect(field.value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
   it("renders the three groups in order with the fleet cap visible and read-only", async () => {
     stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
@@ -87,7 +95,7 @@ describe("RunStart", () => {
       expect(screen.getByLabelText(/max rounds per pro/i)).toBeInTheDocument(),
     );
     for (const label of [
-      /pro ids/i, /audience query/i, /audience run/i, /channel/i,
+      /pro ids/i, /audience run/i, /channel/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
       /stop-early reduction/i,
@@ -131,6 +139,18 @@ describe("RunStart", () => {
     await waitFor(() => expect(onStarted).toHaveBeenCalled());
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0].loop_config).toEqual({ MAX_ROUNDS: 5 });
+  });
+
+  it("sends the pending_n8n sentinel instead of an operator-typed query version", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0].audience_query).toBe("pending_n8n");
+    expect(screen.queryByLabelText(/audience query/i)).not.toBeInTheDocument();
   });
 
   it("omits loop_config entirely when nothing changed", async () => {

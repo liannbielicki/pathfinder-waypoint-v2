@@ -60,6 +60,26 @@ async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> N
     assert batch.organizations[0].open_ar_band == "low"
 
 
+async def test_audience_query_version_is_captured_not_stored_on_orgs(
+    httpx_mock: HTTPXMock,
+) -> None:
+    # The flow's SQL code node stamps its own version; the client surfaces it
+    # as batch metadata while the allowlist keeps it off the org briefs.
+    row = {**_rows()[0], "audience_query_version": "audience_v8"}
+    httpx_mock.add_response(json=[row])
+    batch = await make_client().fetch(["pro_1"])
+    assert batch.audience_query_version == "audience_v8"
+    assert "audience_v8" not in batch.organizations[0].model_dump_json()
+
+
+async def test_missing_audience_query_version_degrades_to_none(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(json=_rows())
+    batch = await make_client().fetch(["pro_1"])
+    assert batch.audience_query_version is None
+
+
 async def test_wrong_contract_version_is_refused(httpx_mock: HTTPXMock) -> None:
     row = {**_rows()[0], "contract_version": "org-context-v1"}
     httpx_mock.add_response(json=[row])
@@ -80,14 +100,14 @@ async def test_non_object_rows_are_refused_not_crashed(httpx_mock: HTTPXMock) ->
         await make_client().fetch(["pro_1"])
 
 
-async def test_n8n_fetch_posts_org_uuids(httpx_mock: HTTPXMock) -> None:
+async def test_n8n_fetch_posts_generic_ids(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(json=_rows())
     client = make_client()
     result = await client.fetch(["pro_1", "pro_2"])
     assert result.organizations[0].plan_tier == "basic"
     request = httpx_mock.get_request()
     assert request is not None
-    assert json.loads(request.content) == {"org_uuids": ["pro_1", "pro_2"]}
+    assert json.loads(request.content) == {"id": ["pro_1", "pro_2"]}
     assert request.headers["authorization"] == "Bearer test-token"
 
 
@@ -97,7 +117,7 @@ async def test_n8n_fetch_chunks_large_audiences(httpx_mock: HTTPXMock) -> None:
     client = make_client(batch_size=2)
     result = await client.fetch(["pro_1", "pro_2", "pro_3"])
     requests = httpx_mock.get_requests()
-    assert [json.loads(r.content)["org_uuids"] for r in requests] == [
+    assert [json.loads(r.content)["id"] for r in requests] == [
         ["pro_1", "pro_2"], ["pro_3"],
     ]
     assert len(result.organizations) == 3

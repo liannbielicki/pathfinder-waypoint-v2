@@ -87,7 +87,6 @@ test("async start returns immediately and shows queued state", async ({ page }) 
   );
   await page.route("**/api/runs/run-e2e", (route) => route.fulfill({ json: RUN_BASE }));
   await page.getByLabel(/pro ids/i).fill("pro_1");
-  await page.getByLabel(/audience query/i).fill("audience_v7");
   await page.getByLabel(/audience run/i).fill("2026-08-06T18:00:00Z");
   await page.getByRole("button", { name: /start run/i }).click();
   await expect(page.getByRole("status")).toHaveText(/queued/);

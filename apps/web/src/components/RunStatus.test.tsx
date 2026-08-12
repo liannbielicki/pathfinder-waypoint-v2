@@ -44,6 +44,29 @@ describe("RunStatus", () => {
     expect(screen.getByRole("status")).toHaveTextContent(status.replace("_", " "));
   });
 
+  it("shows the n8n-reported query version once stamped, pending until then", () => {
+    const { rerender } = render(
+      <RunStatus run={{ ...RUN_FIXTURE, audience_query: "pending_n8n" }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText(/awaiting n8n report/i)).toBeVisible();
+    rerender(
+      <RunStatus run={{ ...RUN_FIXTURE, audience_query: "audience_v8" }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText("audience_v8")).toBeVisible();
+    expect(screen.queryByText(/awaiting n8n report/i)).not.toBeInTheDocument();
+  });
+
+  it("marks lineage unresolved (not awaiting) on a terminal run n8n never stamped", () => {
+    render(
+      <RunStatus
+        run={{ ...RUN_FIXTURE, status: "failed", audience_query: "pending_n8n" }}
+        onKill={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/never reported a query version/i)).toBeVisible();
+    expect(screen.queryByText(/awaiting n8n report/i)).not.toBeInTheDocument();
+  });
+
   it("shows the stop reason when a run stops", () => {
     render(
       <RunStatus

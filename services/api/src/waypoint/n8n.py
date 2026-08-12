@@ -129,6 +129,9 @@ class OrgContextBatch(BaseModel):
 
     contract_version: str
     organizations: list[OrgBrief]
+    # Version stamp the flow's SQL-building code node emits (e.g. audience_v8);
+    # None when the flow predates the stamp. Run metadata, not an org field.
+    audience_query_version: str | None = None
 
 
 def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
@@ -171,12 +174,16 @@ class N8NContextClient:
         )
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
-        # pro_ids are org UUIDs; the flow validates them as such.
+        # Identifiers may be org or pro ids, even mixed; the flow validates
+        # and routes them.
         organizations: list[OrgBrief] = []
+        query_version: str | None = None
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
             try:
-                response = await self._client.post(self.url, json={"org_uuids": chunk})
+                # Sent as generic "id"s: the flow owns classifying/routing each
+                # identifier (org vs pro, mixed lists welcome).
+                response = await self._client.post(self.url, json={"id": chunk})
             except httpx.HTTPError as error:
                 raise ContextUnavailable(f"n8n context flow unreachable: {error}") from error
             if response.status_code != 200:
@@ -186,8 +193,20 @@ class N8NContextClient:
             rows = response.json()
             if not isinstance(rows, list):
                 raise ContextUnavailable("n8n context response was not a list of rows")
+            query_version = query_version or next(
+                (
+                    str(row["audience_query_version"])
+                    for row in rows
+                    if isinstance(row, dict) and row.get("audience_query_version")
+                ),
+                None,
+            )
             try:
                 organizations.extend(_brief_from_row(row) for row in rows)
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
-        return OrgContextBatch(contract_version=CONTRACT_VERSION, organizations=organizations)
+        return OrgContextBatch(
+            contract_version=CONTRACT_VERSION,
+            organizations=organizations,
+            audience_query_version=query_version,
+        )

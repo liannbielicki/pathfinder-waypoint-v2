@@ -30,7 +30,7 @@ from waypoint.loop import (
     stop_reason,
 )
 from waypoint.measurement import UnmeasurableWinner
-from waypoint.models import TERMINAL_RUN_STATUSES, Recommendation
+from waypoint.models import PENDING_AUDIENCE_QUERY, TERMINAL_RUN_STATUSES, Recommendation
 from waypoint.n8n import ContextUnavailable, OrgBrief
 from waypoint.personas import (
     InsufficientPanelFit,
@@ -665,12 +665,17 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     champion = await _champion_for(state, deps, config)
     final = champion.score.get("final") if champion is not None else None
     if champion is None or final is None:
+        # Two different endings, recorded distinctly: no round ever won the
+        # screen (an honest "not worth touching") vs a champion that never got
+        # its held-out final check (an incomplete run, not a conclusion).
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
                 kind="no_action",
-                rationale="no_candidate_cleared_floor",
+                rationale=(
+                    "no_round_cleared_screen" if champion is None else "champion_final_missing"
+                ),
             )
         )
         await deps.store.session.commit()
@@ -929,6 +934,14 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
         (brief for brief in batch.organizations if brief.pro_id == state.pro_id),
         None,
     )
+    # Stamp the flow's self-reported query version exactly once, replacing only
+    # the creation-time placeholder. Stamp-once keeps lineage stable when the
+    # flow redeploys mid-run: later jobs (or lease-reclaim re-entries) never
+    # rewrite a version pros were already scored under.
+    reported = batch.audience_query_version
+    if reported and run.audience_query == PENDING_AUDIENCE_QUERY:
+        run.audience_query = reported
+        await store.session.commit()
 
     for stage in STAGES:
         if await store.stage_complete(job_id, stage):

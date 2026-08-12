@@ -208,6 +208,7 @@ class FakeLLM:
 class FakeContext:
     def __init__(self) -> None:
         self.unavailable = False
+        self.audience_query_version: str | None = None
         self.batch = OrgContextBatch.model_validate_json(
             (FIXTURES / "n8n_context.json").read_text()
         )
@@ -216,7 +217,11 @@ class FakeContext:
         if self.unavailable:
             raise ContextUnavailable("injected outage")
         orgs = [o for o in self.batch.organizations if o.pro_id in pro_ids]
-        return OrgContextBatch(contract_version=CONTRACT_VERSION, organizations=orgs)
+        return OrgContextBatch(
+            contract_version=CONTRACT_VERSION,
+            organizations=orgs,
+            audience_query_version=self.audience_query_version,
+        )
 
 
 class CrashableStore(PostgresStore):
