@@ -133,3 +133,21 @@ async def test_n8n_outage_is_explicit_not_empty(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=503)
     with pytest.raises(ContextUnavailable):
         await make_client().fetch(["pro_1"])
+
+
+async def test_rows_rekeyed_to_submitted_id_format(httpx_mock: HTTPXMock) -> None:
+    # The flow accepts numeric org ids, pro_<hex> ids, and dashed uuids, but
+    # always answers with the dashed org_uuid. Briefs must come back keyed by
+    # the id the caller submitted, or pipeline matching abstains every pro.
+    row = {**_rows()[0], "org_uuid": "7f8a05b2-ec02-4c07-8bbe-ccfa9000abfb"}
+    httpx_mock.add_response(json=[row])
+    submitted = "pro_7F8A05B2EC024C078BBECCFA9000ABFB"
+    batch = await make_client().fetch([submitted])
+    assert batch.organizations[0].pro_id == submitted
+
+
+async def test_unrequested_rows_keep_their_own_uuid(httpx_mock: HTTPXMock) -> None:
+    row = {**_rows()[0], "org_uuid": "11111111-2222-3333-4444-555555555555"}
+    httpx_mock.add_response(json=[row])
+    batch = await make_client().fetch(["pro_7f8a05b2ec024c078bbeccfa9000abfb"])
+    assert batch.organizations[0].org_uuid == "11111111-2222-3333-4444-555555555555"

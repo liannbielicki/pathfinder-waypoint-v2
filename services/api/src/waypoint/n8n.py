@@ -174,6 +174,13 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
     return OrgBrief(**projected)
 
 
+def _canon(identifier: str) -> str:
+    """Canonical form shared by the three id spellings the flow accepts
+    (numeric org id, pro_<hex32>, dashed uuid): lowercase, no pro_ prefix,
+    no dashes."""
+    return identifier.strip().lower().removeprefix("pro_").replace("-", "")
+
+
 class N8NContextClient:
     def __init__(
         self,
@@ -221,9 +228,21 @@ class N8NContextClient:
                 None,
             )
             try:
-                organizations.extend(_brief_from_row(row) for row in rows)
+                briefs = [_brief_from_row(row) for row in rows]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
+            # The flow answers in dashed-uuid form regardless of which id
+            # spelling was submitted; re-key each brief to the submitted id so
+            # pipeline matching (brief.pro_id == run pro_id) holds for all
+            # three formats.
+            submitted = {_canon(identifier): identifier for identifier in chunk}
+            for brief in briefs:
+                original = submitted.get(_canon(brief.org_uuid))
+                if original is not None:
+                    brief = brief.model_copy(update={"org_uuid": original})
+                else:
+                    log.warning("context row %s matches no submitted id", brief.org_uuid)
+                organizations.append(brief)
         return OrgContextBatch(
             contract_version=CONTRACT_VERSION,
             organizations=organizations,
