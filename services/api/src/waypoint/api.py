@@ -15,11 +15,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
-from waypoint.calls import MAX_IN_FLIGHT_LLM_CALLS
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import HandoffUnavailable, LCMClient
 from waypoint.loop import LoopConfig
 from waypoint.models import (
+    PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
     HandoffReceipt,
     MeasurementPlan,
@@ -49,6 +49,7 @@ class RunDetail(RunView):
     measurements: list[dict[str, Any]]
     handoffs: list[dict[str, Any]]
     killed: bool
+    agents_in_flight: int  # per-Pro jobs a worker is actively leasing right now
 
 
 class HandoffResponse(BaseModel):
@@ -191,7 +192,7 @@ def create_app(
         await session.commit()
         return {
             "loop_defaults": effective.to_dict(),
-            "max_in_flight_llm_calls": MAX_IN_FLIGHT_LLM_CALLS,
+            "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)
@@ -200,6 +201,20 @@ def create_app(
         jobs = (
             (await session.execute(select(JobRow).where(JobRow.run_id == run_id))).scalars().all()
         )
+        # Agents in flight: per-Pro jobs a worker is actively leasing right now
+        # (running with a live lease). func.now() is DB-side so it matches the
+        # claim SQL and sidesteps client/column tz mismatch.
+        agents_in_flight = (
+            await session.execute(
+                select(func.count())
+                .select_from(JobRow)
+                .where(
+                    JobRow.run_id == run_id,
+                    JobRow.status == "running",
+                    JobRow.lease_until > func.now(),
+                )
+            )
+        ).scalar_one()
         # A stage shows done only when EVERY per-Pro job checkpointed it — an
         # honest floor; a half-done stage never shows a checkmark.
         stages: dict[str, Any] = {}
@@ -246,6 +261,7 @@ def create_app(
                     "persona_evidence": c.persona_evidence,
                     "score": c.score,
                     "status": c.status,
+                    "round": c.round,
                 }
                 for c in candidates
             ],
@@ -278,6 +294,7 @@ def create_app(
                 for h in handoffs
             ],
             killed=await queue.fleet_is_killed(session),
+            agents_in_flight=agents_in_flight,
         )
 
     @app.post("/api/runs/{run_id}/kill", response_model=RunView)
@@ -332,6 +349,13 @@ def create_app(
             token=settings.HANDOFF_TOKEN.get_secret_value(),
             session=session,
         )
+        if run.audience_query == PENDING_AUDIENCE_QUERY:
+            # The n8n flow never reported its query version; refusing beats
+            # shipping the placeholder downstream as if it were real lineage.
+            raise HTTPException(
+                status_code=409,
+                detail="audience lineage unresolved: the n8n flow never reported a query version",
+            )
         lineage = {"audience_query": run.audience_query, "audience_run": run.audience_run}
         receipts = []
         try:

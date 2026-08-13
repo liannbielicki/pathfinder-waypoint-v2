@@ -108,6 +108,16 @@ button:disabled {
   letter-spacing: 0.03em;
 }
 
+.pill {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
 .state-complete {
   border-color: var(--ok);
   color: var(--ok);

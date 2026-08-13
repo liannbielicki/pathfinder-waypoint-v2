@@ -1,11 +1,13 @@
+import json
 from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.calls import BudgetExhausted  # noqa: F401 — re-exported contract
+from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.measurement import UnmeasurableWinner
+from waypoint.models import PENDING_AUDIENCE_QUERY
 from waypoint.pipeline import finalize_run, run_job
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
@@ -214,6 +216,33 @@ async def test_stop_no_improve_exhausted(deps: FakeDeps, seeded_job) -> None:
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()
     assert winner.kind == "no_action"
+    # No round ever won the screen — recorded distinctly from a champion that
+    # failed (or never reached) its final check.
+    assert winner.rationale == "no_round_cleared_screen"
+
+
+async def test_audience_query_stamped_once_from_sentinel(deps: FakeDeps, seeded_job) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.audience_query = PENDING_AUDIENCE_QUERY
+    await deps.db.commit()
+    deps.context.audience_query_version = "audience_v8"
+    await run_job(seeded_job.id, deps)
+    await deps.db.refresh(run)
+    assert run.audience_query == "audience_v8"
+
+
+async def test_reported_audience_version_never_rewrites_a_real_value(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Stamp-once: a mid-run flow redeploy (or an operator-asserted lineage on a
+    # backfill) must not be clobbered by a later job's self-report.
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    original = run.audience_query
+    assert original != PENDING_AUDIENCE_QUERY
+    deps.context.audience_query_version = "audience_v9"
+    await run_job(seeded_job.id, deps)
+    await deps.db.refresh(run)
+    assert run.audience_query == original
 
 
 async def test_stop_round_cap(deps: FakeDeps, seeded_job) -> None:
@@ -303,6 +332,58 @@ async def test_critic_failure_fails_closed(deps: FakeDeps, seeded_job) -> None:
     deps.gateway.fail_stage("critics")
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "failed"
+
+
+async def test_rate_limit_failure_is_labeled_for_attribution(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """A 429 storm (MAX_LLM_IN_FLIGHT too high for the tier) must be
+    attributable — the failure reason says rate_limited, not a generic fail."""
+    deps.gateway.fail_stage("evolve")  # the fake raises RateLimitExhausted
+    await run_job(seeded_job.id, deps)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert "evolve_rate_limited" in job.checkpoint["failure"]["reason"]
+
+
+# A model returning valid JSON that OMITS a required field (the prod
+# `evolve_failed: 1 validation error for Recommendation actions` incident).
+IDEA_MISSING_ACTIONS = json.dumps(
+    {
+        "title": "Operational reminder",
+        "mechanism": "invoice_delivery",
+        "pro_facing_concept": "Concept the pro would experience.",
+        "manager_rationale": "Rationale for the manager.",
+        "channel": "sms",
+        "risk": "May not land.",
+    }
+)
+
+
+async def test_evolve_retries_model_output_missing_a_required_field(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """A dropped required field must not kill the Pro: the round re-asks under a
+    fresh call key (the same key would replay the cached bad response) and the
+    run completes."""
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.loop_config = {"WIN_THRESHOLD_PP": 3.0}  # win on round 1 → single round
+    await deps.db.commit()
+    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS, idea_json("invoice_delivery")]
+    deps.gateway.responses["screen"] = [reactions_json(GREAT)]
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+    assert deps.gateway.calls_for("evolve") == 2  # bad output → exactly one retry, then win
+
+
+async def test_evolve_fails_closed_after_repeated_invalid_output(
+    deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS]  # single entry → always invalid
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "failed"
+    assert deps.gateway.calls_for("evolve") == 3  # JSON_CALL_ATTEMPTS, then give up
+    assert await candidate_count(deps.db, seeded_job.run_id) == 0
 
 
 async def test_malformed_reactions_are_unavailable_not_a_crash(
@@ -542,3 +623,61 @@ async def test_transient_measure_failure_retries_instead_of_abstaining(
     ).scalar_one()
     assert winner.kind == "winner"  # a validated winner survives a 429 storm
     assert await run_status(deps.db, seeded_job.run_id) not in ("abstained", "failed")
+
+
+async def test_deep_final_failure_falls_back_to_fast_tier(deps: FakeDeps, seeded_job) -> None:
+    # The deep tier dying must not lose the Pro: the held-out check downgrades
+    # to the fast tier, honestly labeled, and the run still produces a winner.
+    deps.gateway.responses["final"] = [RateLimitExhausted("deep tier down"), reactions_json(GOOD)]
+    await run_job(seeded_job.id, deps)
+    final_tiers = [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"]
+    assert final_tiers == ["deep", "fast"]
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"
+    champion = (
+        await deps.db.execute(
+            select(CandidateRow).where(
+                CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "champion"
+            )
+        )
+    ).scalar_one()
+    assert champion.persona_evidence["final"]["tier"] == "fast"
+    assert "deep tier down" in champion.persona_evidence["final"]["deep_failure"]
+
+
+async def test_both_final_tiers_failing_abstains_with_both_reasons(
+    deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["final"] = [RateLimitExhausted("deep down"), "no json here at all"]
+    await run_job(seeded_job.id, deps)
+    champion = (
+        await deps.db.execute(
+            select(CandidateRow).where(
+                CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "champion"
+            )
+        )
+    ).scalar_one()
+    final_score = champion.score["final"]
+    assert final_score["abstained"] is True
+    assert "deep down" in final_score["abstain_reason"]  # the deep failure survives
+    assert "unparseable" in final_score["abstain_reason"]  # and the fast one
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "no_action"
+    # The winner-level rationale carries the real cause, not just the label
+    # the incident was named after.
+    assert "deep down" in winner.rationale
+
+
+async def test_budget_exhausted_on_deep_final_never_falls_back(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # The fallback must not spend past an exhausted budget: BudgetExhausted
+    # re-raises untouched, with no fast-tier attempt.
+    deps.gateway.responses["final"] = [BudgetExhausted("out of budget")]
+    await run_job(seeded_job.id, deps)
+    assert [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"] == ["deep"]
+    assert await run_status(deps.db, seeded_job.run_id) == "stopped"

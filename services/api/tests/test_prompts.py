@@ -30,13 +30,27 @@ def test_fenced_context_wraps_untrusted_input() -> None:
 
 
 def test_generator_prompt_fences_org_context_and_keeps_layer_split() -> None:
-    prompt = generator_prompt(org_context='{"open_due_usd": "430.25"}', count=3)
+    prompt = generator_prompt(
+        org_context='{"open_due_usd": "430.25"}', count=3, channels=["sms", "email"]
+    )
     assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
     # The two-layer rule from the frozen legacy prompt survives the port.
     assert "pro_facing_concept" in prompt
     assert "manager_rationale" in prompt
     # Internal jargon stays banned from the pro-facing layer.
     assert "churn" in prompt
+
+
+def test_channel_directive_gates_sms_only_with_brevity() -> None:
+    from waypoint.prompts import channel_directive
+
+    sms = channel_directive(["sms"])
+    assert '"sms"' in sms and '"email"' not in sms
+    assert "160" in sms  # SMS brevity constraint is stated
+    # Both-channels case gates to the set but adds no SMS brevity rule.
+    both = channel_directive(["sms", "email"])
+    assert '"sms"' in both and '"email"' in both
+    assert "160" not in both
 
 
 def test_critic_prompt_fences_untrusted_ideas() -> None:
@@ -64,8 +78,10 @@ def test_evolve_prompt_stay_refines_the_best_mechanism() -> None:
         best_json=BEST,
         history_json=HISTORY,
         tried_mechanisms=["invoice_delivery"],
+        channels=["sms"],
     )
     assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
+    assert "160" in prompt  # sms-only run shapes the idea for a brief text
     assert "exactly ONE" in prompt or "exactly one" in prompt
     assert "invoice_delivery" in prompt  # the mechanism being refined
     assert BEST in prompt
@@ -85,6 +101,7 @@ def test_evolve_prompt_shift_forbids_tried_mechanisms() -> None:
         best_json=None,
         history_json="[]",
         tried_mechanisms=["invoice_delivery", "review_requests"],
+        channels=["email"],
     )
     assert "forbidden" in prompt.lower()
     assert "invoice_delivery" in prompt and "review_requests" in prompt

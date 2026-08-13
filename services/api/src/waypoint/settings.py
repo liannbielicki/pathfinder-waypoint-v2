@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     RUN_COST_USD: Decimal = Field(gt=0)
     DAY_COST_USD: Decimal = Field(gt=0)
     WORKER_COUNT: int = Field(ge=1)
+    # Fleet-wide cap on concurrent provider calls (the real throttle on how hard
+    # we hit Anthropic). Set from the model tier's rate limit, NOT the agent
+    # count. Default 4 preserves prior behavior; raise it in Railway and watch
+    # for *_rate_limited job failures — the value where those stop is the safe
+    # ceiling.
+    MAX_LLM_IN_FLIGHT: int = Field(default=4, ge=1)
     KILL_SWITCH: bool = False
     MODEL_FAST: str
     MODEL_DEEP: str

@@ -148,6 +148,9 @@ class OrgContextBatch(BaseModel):
 
     contract_version: str
     organizations: list[OrgBrief]
+    # Version stamp the flow's SQL-building code node emits (e.g. audience_v8);
+    # None when the flow predates the stamp. Run metadata, not an org field.
+    audience_query_version: str | None = None
 
 
 def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
@@ -171,6 +174,19 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
     return OrgBrief(**projected)
 
 
+# Identifier fields the flow echoes back on each row (execution 36657272):
+# the resolved dashed uuid, the submitted pro_<hex> Iterable id, and the
+# numeric org id (Snowflake emits it in either case).
+_ROW_ID_KEYS = ("org_uuid", "pro_uuid", "organization_id", "ORGANIZATION_ID")
+
+
+def _canon(identifier: str) -> str:
+    """Canonical form shared by the three id spellings the flow accepts
+    (numeric org id, pro_<hex32>, dashed uuid): lowercase, no pro_ prefix,
+    no dashes."""
+    return identifier.strip().lower().removeprefix("pro_").replace("-", "")
+
+
 class N8NContextClient:
     def __init__(
         self,
@@ -190,11 +206,15 @@ class N8NContextClient:
         )
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
-        # pro_ids are org UUIDs; the flow validates them as such.
+        # Identifiers may be org or pro ids, even mixed; the flow validates
+        # and routes them.
         organizations: list[OrgBrief] = []
+        query_version: str | None = None
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
             try:
+                # Sent as generic "id"s: the flow owns classifying/routing each
+                # identifier (org vs pro, mixed lists welcome).
                 response = await self._client.post(self.url, json={"id": chunk})
             except httpx.HTTPError as error:
                 raise ContextUnavailable(f"n8n context flow unreachable: {error}") from error
@@ -205,8 +225,44 @@ class N8NContextClient:
             rows = response.json()
             if not isinstance(rows, list):
                 raise ContextUnavailable("n8n context response was not a list of rows")
+            query_version = query_version or next(
+                (
+                    str(row["audience_query_version"])
+                    for row in rows
+                    if isinstance(row, dict) and row.get("audience_query_version")
+                ),
+                None,
+            )
             try:
-                organizations.extend(_brief_from_row(row) for row in rows)
+                pairs = [(row, _brief_from_row(row)) for row in rows]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
-        return OrgContextBatch(contract_version=CONTRACT_VERSION, organizations=organizations)
+            # The flow accepts three id spaces (numeric org id, pro_<hex>
+            # Iterable id, dashed org uuid) but always keys rows by the dashed
+            # org_uuid — pro_<hex> is NOT the uuid respelled. It echoes the
+            # resolved ids back on each row, so match the submitted id against
+            # all of them (raw row: the projection drops id fields), then
+            # re-key the brief to the submitted id so pipeline matching
+            # (brief.pro_id == run pro_id) holds regardless of format.
+            submitted = {_canon(identifier): identifier for identifier in chunk}
+            for row, brief in pairs:
+                echoed = (row.get(k) for k in _ROW_ID_KEYS)
+                original = next(
+                    (
+                        found
+                        for value in echoed
+                        if value is not None
+                        and (found := submitted.get(_canon(str(value)))) is not None
+                    ),
+                    None,
+                )
+                if original is not None:
+                    brief = brief.model_copy(update={"org_uuid": original})
+                else:
+                    log.warning("context row %s matches no submitted id", brief.org_uuid)
+                organizations.append(brief)
+        return OrgContextBatch(
+            contract_version=CONTRACT_VERSION,
+            organizations=organizations,
+            audience_query_version=query_version,
+        )

@@ -43,7 +43,7 @@ pnpm dev
 # both from the same Dockerfile image (see railway.json / Procfile).
 railway up
 # Web process:    uvicorn waypoint.api:app --host 0.0.0.0 --port $PORT
-# Worker process: python -m waypoint.worker   (scale to WORKER_COUNT replicas)
+# Worker process: python -m waypoint.worker   (runs WORKER_COUNT concurrent loops; one replica)
 # Migrations:     uv run alembic upgrade head  (DATABASE_URL from Railway)
 ```
 

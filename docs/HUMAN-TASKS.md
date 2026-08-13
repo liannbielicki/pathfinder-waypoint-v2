@@ -27,6 +27,11 @@ A human must set these values (never their values in git). All names match
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
 - `RUN_COST_USD`, `DAY_COST_USD` — budget limits
 - `WORKER_COUNT`, `KILL_SWITCH`, `MODEL_FAST`, `MODEL_DEEP`, `LOG_LEVEL`
+- `MAX_LLM_IN_FLIGHT` — fleet-wide cap on concurrent Anthropic calls
+  (optional, default 4). Governs how hard the fleet hits the API; set it from
+  the model tier's rate limit, not `WORKER_COUNT`. Raise it and watch for
+  `*_rate_limited` job failures — the value where those stop is the safe
+  ceiling. This is the real limiter on useful parallelism above 4 agents.
 - `APP_PASSWORD` — operator login
 - `SESSION_KEY` — generate with `openssl rand -hex 32`
 
@@ -69,8 +74,15 @@ Docker was not installed on the build machine, so
 
 1. Railway: create one API service and one worker service from
    `services/api` (same Dockerfile; worker command
-   `python -m waypoint.worker`, see `Procfile`), set all variables above,
-   scale workers to `WORKER_COUNT`.
+   `python -m waypoint.worker`, see `Procfile`), set all variables above.
+   `WORKER_COUNT` is the number of concurrent claim→process loops the single
+   worker process runs (each processes one Pro at a time, so N = N Pros in
+   parallel). Keep the worker service at **one replica** — Railway replicas
+   would multiply against `WORKER_COUNT`. Fleet-wide LLM concurrency stays
+   capped at `MAX_IN_FLIGHT_LLM_CALLS` regardless, so setting `WORKER_COUNT`
+   above that cap mostly adds loops that poll-wait for a slot while each still
+   holds ~3 Postgres connections — size it to `MAX_IN_FLIGHT_LLM_CALLS` and
+   mind `max_connections`.
 2. Run migrations once: `uv run alembic upgrade head` with the production
    `DATABASE_URL`.
 3. Vercel: deploy `apps/web` with `API_BASE_URL` pointing at Railway.

@@ -5,6 +5,7 @@ missing usage block is an error, never a plausible number and never $0.00.
 """
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -129,6 +130,29 @@ async def retry_rate_limit[T](
 class AnthropicLike(Protocol):
     @property
     def messages(self) -> Any: ...
+
+
+def extract_json(text: str) -> Any:
+    """Parse the JSON object/array out of model output that may carry markdown
+    fences or surrounding prose (both observed in production despite 'return
+    only JSON' prompts). The FIRST complete JSON value wins; anything after it
+    (prose, corrections, stray braces) is ignored. Raises ValueError when no
+    JSON is found."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        newline = cleaned.find("\n")
+        if newline != -1:
+            cleaned = cleaned[newline + 1 :].rsplit("```", 1)[0]
+    try:
+        return json.loads(cleaned)
+    except ValueError:
+        starts = [i for i in (cleaned.find("{"), cleaned.find("[")) if i != -1]
+        if not starts:
+            raise
+        # raw_decode stops at the end of the first value, so trailing prose —
+        # even prose containing braces — cannot defeat the parse.
+        value, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
+        return value
 
 
 # Models learned (from a live 400) to reject the temperature param. Process

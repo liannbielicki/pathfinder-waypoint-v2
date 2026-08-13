@@ -27,6 +27,7 @@ export const RUN_FIXTURE: RunDetail = {
   measurements: [],
   handoffs: [],
   killed: false,
+  agents_in_flight: 0,
 };
 
 const WINNER: Winner = {
@@ -41,6 +42,29 @@ describe("RunStatus", () => {
   ])("renders %s as an explicit state", (status) => {
     render(<RunStatus run={{ ...RUN_FIXTURE, status }} onKill={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(status.replace("_", " "));
+  });
+
+  it("shows the n8n-reported query version once stamped, pending until then", () => {
+    const { rerender } = render(
+      <RunStatus run={{ ...RUN_FIXTURE, audience_query: "pending_n8n" }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText(/awaiting n8n report/i)).toBeVisible();
+    rerender(
+      <RunStatus run={{ ...RUN_FIXTURE, audience_query: "audience_v8" }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText("audience_v8")).toBeVisible();
+    expect(screen.queryByText(/awaiting n8n report/i)).not.toBeInTheDocument();
+  });
+
+  it("marks lineage unresolved (not awaiting) on a terminal run n8n never stamped", () => {
+    render(
+      <RunStatus
+        run={{ ...RUN_FIXTURE, status: "failed", audience_query: "pending_n8n" }}
+        onKill={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/never reported a query version/i)).toBeVisible();
+    expect(screen.queryByText(/awaiting n8n report/i)).not.toBeInTheDocument();
   });
 
   it("shows the stop reason when a run stops", () => {
@@ -106,6 +130,17 @@ describe("RunStatus", () => {
     expect(screen.getByText(/2 of 3 pros decided/i)).toBeVisible();
     expect(screen.getByText(/1 winner/i)).toBeVisible();
     expect(screen.getByText(/1 no-action/i)).toBeVisible();
+  });
+
+  it("shows an agents-in-parallel pill only when agents are in flight", () => {
+    const { rerender } = render(
+      <RunStatus run={{ ...RUN_FIXTURE, status: "running", agents_in_flight: 3 }} onKill={vi.fn()} />,
+    );
+    expect(screen.getByText(/3 agents in parallel/i)).toBeVisible();
+    rerender(
+      <RunStatus run={{ ...RUN_FIXTURE, status: "running", agents_in_flight: 0 }} onKill={vi.fn()} />,
+    );
+    expect(screen.queryByText(/in parallel/i)).not.toBeInTheDocument();
   });
 
   it("names possible paid work when a stop happened after spend", () => {
