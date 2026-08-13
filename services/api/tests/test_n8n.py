@@ -137,13 +137,41 @@ async def test_n8n_outage_is_explicit_not_empty(httpx_mock: HTTPXMock) -> None:
 
 async def test_rows_rekeyed_to_submitted_id_format(httpx_mock: HTTPXMock) -> None:
     # The flow accepts numeric org ids, pro_<hex> ids, and dashed uuids, but
-    # always answers with the dashed org_uuid. Briefs must come back keyed by
-    # the id the caller submitted, or pipeline matching abstains every pro.
+    # always answers keyed by the dashed org_uuid. Briefs must come back keyed
+    # by the id the caller submitted, or pipeline matching abstains every pro.
     row = {**_rows()[0], "org_uuid": "7f8a05b2-ec02-4c07-8bbe-ccfa9000abfb"}
     httpx_mock.add_response(json=[row])
     submitted = "pro_7F8A05B2EC024C078BBECCFA9000ABFB"
     batch = await make_client().fetch([submitted])
     assert batch.organizations[0].pro_id == submitted
+
+
+async def test_pro_uuid_is_a_distinct_id_space_and_still_matches(httpx_mock: HTTPXMock) -> None:
+    # Live contract: pro_<hex> is an Iterable user id, NOT the org_uuid with a
+    # prefix. The flow resolves it and echoes it back as pro_uuid on each row
+    # (seen in execution 36657272). Matching must use those echoed ids.
+    row = {
+        **_rows()[0],
+        "org_uuid": "144fea96-4526-44ac-92e0-31d956fafa72",
+        "pro_uuid": "pro_f05fd57012f343f59f3bc3f6c575e7ec",
+        "organization_id": 920618,
+    }
+    httpx_mock.add_response(json=[row])
+    submitted = "pro_f05fd57012f343f59f3bc3f6c575e7ec"
+    batch = await make_client().fetch([submitted])
+    assert batch.organizations[0].pro_id == submitted
+
+
+async def test_numeric_org_id_matches_via_organization_id(httpx_mock: HTTPXMock) -> None:
+    row = {
+        **_rows()[0],
+        "org_uuid": "144fea96-4526-44ac-92e0-31d956fafa72",
+        "pro_uuid": "pro_f05fd57012f343f59f3bc3f6c575e7ec",
+        "ORGANIZATION_ID": 920618,
+    }
+    httpx_mock.add_response(json=[row])
+    batch = await make_client().fetch(["920618"])
+    assert batch.organizations[0].pro_id == "920618"
 
 
 async def test_unrequested_rows_keep_their_own_uuid(httpx_mock: HTTPXMock) -> None:

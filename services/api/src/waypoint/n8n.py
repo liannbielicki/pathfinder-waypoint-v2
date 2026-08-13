@@ -174,6 +174,12 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
     return OrgBrief(**projected)
 
 
+# Identifier fields the flow echoes back on each row (execution 36657272):
+# the resolved dashed uuid, the submitted pro_<hex> Iterable id, and the
+# numeric org id (Snowflake emits it in either case).
+_ROW_ID_KEYS = ("org_uuid", "pro_uuid", "organization_id", "ORGANIZATION_ID")
+
+
 def _canon(identifier: str) -> str:
     """Canonical form shared by the three id spellings the flow accepts
     (numeric org id, pro_<hex32>, dashed uuid): lowercase, no pro_ prefix,
@@ -228,16 +234,28 @@ class N8NContextClient:
                 None,
             )
             try:
-                briefs = [_brief_from_row(row) for row in rows]
+                pairs = [(row, _brief_from_row(row)) for row in rows]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
-            # The flow answers in dashed-uuid form regardless of which id
-            # spelling was submitted; re-key each brief to the submitted id so
-            # pipeline matching (brief.pro_id == run pro_id) holds for all
-            # three formats.
+            # The flow accepts three id spaces (numeric org id, pro_<hex>
+            # Iterable id, dashed org uuid) but always keys rows by the dashed
+            # org_uuid — pro_<hex> is NOT the uuid respelled. It echoes the
+            # resolved ids back on each row, so match the submitted id against
+            # all of them (raw row: the projection drops id fields), then
+            # re-key the brief to the submitted id so pipeline matching
+            # (brief.pro_id == run pro_id) holds regardless of format.
             submitted = {_canon(identifier): identifier for identifier in chunk}
-            for brief in briefs:
-                original = submitted.get(_canon(brief.org_uuid))
+            for row, brief in pairs:
+                echoed = (row.get(k) for k in _ROW_ID_KEYS)
+                original = next(
+                    (
+                        found
+                        for value in echoed
+                        if value is not None
+                        and (found := submitted.get(_canon(str(value)))) is not None
+                    ),
+                    None,
+                )
                 if original is not None:
                     brief = brief.model_copy(update={"org_uuid": original})
                 else:
