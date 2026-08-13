@@ -87,7 +87,7 @@ async def test_n8n_fetch_posts_org_uuids(httpx_mock: HTTPXMock) -> None:
     assert result.organizations[0].plan_tier == "basic"
     request = httpx_mock.get_request()
     assert request is not None
-    assert json.loads(request.content) == {"org_uuids": ["pro_1", "pro_2"]}
+    assert json.loads(request.content) == {"id": ["pro_1", "pro_2"]}
     assert request.headers["authorization"] == "Bearer test-token"
 
 
@@ -97,7 +97,7 @@ async def test_n8n_fetch_chunks_large_audiences(httpx_mock: HTTPXMock) -> None:
     client = make_client(batch_size=2)
     result = await client.fetch(["pro_1", "pro_2", "pro_3"])
     requests = httpx_mock.get_requests()
-    assert [json.loads(r.content)["org_uuids"] for r in requests] == [
+    assert [json.loads(r.content)["id"] for r in requests] == [
         ["pro_1", "pro_2"], ["pro_3"],
     ]
     assert len(result.organizations) == 3
