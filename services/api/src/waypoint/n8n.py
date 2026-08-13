@@ -39,15 +39,21 @@ ALLOWED_FIELDS = (
     "recommended_focus", "recommended_focus_value_band",
     "recommended_focus_retention_lift_band", "top_unused_paid_feature",
     "vertical", "plan_tier", "org_size_band", "tenure_band", "segment",
+    "lifecycle_stage", "health_grade", "upsell_grade", "churn_risk_state",
+    "payments_28d_band", "email_engagement_state",
+    "marketing_campaigns_28d_band", "leads_created_28d_band",
+    "jobs_reviewed_28d_band", "last_job_activity_band", "wisetack_state",
+    "mrr_band", "platform_usage_band",
 )
 
 # v2 band field -> the permitted persona-match feature key it maps onto
 # (personas.PERMITTED_MATCH_FEATURES). segment is the load-bearing key: real
 # persona-cards items are flat and share only segment with a Pro, so without it
-# every fit is 0.0. v2 has no lifecycle_stage / features_active_count source,
-# so those keys stay absent.
+# every fit is 0.0. features_active_count still has no source, so that key
+# stays absent.
 _MATCH_FEATURE_MAP = {
     "segment": "segment",
+    "lifecycle_stage": "lifecycle_stage",
     "plan_tier": "plan",
     "tenure_band": "tenure_bucket",
     "org_size_band": "org_size_bucket",
@@ -97,6 +103,19 @@ class OrgBrief(BaseModel):
     plan_tier: str | None = None
     org_size_band: str | None = None
     tenure_band: str | None = None
+    lifecycle_stage: str | None = None
+    health_grade: str | None = None
+    upsell_grade: str | None = None
+    churn_risk_state: str | None = None
+    payments_28d_band: str | None = None
+    email_engagement_state: str | None = None
+    marketing_campaigns_28d_band: str | None = None
+    leads_created_28d_band: str | None = None
+    jobs_reviewed_28d_band: str | None = None
+    last_job_activity_band: str | None = None
+    wisetack_state: str | None = None
+    mrr_band: str | None = None
+    platform_usage_band: str | None = None
 
     @property
     def pro_id(self) -> str:
