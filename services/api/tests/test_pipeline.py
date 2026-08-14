@@ -17,6 +17,7 @@ from waypoint.tables import (
     JobRow,
     LlmCallRow,
     MeasurementRow,
+    PersonaEvalRow,
     RunRow,
     TouchOutcomeRow,
     WinnerRow,
@@ -279,8 +280,11 @@ async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seede
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].outcome == "suppressed"
-    # One suppressed round + lose rounds: screens = rounds − suppressed.
-    assert deps.gateway.calls_for("screen") == len(ledger) - 1
+    # One suppressed round + lose rounds, but the fixture's evolve idea never
+    # changes across rounds: after the first paid screen, later rounds hit the
+    # persona reaction cache (same panel+concept+channel), so spend stays at 1
+    # regardless of how many non-suppressed rounds ran.
+    assert deps.gateway.calls_for("screen") == 1
     suppressed = (
         (
             await deps.db.execute(
@@ -753,3 +757,30 @@ async def test_evidence_reaches_the_evolve_prompt(
     await run_job(seeded_job.id, deps)
     prompts = deps.gateway.prompts_for("evolve")
     assert prompts and "review_boost via sms" in prompts[0]
+
+
+async def test_persona_reactions_are_cached_across_jobs(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    await run_job(seeded_job.id, deps)
+    screen_calls_first = deps.gateway.calls_for("screen")
+    assert screen_calls_first > 0
+    cached = (await db_session.execute(select(PersonaEvalRow))).scalars().all()
+    assert cached  # every paid reaction round left a cache row
+
+    # Second identical run: same brief, same fake ideas -> same panel+concept.
+    run2 = RunRow(
+        id="run-pipe-2",
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms"],
+        cost_limit=Decimal("100.00"),
+    )
+    db_session.add(run2)
+    await db_session.flush()
+    job2 = await enqueue(db_session, run2.id, stage="pro", pro_id="pro_1")
+    await db_session.commit()
+    await run_job(job2, deps)
+    # No new screen/final spend: reactions came from the cache.
+    assert deps.gateway.calls_for("screen") == screen_calls_first

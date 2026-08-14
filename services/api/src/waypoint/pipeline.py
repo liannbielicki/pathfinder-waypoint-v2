@@ -10,12 +10,14 @@ or winners. Every paid call flows through the recorded MeteredLLM path. There
 is no canned fallback anywhere: a model failure is a failed job.
 """
 
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
@@ -44,6 +46,7 @@ from waypoint.personas import (
 from waypoint.prompts import (
     CRITIC_SYSTEM,
     EVOLVE_SYSTEM,
+    PROMPT_VERSION,
     REACTION_SYSTEM,
     critic_prompt,
     evolve_prompt,
@@ -63,6 +66,7 @@ from waypoint.tables import (
     EvolveRoundRow,
     JobRow,
     MeasurementRow,
+    PersonaEvalRow,
     RunRow,
     WinnerRow,
 )
@@ -253,6 +257,12 @@ async def _abstain_pro(
         await deps.store.session.commit()
 
 
+def _reaction_cache_key(panel: PanelSelection, concept: str, channel: str) -> str:
+    ids = sorted(i.persona_id for i in panel.items)
+    raw = json.dumps([PROMPT_VERSION, ids, concept, channel])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 async def _react(
     state: PipelineState,
     deps: PipelineDeps,
@@ -264,6 +274,20 @@ async def _react(
     tier: str,
     call_key: str,
 ) -> list[float]:
+    # Spec: reuse persona evaluation where persona set, touch pattern, and
+    # channel are materially equivalent. Evaluation is temperature-0, so a
+    # cached reaction is the same number the model would return.
+    # Safe to commit here: _react is called with a clean session — the caller's
+    # candidate/ledger rows are flushed/committed after _react returns, never
+    # concurrently — so this commit only ever carries the cache row.
+    session = deps.store.session
+    key = _reaction_cache_key(panel, concept, channel)
+    cached = (
+        await session.execute(select(PersonaEvalRow).where(PersonaEvalRow.cache_key == key))
+    ).scalar_one_or_none()
+    if cached is not None and all(i.persona_id in cached.reactions for i in panel.items):
+        return [float(cached.reactions[i.persona_id]) for i in panel.items]
+
     # The FULL persona card goes to the model — a bare label + role produced
     # constant role-driven ratings ([6,6,4] every round). data_provenance is
     # metadata, and empty values are dead tokens.
@@ -301,6 +325,17 @@ async def _react(
     missing = [i.persona_id for i in panel.items if i.persona_id not in by_id]
     if missing:
         raise PipelineFailure(f"{stage}_reactions_missing: {missing}")
+    session.add(
+        PersonaEvalRow(
+            cache_key=key,
+            reactions={i.persona_id: by_id[i.persona_id] for i in panel.items},
+            snapshot_version=panel.snapshot_version,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:  # a sibling worker cached it first; theirs wins
+        await session.rollback()
     return [by_id[i.persona_id] for i in panel.items]
 
 
