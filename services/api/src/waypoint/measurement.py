@@ -39,6 +39,18 @@ METRIC_CATALOG: dict[str, MeasurementIndicator] = {
         source="product_activity", window_days=30,
         rationale="Newly attached features in the window.",
     ),
+    "app_return": MeasurementIndicator(
+        key="app_return", label="Returned to app (7d)", direction="increase",
+        source="amplitude", window_days=7,
+        rationale="The pro returns to and uses the app within 7 days — the primary "
+        "objective. Canonical Amplitude active-use event contract pending (TODOS.md).",
+    ),
+    "app_continued_use": MeasurementIndicator(
+        key="app_continued_use", label="Continued app usage (30d)", direction="increase",
+        source="amplitude", window_days=30,
+        rationale="Sustained app usage within 30 days of the touch. Canonical "
+        "Amplitude active-use event contract pending (TODOS.md).",
+    ),
 }
 
 
@@ -72,8 +84,9 @@ Title: {winner.title}
 Mechanism: {winner.mechanism}
 
 Pick the ONE or TWO leading indicators that best express this proposal's
-mechanism — the metrics that would move first if the proposal works. Churn
-remains the long-term outcome and is not selectable here.
+mechanism. app_return / app_continued_use directly express the primary
+objective (the pro returns to and uses the app) — prefer including one of them
+alongside at most one mechanism-specific metric.
 
 Available metric keys (choose ONLY from this list):
 {", ".join(keys)}

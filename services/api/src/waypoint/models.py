@@ -78,7 +78,7 @@ class MeasurementIndicator(BaseModel):
     label: str
     direction: Literal["increase", "decrease"]
     source: str
-    window_days: Literal[7, 30, 90]
+    window_days: Literal[7, 14, 30, 90]
     rationale: str
 
 
