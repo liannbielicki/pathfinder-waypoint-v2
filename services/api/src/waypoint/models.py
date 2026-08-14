@@ -27,6 +27,10 @@ TERMINAL_RUN_STATUSES = frozenset({"complete", "no_action", "abstained", "stoppe
 # frontend (lib/api.ts PENDING_AUDIENCE_QUERY) — keep the literals in sync.
 PENDING_AUDIENCE_QUERY = "pending_n8n"
 
+# Closed set of high-leverage customer states (spec "Journey window"). Narrow
+# on purpose; widening it is a product decision, not a code default.
+JourneyWindow = Literal["churn_risk", "onboarding", "upsell"]
+
 
 class RunCreate(BaseModel):
     pro_ids: list[str] = Field(min_length=1)
@@ -37,6 +41,7 @@ class RunCreate(BaseModel):
     # The confirm-typing gate is a UI contract: the UI only sends confirmed
     # fields, and the server treats any supplied key as confirmed.
     loop_config: dict[str, float] | None = None
+    journey_window: JourneyWindow = "churn_risk"
 
 
 class RunView(BaseModel):
@@ -53,6 +58,7 @@ class RunView(BaseModel):
     cost_spent_usd: Decimal
     stop_reason: str | None
     created_at: datetime
+    journey_window: str
 
 
 class Recommendation(BaseModel):

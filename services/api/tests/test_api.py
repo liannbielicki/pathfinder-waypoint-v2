@@ -406,3 +406,24 @@ async def test_stages_aggregate_across_per_pro_jobs(
     # A stage shows done only when EVERY job checkpointed it — an honest floor.
     assert "context" in detail["stages"]
     assert "evolve" not in detail["stages"]
+
+
+async def test_run_carries_journey_window(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post(
+        "/api/runs", json={**RUN_REQUEST, "journey_window": "onboarding"}
+    )
+    assert response.status_code == 202
+    assert response.json()["journey_window"] == "onboarding"
+
+
+async def test_run_defaults_journey_window(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post("/api/runs", json=RUN_REQUEST)
+    assert response.status_code == 202
+    assert response.json()["journey_window"] == "churn_risk"
+
+
+async def test_unknown_journey_window_is_rejected(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post(
+        "/api/runs", json={**RUN_REQUEST, "journey_window": "revenue_maximization"}
+    )
+    assert response.status_code == 422
