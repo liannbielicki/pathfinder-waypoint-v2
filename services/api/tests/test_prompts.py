@@ -132,3 +132,12 @@ def test_evolve_prompt_carries_window_and_evidence() -> None:
     )
     assert "churn_risk" in prompt
     assert "invoice_delivery via sms" in prompt
+
+
+def test_war_game_prompt_demands_bounded_branches() -> None:
+    from waypoint.prompts import war_game_prompt
+
+    prompt = war_game_prompt("{}", '{"title": "t"}', ["sms"])
+    for branch in ("on_return", "on_click_no_use", "on_no_interaction", "on_negative"):
+        assert branch in prompt
+    assert "stop" in prompt

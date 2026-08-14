@@ -784,3 +784,38 @@ async def test_persona_reactions_are_cached_across_jobs(
     await run_job(job2, deps)
     # No new screen/final spend: reactions came from the cache.
     assert deps.gateway.calls_for("screen") == screen_calls_first
+
+
+async def test_winner_carries_bounded_follow_up(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await db_session.execute(
+            select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id, WinnerRow.kind == "winner")
+        )
+    ).scalar_one()
+    follow_up = winner.evidence["follow_up"]
+    assert set(follow_up) == {"on_return", "on_click_no_use", "on_no_interaction", "on_negative"}
+    assert follow_up["on_negative"] == {"action": "stop", "channel": "none"}
+
+
+async def test_war_game_failure_does_not_block_the_winner(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["wargame"] = "not json at all"
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await db_session.execute(
+            select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id, WinnerRow.kind == "winner")
+        )
+    ).scalar_one()
+    assert "follow_up" not in winner.evidence
+    assert "follow_up_unavailable" in winner.evidence
+    # The measurement plan still landed: the war game is additive, never blocking.
+    measurement = (
+        await db_session.execute(
+            select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
+        )
+    ).scalar_one()
+    assert measurement.indicators

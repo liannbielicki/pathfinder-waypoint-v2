@@ -134,6 +134,14 @@ CRITIC_BLOCK = json.dumps(
     [{"idea_index": 0, "block_kind": "ungrounded", "reason": "invented AR balance"}]
 )
 MEASURE_JSON = json.dumps({"indicators": [{"key": "invoices_sent"}]})
+WARGAME_JSON = json.dumps({
+    "on_return": {"action": "Send a congratulations nudge toward the feature used",
+                  "channel": "email"},
+    "on_click_no_use": {"action": "One simpler ask focused on a single first step",
+                        "channel": "sms"},
+    "on_no_interaction": {"action": "One alternate mechanism touch", "channel": "sms"},
+    "on_negative": {"action": "stop", "channel": "none"},
+})
 
 
 def reactions_json(value: float) -> str:
@@ -157,6 +165,7 @@ class FakeLLM:
             "screen": [reactions_json(5.3)],
             "final": reactions_json(5.3),
             "measure": MEASURE_JSON,
+            "wargame": WARGAME_JSON,
         }
 
     @property

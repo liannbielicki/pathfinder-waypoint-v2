@@ -107,6 +107,22 @@ class TouchOutcomeIn(BaseModel):
     returned_90d: bool | None = None
 
 
+class FollowUpBranch(BaseModel):
+    action: str = Field(min_length=1)  # "stop" or ONE concrete next touch (seed, not copy)
+    channel: Literal["sms", "email", "none"] = "none"
+
+
+class FollowUpPlan(BaseModel):
+    """Bounded war game (spec "Multi-touch behavior"): four fixed branches, one
+    conditional next touch each. Data only — nothing here is executed; only the
+    approved next touch is ever sent, after the outcome is observed."""
+
+    on_return: FollowUpBranch
+    on_click_no_use: FollowUpBranch
+    on_no_interaction: FollowUpBranch
+    on_negative: FollowUpBranch
+
+
 class HandoffReceipt(BaseModel):
     handoff_id: str
     idempotency_key: str
