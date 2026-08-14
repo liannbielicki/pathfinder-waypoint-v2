@@ -25,6 +25,11 @@ CONSENT_FIELD = {"sms": "sms_consent_state", "email": "email_consent_state"}
 
 _LOW_CHURN = frozenset({"low", "none", "minimal"})
 
+# ponytail: literal post-onboarding vocabulary; extend/confirm when the n8n
+# flow's real lifecycle_stage vocabulary is confirmed (HUMAN-TASKS: live
+# contract verification, same caveat as NEGATIVE_CONSENT).
+_NON_ONBOARDING = frozenset({"mature", "established", "active", "churned", "expansion"})
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -47,7 +52,7 @@ def window_conflict(brief: OrgBrief, journey_window: str) -> str | None:
             return f"churn_risk_state={state!r} contradicts churn_risk window"
     if journey_window == "onboarding":
         stage = (brief.lifecycle_stage or "").strip().lower()
-        if stage and "onboard" not in stage and stage != "new":
+        if stage in _NON_ONBOARDING:
             return f"lifecycle_stage={stage!r} is not onboarding"
     # upsell: org-context-v2 has no reliable contradiction signal; pass.
     return None

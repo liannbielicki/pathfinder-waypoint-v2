@@ -819,6 +819,52 @@ class _KeyedMeasureLLM:
         )
 
 
+async def _attach_follow_up(
+    state: PipelineState, deps: PipelineDeps, winner: WinnerRow, candidate: CandidateRow
+) -> None:
+    """War game must offer only channels this Pro still consents to. The
+    evolve stage re-gates per round, but state.run.channels is the raw run
+    list, so re-gate here rather than trust it verbatim (a stale/expanded
+    consent state must not leak an un-consented channel into the follow-up)."""
+    skip_reason: str | None = None
+    gated_channels: list[str] = []
+    if state.brief is None:
+        skip_reason = "channels not gateable on resume: no org brief"
+    else:
+        gate = gate_pro(state.brief, list(state.run.channels), state.run.journey_window)
+        if gate.blocked:
+            skip_reason = f"channels not gateable: {gate.reason}"
+        else:
+            gated_channels = list(gate.allowed_channels)
+    if skip_reason is not None:
+        winner.evidence = {**winner.evidence, "follow_up_unavailable": skip_reason}
+        return
+    try:
+        plan_json = await _valid_json_call(
+            deps,
+            base_key=f"{state.run.id}:{state.pro_id}:wargame",
+            tier="fast",
+            prompt=war_game_prompt(
+                state.brief.model_dump_json() if state.brief else "{}",
+                json.dumps(candidate.recommendation),
+                gated_channels,
+            ),
+            run_id=state.run.id,
+            pro_id=state.pro_id,
+            stage="wargame",
+            system=WAR_GAME_SYSTEM,
+            parse=lambda text: FollowUpPlan.model_validate(extract_json(text)),
+        )
+    except PipelineFailure as error:
+        # Additive, never blocking: a winner without a war game still ships.
+        winner.evidence = {**winner.evidence, "follow_up_unavailable": error.reason}
+    else:
+        follow_up = plan_json.model_dump()
+        # Never trust the model on the stop rule.
+        follow_up["on_negative"] = {"action": "stop", "channel": "none"}
+        winner.evidence = {**winner.evidence, "follow_up": follow_up}
+
+
 async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     winner = await deps.store.winner_for(state.run.id, state.pro_id)
     if winner is None or winner.kind != "winner":
@@ -830,30 +876,7 @@ async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, 
     assert candidate is not None
     await _guard(state, deps)
     if "follow_up" not in winner.evidence and "follow_up_unavailable" not in winner.evidence:
-        try:
-            plan_json = await _valid_json_call(
-                deps,
-                base_key=f"{state.run.id}:{state.pro_id}:wargame",
-                tier="fast",
-                prompt=war_game_prompt(
-                    state.brief.model_dump_json() if state.brief else "{}",
-                    json.dumps(candidate.recommendation),
-                    list(state.run.channels),
-                ),
-                run_id=state.run.id,
-                pro_id=state.pro_id,
-                stage="wargame",
-                system=WAR_GAME_SYSTEM,
-                parse=lambda text: FollowUpPlan.model_validate(extract_json(text)),
-            )
-        except PipelineFailure as error:
-            # Additive, never blocking: a winner without a war game still ships.
-            winner.evidence = {**winner.evidence, "follow_up_unavailable": error.reason}
-        else:
-            follow_up = plan_json.model_dump()
-            # Never trust the model on the stop rule.
-            follow_up["on_negative"] = {"action": "stop", "channel": "none"}
-            winner.evidence = {**winner.evidence, "follow_up": follow_up}
+        await _attach_follow_up(state, deps, winner, candidate)
         await deps.store.session.commit()
     context = WinnerContext(
         run_id=state.run.id,

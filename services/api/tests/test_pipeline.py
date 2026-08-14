@@ -848,3 +848,37 @@ async def test_war_game_failure_does_not_block_the_winner(
         )
     ).scalar_one()
     assert measurement.indicators
+
+
+async def test_war_game_prompt_omits_channels_this_pro_opted_out_of(
+    db_session: AsyncSession, deps: FakeDeps
+) -> None:
+    # sms is opted out for this pro but the run still offers sms + email;
+    # _stage_evolve gates its own prompt, but the war game must re-gate too,
+    # or a follow_up branch can recommend the un-consented channel verbatim.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"sms_consent_state": "opted_out"}
+    )
+    run = RunRow(
+        id="run-wargame-gate",
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms", "email"],
+        cost_limit=Decimal("100.00"),
+    )
+    db_session.add(run)
+    db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await db_session.flush()
+    job_id = await enqueue(db_session, run.id, stage="pro", pro_id="pro_1")
+    await db_session.commit()
+
+    email_idea = json.loads(idea_json("invoice_delivery"))
+    email_idea["channel"] = "email"
+    deps.gateway.responses["evolve"] = [json.dumps(email_idea)]
+
+    await run_job(job_id, deps)
+    prompts = deps.gateway.prompts_for("wargame")
+    assert prompts  # the war game did run (winner exists, gate wasn't blocked)
+    assert '"sms"' not in prompts[0]

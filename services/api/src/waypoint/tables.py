@@ -10,11 +10,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -207,6 +209,18 @@ class TouchOutcomeRow(Base):
     __tablename__ = "touch_outcomes"
     __table_args__ = (
         UniqueConstraint("recommendation_id", "source", name="uq_touch_outcomes_rec_source"),
+        Index(
+            "ix_touch_outcomes_window_channel_created_at",
+            "journey_window",
+            "channel",
+            text("created_at DESC"),
+            postgresql_where=text("evidence_limitation IS NULL"),
+        ),
+        Index(
+            "ix_touch_outcomes_pro_id_evidence_limitation",
+            "pro_id",
+            "evidence_limitation",
+        ),
     )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)

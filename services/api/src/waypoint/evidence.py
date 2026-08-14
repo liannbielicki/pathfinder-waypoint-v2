@@ -68,21 +68,22 @@ async def pattern_summaries(
 async def failed_mechanisms(session: AsyncSession, pro_id: str) -> list[str]:
     """Mechanisms that recently failed FOR THIS PRO: an unsubscribe, or a
     measured 30-day no-return. Spec gate: a new candidate must be materially
-    different from recent failed touches — same mechanism is not different."""
+    different from recent failed touches — same mechanism is not different.
+    Reduced in SQL (DISTINCT + the failure predicate) instead of loading
+    every full row into Python just to throw most of it away."""
     rows = (
         await session.execute(
-            select(TouchOutcomeRow).where(
+            select(TouchOutcomeRow.mechanism)
+            .distinct()
+            .where(
                 TouchOutcomeRow.pro_id == pro_id,
                 TouchOutcomeRow.evidence_limitation.is_(None),
+                TouchOutcomeRow.mechanism != "",
+                (TouchOutcomeRow.unsubscribed.is_(True)) | (TouchOutcomeRow.returned_30d.is_(False)),
             )
         )
     ).scalars().all()
-    failed = {
-        r.mechanism
-        for r in rows
-        if r.mechanism and (r.unsubscribed is True or r.returned_30d is False)
-    }
-    return sorted(failed)
+    return sorted(rows)
 
 
 def evidence_block(patterns: list[PatternEvidence]) -> str:

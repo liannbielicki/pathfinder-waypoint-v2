@@ -50,3 +50,17 @@ def test_non_onboarding_lifecycle_contradicts_onboarding_window() -> None:
 
 def test_onboarding_lifecycle_passes_onboarding_window() -> None:
     assert not gate_pro(brief(lifecycle_stage="onboarding"), ["sms"], "onboarding").blocked
+
+
+def test_unknown_lifecycle_stage_passes_onboarding_window() -> None:
+    # Fail-open on unknown data (same principle as churn_risk_state): an
+    # unrecognized vocabulary value must not read as an affirmative
+    # contradiction just because it isn't in the known-onboarding set.
+    result = gate_pro(brief(lifecycle_stage="new_customer"), ["sms"], "onboarding")
+    assert not result.blocked
+    result = gate_pro(brief(lifecycle_stage="trial"), ["sms"], "onboarding")
+    assert not result.blocked
+
+
+def test_mature_lifecycle_still_blocks_onboarding_window() -> None:
+    assert gate_pro(brief(lifecycle_stage="mature"), ["sms"], "onboarding").blocked
