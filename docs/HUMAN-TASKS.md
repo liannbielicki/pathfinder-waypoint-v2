@@ -25,6 +25,9 @@ A human must set these values (never their values in git). All names match
 - `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing n8n context webhook
 - `PERSONA_URL`, `PERSONA_TOKEN` — persona snapshot service
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
+- `BYPASS_TOKEN` — Vercel Deployment Protection bypass secret for the LCM
+  intake app (separate from `HANDOFF_TOKEN`; without it every request 401s
+  at Vercel's SSO wall before reaching the app)
 - `RUN_COST_USD`, `DAY_COST_USD` — budget limits
 - `WORKER_COUNT`, `KILL_SWITCH`, `MODEL_FAST`, `MODEL_DEEP`, `LOG_LEVEL`
 - `MAX_LLM_IN_FLIGHT` — fleet-wide cap on concurrent Anthropic calls
@@ -60,10 +63,14 @@ Docker was not installed on the build machine, so
   `services/api/tests/fixtures/personas.json`, and that persona families give
   real Pros enough threshold-clearing cross-family matches (the 2+1/3+2 rules
   in `tests/test_personas.py` abstain otherwise).
-- **Allison's LCM handoff**: confirm the intake accepts the payload in
-  `tests/test_handoff.py` (`idempotency_key`, `pro_id`, `org_id`, `winner`,
-  `score`, `measurement_plan`, `audience_lineage`), dedupes on
-  `idempotency_key`, and that a 2xx response is a durable acceptance.
+- **Allison's LCM handoff**: `POST /api/pathfinder/intake` (Pathfinder Intake
+  API — see `tests/test_handoff.py`), one batch per run: `{"batch": run_id,
+  "rows": [{"pro_uuid", "theme", "theme_category", "org_id", "row_id"}]}`, no
+  email/name — `pro_uuid` only. Requires both `Authorization: Bearer
+  HANDOFF_TOKEN` and `x-vercel-protection-bypass: BYPASS_TOKEN` (Vercel
+  Deployment Protection sits in front and 401s without the bypass header
+  regardless of the bearer token). Dedupes per (`batch`, `row_id`); a 202 with
+  per-row `accepted`/`duplicate`/`rejected` status is a durable acceptance.
 - **Supabase**: confirm the database accepts the committed Alembic schema:
   `cd services/api && DATABASE_URL=… uv run alembic upgrade head`.
 - **Clean-audience schema**: confirm operators supply SQL-suppressed pro IDs

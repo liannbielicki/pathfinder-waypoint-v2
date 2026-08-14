@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 RunStatus = Literal[
     "queued",
@@ -89,9 +89,13 @@ class MeasurementPlan(BaseModel):
 class TouchOutcomeIn(BaseModel):
     """One observed-outcome record from an outcome source (n8n Iterable/Amplitude
     flow, or manual backfill). recommendation_id is the Waypoint winner_id carried
-    through LCM -> Iterable (TODOS: stable recommendation attribution)."""
+    through LCM -> Iterable as the intake row's row_id; outcome sources may echo
+    either spelling back (TODOS: stable recommendation attribution)."""
 
-    recommendation_id: str = Field(min_length=1)
+    recommendation_id: str = Field(
+        min_length=1,
+        validation_alias=AliasChoices("recommendation_id", "row_id"),
+    )
     source: str = Field(min_length=1)
     pro_id: str = ""
     org_id: str = ""
@@ -126,4 +130,4 @@ class FollowUpPlan(BaseModel):
 class HandoffReceipt(BaseModel):
     handoff_id: str
     idempotency_key: str
-    status: Literal["accepted", "rejected"]
+    status: Literal["accepted", "rejected", "duplicate"]

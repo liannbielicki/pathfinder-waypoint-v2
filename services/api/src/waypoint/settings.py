@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     PERSONA_TOKEN: SecretStr
     HANDOFF_URL: AnyHttpUrl
     HANDOFF_TOKEN: SecretStr
+    # Vercel Deployment Protection guards the LCM intake app; this is the
+    # separate "Protection Bypass for Automation" secret it issues, required
+    # alongside HANDOFF_TOKEN on every request or the SSO wall 401s us first.
+    BYPASS_TOKEN: SecretStr
     RUN_COST_USD: Decimal = Field(gt=0)
     DAY_COST_USD: Decimal = Field(gt=0)
     WORKER_COUNT: int = Field(ge=1)

@@ -38,11 +38,18 @@
     carried Waypoint -> LCM -> Iterable -> outcome ingestion and its retention.
   - **Depends on / blocked by:** LCM support for preserving the identifier and
     confirmation of the Iterable readback fields.
-  - **Status:** Waypoint now emits `recommendation_id` (the winner ID) in the
-    LCM handoff payload and accepts it back on `POST /api/outcomes` to key
-    inbound touch outcomes. The remaining gap is entirely external: LCM must
-    preserve `recommendation_id` through drafting and Iterable delivery so it
-    round-trips on the outcome event.
+  - **Status:** the LCM handoff now sends the winner ID as `row_id` in each
+    Pathfinder Intake batch row (was: `recommendation_id` in the old per-winner
+    payload); `POST /api/outcomes` accepts it back under either spelling
+    (`recommendation_id` or `row_id`) to key inbound touch outcomes. Note:
+    `journey_window` and `follow_up` are no longer forwarded to LCM at all —
+    the intake row shape is fixed to `pro_uuid`/`theme`/`theme_category`/
+    `org_id`/`row_id`; both remain stored (`run.journey_window`,
+    `winner.evidence["follow_up"]`) and readable via the API. The remaining
+    gap is entirely external: LCM must echo `row_id` through drafting and
+    Iterable delivery so it round-trips on the outcome event, and extending
+    the intake contract to carry `journey_window`/`follow_up` is pending
+    confirmation with Allison.
 
 - [ ] **Canonical Amplitude active-use event contract**
   - **Why:** The primary outcome is binary return-to-app and continued use, but

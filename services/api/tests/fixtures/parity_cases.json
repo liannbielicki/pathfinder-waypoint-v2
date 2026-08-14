@@ -7,7 +7,7 @@
     "expected_context_version": "org-context-v2",
     "expected_panel_sizes": [3, 5],
     "expected_metric": "invoices_sent",
-    "expected_handoff_fields": ["pro_id", "org_id", "winner", "measurement_plan", "audience_lineage"]
+    "expected_handoff_fields": ["pro_uuid", "org_id", "theme", "theme_category", "row_id"]
   },
   {
     "case": "low_panel_fit_abstention",

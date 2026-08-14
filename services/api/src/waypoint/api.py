@@ -22,7 +22,6 @@ from waypoint.models import (
     PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
     HandoffReceipt,
-    MeasurementPlan,
     RunCreate,
     RunView,
     TouchOutcomeIn,
@@ -359,35 +358,29 @@ def create_app(
         client = LCMClient(
             url=str(settings.HANDOFF_URL),
             token=settings.HANDOFF_TOKEN.get_secret_value(),
+            bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
             session=session,
         )
         if run.audience_query == PENDING_AUDIENCE_QUERY:
             # The n8n flow never reported its query version; refusing beats
-            # shipping the placeholder downstream as if it were real lineage.
+            # handing off a winner sourced from an unverified audience.
             raise HTTPException(
                 status_code=409,
                 detail="audience lineage unresolved: the n8n flow never reported a query version",
             )
-        lineage = {"audience_query": run.audience_query, "audience_run": run.audience_run}
-        receipts = []
+        # Pathfinder Intake API: no PII, one POST per batch (never per row).
+        rows = [
+            {
+                "pro_uuid": winner.pro_id,
+                "theme": candidate.recommendation["title"],
+                "theme_category": candidate.recommendation["mechanism"],
+                "org_id": winner.evidence.get("org_id", ""),
+                "row_id": winner.id,
+            }
+            for winner, _measurement, candidate in ready
+        ]
         try:
-            for winner, measurement, candidate in ready:
-                receipts.append(
-                    await client.handoff(
-                        {
-                            "run_id": run_id,
-                            "winner_id": winner.id,
-                            "pro_id": winner.pro_id,
-                            "org_id": winner.evidence.get("org_id", ""),
-                            "recommendation": candidate.recommendation,
-                            "score": winner.evidence.get("final", {}),
-                            "journey_window": run.journey_window,
-                            "follow_up": winner.evidence.get("follow_up"),
-                        },
-                        MeasurementPlan.model_validate({"indicators": measurement.indicators}),
-                        lineage,
-                    )
-                )
+            receipts = await client.handoff(run_id, rows)
         except HandoffUnavailable as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return HandoffResponse(receipts=receipts)

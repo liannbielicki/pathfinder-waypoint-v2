@@ -36,6 +36,7 @@ TEST_SETTINGS = Settings(
     PERSONA_TOKEN="test",
     HANDOFF_URL="https://lcm.example/handoff",
     HANDOFF_TOKEN="lcm-token",
+    BYPASS_TOKEN="bypass-secret",
     RUN_COST_USD="25.00",
     DAY_COST_USD="500.00",
     WORKER_COUNT=1,
@@ -214,7 +215,9 @@ async def test_handoff_creates_durable_receipt(
     )
     await db_session.commit()
 
-    httpx_mock.add_response(json={"status": "accepted", "lcm_id": "lcm-9"})
+    httpx_mock.add_response(json={
+        "batch": run_id, "rows": [{"row_id": winner.id, "status": "accepted"}],
+    })
     response = await auth_client.post(f"/api/runs/{run_id}/handoff")
     assert response.status_code == 200
     receipts = response.json()["receipts"]
@@ -224,7 +227,11 @@ async def test_handoff_creates_durable_receipt(
     row = (
         await db_session.execute(select(HandoffRow).where(HandoffRow.run_id == run_id))
     ).scalar_one()
-    assert row.payload["audience_lineage"]["audience_query"] == "audience_v7"
+    # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
+    assert row.payload == {
+        "pro_uuid": "pro_1", "theme": "T", "theme_category": "invoice_delivery",
+        "org_id": "org_1", "row_id": winner.id,
+    }
 
 
 async def test_health_has_no_secret_or_dependency_payload(client: httpx.AsyncClient) -> None:
@@ -477,6 +484,40 @@ async def test_attributed_outcome_backfills_from_winner(
     response = await auth_client.post(
         "/api/outcomes",
         json=[{**OUTCOME, "recommendation_id": winner.id}],
+    )
+    assert response.status_code == 202
+    assert response.json() == {"stored": 1, "unattributed": 0}
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.evidence_limitation is None
+    assert row.mechanism == "invoice_delivery"
+    assert row.journey_window == "churn_risk"
+    assert row.run_id == run.id
+
+
+async def test_attributed_outcome_via_row_id_alias_backfills_from_winner(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    run = RunRow(pro_ids=["pro_1"], audience_query="q", audience_run="r",
+                 channels=["sms"], journey_window="churn_risk")
+    db_session.add(run)
+    await db_session.flush()
+    candidate = CandidateRow(
+        run_id=run.id, pro_id="pro_1", status="champion",
+        recommendation={"title": "t", "mechanism": "invoice_delivery", "actions": ["a"],
+                        "pro_facing_concept": "c", "manager_rationale": "m",
+                        "channel": "sms", "risk": ""},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(run_id=run.id, pro_id="pro_1", kind="winner",
+                       candidate_id=candidate.id, rationale="m")
+    db_session.add(winner)
+    await db_session.commit()
+
+    outcome = {k: v for k, v in OUTCOME.items() if k != "recommendation_id"}
+    response = await auth_client.post(
+        "/api/outcomes",
+        json=[{**outcome, "row_id": winner.id}],
     )
     assert response.status_code == 202
     assert response.json() == {"stored": 1, "unattributed": 0}

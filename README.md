@@ -77,8 +77,10 @@ and the feasibility gate.
   offending channel is suppressed as `infeasible_channel` rather than reaching
   candidate generation.
 - **Touch outcome ingestion** (`POST /api/outcomes` in `waypoint/api.py`):
-  accepts outcome rows keyed by `recommendation_id` (the Waypoint winner ID).
-  Rows that match no `WinnerRow` are stored with
+  accepts outcome rows keyed by the Waypoint winner ID, spelled either
+  `recommendation_id` or `row_id` (an alias — the LCM handoff now carries this
+  id as `row_id` in each Pathfinder Intake row, so outcome sources may echo
+  either spelling back). Rows that match no `WinnerRow` are stored with
   `evidence_limitation = "unattributed: recommendation_id matches no winner"`
   instead of being dropped or guessed at. Resubmissions for the same
   `(recommendation_id, source)` merge in place — only non-`None` outcome flags
@@ -107,16 +109,20 @@ and the feasibility gate.
   `on_no_interaction`, `on_negative`) generated after the fact; `on_negative`
   is always forced to `{"action": "stop", "channel": "none"}` regardless of
   what the model returns. A winner ships with or without a follow-up plan.
-  `recommendation_id`, `journey_window`, and the follow-up plan are all
-  forwarded together in the LCM handoff payload (`waypoint/api.py`,
-  `waypoint/handoff.py`).
+  Both `run.journey_window` and `winner.evidence["follow_up"]` are stored and
+  readable via the API, but **neither is forwarded to LCM**: the handoff now
+  sends the fixed Pathfinder Intake row shape
+  (`pro_uuid`, `theme`, `theme_category`, `org_id`, `row_id`) as one batch POST
+  (`waypoint/api.py`, `waypoint/handoff.py`); extending that contract to carry
+  `journey_window`/`follow_up` is pending confirmation with Allison.
 
 **Still pending externally, not solvable inside this repo:**
 
-- LCM must be updated to carry `recommendation_id` through drafting and
-  Iterable delivery so outcomes can be joined back to the exact
-  recommendation that caused them (see TODOS.md — "Stable recommendation
-  attribution across LCM and Iterable").
+- `row_id` (the Waypoint winner ID) rides through the Pathfinder Intake
+  handoff already; LCM/Iterable still need to echo it back on outcome
+  webhooks so outcomes can be joined to the exact recommendation that caused
+  them (see TODOS.md — "Stable recommendation attribution across LCM and
+  Iterable").
 - The canonical Amplitude active-use event contract (event names, identity
   fields, timezone/horizon rules) is unresolved (see TODOS.md — "Canonical
   Amplitude active-use event contract").

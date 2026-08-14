@@ -15,6 +15,7 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
     assert names == {
         "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",
+        "BYPASS_TOKEN",
         "RUN_COST_USD", "DAY_COST_USD", "WORKER_COUNT", "MAX_LLM_IN_FLIGHT",
         "KILL_SWITCH", "MODEL_FAST", "MODEL_DEEP", "APP_PASSWORD",
         "SESSION_KEY", "LOG_LEVEL",

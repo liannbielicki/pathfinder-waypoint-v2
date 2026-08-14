@@ -7,11 +7,13 @@ docs/verification/launch-report.md.
 """
 
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 from sqlalchemy import func, select
@@ -141,29 +143,39 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
     assert fleet is not None
     assert fleet.day_cost_reserved <= fleet.day_cost_limit
 
-    # --- handoffs: every winner handed off twice; exactly one POST + row each.
-    httpx_mock.add_response(url=LCM_URL, json={"status": "accepted"}, is_reusable=True)
+    # --- handoffs: one batch POST per run (never per row); retries are no-ops.
+    def _accept(request):
+        rows = json.loads(request.content)["rows"]
+        return httpx.Response(200, json={
+            "batch": "any",
+            "rows": [{"row_id": row["row_id"], "status": "accepted"} for row in rows],
+        })
+
+    httpx_mock.add_callback(_accept, url=LCM_URL, is_reusable=True)
     handoff_started = time.monotonic()
-    client = LCMClient(url=LCM_URL, token="t", session=db_session)
-    lineage = {"audience_query": "audience_v7", "audience_run": "2026-08-06T18:00:00Z"}
+    client = LCMClient(url=LCM_URL, token="t", bypass_token="b", session=db_session)
+    winners_by_run: dict[str, list[WinnerRow]] = {}
     for winner in winners:
-        candidate = await db_session.get(CandidateRow, winner.candidate_id)
-        assert candidate is not None
-        payload = {
-            "run_id": winner.run_id,
-            "winner_id": winner.id,
-            "pro_id": winner.pro_id,
-            "org_id": winner.evidence["org_id"],
-            "recommendation": candidate.recommendation,
-            "score": winner.evidence["final"],
-        }
-        first = await client.handoff(payload, _plan(), lineage)
-        second = await client.handoff(payload, _plan(), lineage)
-        assert first.idempotency_key == second.idempotency_key
+        winners_by_run.setdefault(winner.run_id, []).append(winner)
+    for run_id, run_winners in winners_by_run.items():
+        rows = []
+        for winner in run_winners:
+            candidate = await db_session.get(CandidateRow, winner.candidate_id)
+            assert candidate is not None
+            rows.append({
+                "pro_uuid": winner.pro_id,
+                "theme": candidate.recommendation["title"],
+                "theme_category": candidate.recommendation["mechanism"],
+                "org_id": winner.evidence["org_id"],
+                "row_id": winner.id,
+            })
+        first = await client.handoff(run_id, rows)
+        second = await client.handoff(run_id, rows)
+        assert [r.idempotency_key for r in first] == [r.idempotency_key for r in second]
     handoff_elapsed = time.monotonic() - handoff_started
 
     posts = len(httpx_mock.get_requests(url=LCM_URL))
-    assert posts == TOTAL_PROS, "handoff retries must never duplicate POSTs"
+    assert posts == len(winners_by_run), "handoff retries must never duplicate POSTs"
     handoff_rows = (
         await db_session.execute(select(func.count()).select_from(HandoffRow))
     ).scalar_one()
@@ -180,23 +192,6 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
         stats=stats,
         posts=posts,
         reserved=str(sum(run.cost_reserved for run in runs)),
-    )
-
-
-def _plan():
-    from waypoint.models import MeasurementIndicator, MeasurementPlan
-
-    return MeasurementPlan(
-        indicators=[
-            MeasurementIndicator(
-                key="invoices_sent",
-                label="Invoices sent",
-                direction="increase",
-                source="billing",
-                window_days=30,
-                rationale="The proposal sends invoices.",
-            )
-        ]
     )
 
 
