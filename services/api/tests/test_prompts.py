@@ -79,6 +79,8 @@ def test_evolve_prompt_stay_refines_the_best_mechanism() -> None:
         history_json=HISTORY,
         tried_mechanisms=["invoice_delivery"],
         channels=["sms"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
     )
     assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
     assert "160" in prompt  # sms-only run shapes the idea for a brief text
@@ -102,6 +104,8 @@ def test_evolve_prompt_shift_forbids_tried_mechanisms() -> None:
         history_json="[]",
         tried_mechanisms=["invoice_delivery", "review_requests"],
         channels=["email"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
     )
     assert "forbidden" in prompt.lower()
     assert "invoice_delivery" in prompt and "review_requests" in prompt
@@ -111,3 +115,20 @@ def test_search_directive_prompt_is_deleted() -> None:
     from waypoint import prompts
 
     assert not hasattr(prompts, "search_directive_prompt")
+
+
+def test_evolve_prompt_carries_window_and_evidence() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="stay",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms"],
+        journey_window="churn_risk",
+        evidence="- invoice_delivery via sms: 4 sent, 7d return 2/3",
+    )
+    assert "churn_risk" in prompt
+    assert "invoice_delivery via sms" in prompt

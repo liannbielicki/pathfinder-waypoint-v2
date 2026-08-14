@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
+from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.llm import LLMResult, RateLimitExhausted, extract_json
 from waypoint.loop import (
@@ -430,6 +431,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     await _resolve_abandoned_calls(state, deps)
     cell = brief.calibration_cell() or ""
     session = deps.store.session
+    patterns = await pattern_summaries(session, state.run.journey_window, channels)
+    evidence = evidence_block(patterns)
+    failed = set(await failed_mechanisms(session, state.pro_id))
 
     while (reason := stop_reason(lstate, config)) is None:
         await _guard(state, deps)
@@ -448,6 +452,8 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             history_json=json.dumps(history),
             tried_mechanisms=list(lstate.tried_mechanisms),
             channels=channels,
+            journey_window=state.run.journey_window,
+            evidence=evidence,
         )
         idea: Recommendation = await _valid_json_call(
             deps,
@@ -461,10 +467,16 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             parse=lambda text: Recommendation.model_validate(extract_json(text)),
         )
 
-        # The critic is only paid for channel-feasible ideas: a channel the
-        # gate already blocked is suppressed here, before critic spend.
-        if idea.channel != "none" and idea.channel not in channels:
+        # The critic is only paid for ideas that clear the recently-failed and
+        # channel-feasibility gates: either suppresses before critic spend.
+        if idea.mechanism in failed:
+            # Spec gate: not materially different from a recent failed touch.
             verdict: dict[str, Any] = {
+                "block_kind": "recently_failed",
+                "reason": f"mechanism {idea.mechanism!r} recently failed for this pro",
+            }
+        elif idea.channel != "none" and idea.channel not in channels:
+            verdict = {
                 "block_kind": "infeasible_channel",
                 "reason": f"channel {idea.channel!r} blocked by the consent gate",
             }

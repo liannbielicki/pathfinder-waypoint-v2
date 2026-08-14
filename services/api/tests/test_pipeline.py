@@ -18,6 +18,7 @@ from waypoint.tables import (
     LlmCallRow,
     MeasurementRow,
     RunRow,
+    TouchOutcomeRow,
     WinnerRow,
 )
 
@@ -719,3 +720,36 @@ async def test_infeasible_channel_candidate_is_suppressed_without_panel(
     assert candidate.critics["block_kind"] == "infeasible_channel"
     assert deps.gateway.calls_for("critics") == 0
     assert deps.gateway.calls_for("screen") == 0
+
+
+async def test_recently_failed_mechanism_is_suppressed(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    db_session.add(TouchOutcomeRow(
+        recommendation_id="old-w", source="test", pro_id="pro_1",
+        channel="sms", mechanism="invoice_delivery", journey_window="churn_risk",
+        unsubscribed=True,
+    ))
+    await db_session.commit()
+    # FakeLLM's default evolve response proposes mechanism "invoice_delivery".
+    await run_job(seeded_job.id, deps)
+    candidates = (await db_session.execute(
+        select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id)
+    )).scalars().all()
+    suppressed = [c for c in candidates if c.critics.get("block_kind") == "recently_failed"]
+    assert suppressed  # the failed mechanism never reached the panel
+    assert all(c.persona_evidence == {} for c in suppressed)
+
+
+async def test_evidence_reaches_the_evolve_prompt(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    db_session.add(TouchOutcomeRow(
+        recommendation_id="old-w", source="test", pro_id="someone_else",
+        channel="sms", mechanism="review_boost", journey_window="churn_risk",
+        returned_7d=True,
+    ))
+    await db_session.commit()
+    await run_job(seeded_job.id, deps)
+    prompts = deps.gateway.prompts_for("evolve")
+    assert prompts and "review_boost via sms" in prompts[0]

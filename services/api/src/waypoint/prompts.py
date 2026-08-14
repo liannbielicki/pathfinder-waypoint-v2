@@ -145,6 +145,8 @@ def evolve_prompt(
     history_json: str,
     tried_mechanisms: list[str],
     channels: list[str],
+    journey_window: str,
+    evidence: str,
 ) -> str:
     if mode == "stay":
         directive = f"""Mode: REFINE. The best idea so far is working. Propose ONE refined variant of
@@ -182,6 +184,15 @@ downstream by the marketing team — do not add merge fields. Do not write final
 email or SMS copy.
 
 {channel_directive(channels)}
+
+Journey window: {journey_window}. The touch must be relevant to this window and
+aim at one outcome: the Pro returns to and uses the app. Opens, clicks, and
+replies are diagnostics, not the goal.
+
+Historical outcome evidence (observed behavior — the strongest signal we have;
+prefer patterns with measured returns, avoid patterns with unsubscribes or
+measured no-returns):
+{evidence}
 
 {directive}
 History of this Pro's rounds so far (score_pp is the frozen churn-reduction
