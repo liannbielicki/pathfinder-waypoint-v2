@@ -44,6 +44,7 @@ class RunRow(Base):
     audience_query: Mapped[str]
     audience_run: Mapped[str]
     channels: Mapped[list[str]]
+    journey_window: Mapped[str] = mapped_column(default="churn_risk")
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
@@ -195,4 +196,53 @@ class UsageRow(Base):
     cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class TouchOutcomeRow(Base):
+    """One observed outcome record per (recommendation, source). Horizon fields
+    are tri-state: True/False are measured facts, None means not yet measurable.
+    evidence_limitation labels records that cannot honestly claim attribution."""
+
+    __tablename__ = "touch_outcomes"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "source", name="uq_touch_outcomes_rec_source"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    recommendation_id: Mapped[str]  # Waypoint winner_id carried through LCM → Iterable
+    source: Mapped[str]  # e.g. "iterable_n8n", "manual"
+    run_id: Mapped[str | None] = mapped_column(default=None)
+    pro_id: Mapped[str] = mapped_column(default="")
+    org_id: Mapped[str] = mapped_column(default="")
+    journey_window: Mapped[str] = mapped_column(default="churn_risk")
+    channel: Mapped[str] = mapped_column(default="")
+    mechanism: Mapped[str] = mapped_column(default="")
+    churn_risk_state: Mapped[str | None] = mapped_column(default=None)
+    sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    delivered: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    clicked: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    replied: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    unsubscribed: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_7d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_14d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_30d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_90d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    evidence_limitation: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class PersonaEvalRow(Base):
+    """Cached persona reactions keyed by (prompt version, panel ids, concept,
+    channel) hash — spec: reuse persona evaluation where the persona, journey
+    state, and touch pattern are materially equivalent."""
+
+    __tablename__ = "persona_evals"
+    __table_args__ = (UniqueConstraint("cache_key", name="uq_persona_evals_key"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    cache_key: Mapped[str]
+    reactions: Mapped[dict[str, Any]]  # persona_id -> reaction number
+    snapshot_version: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

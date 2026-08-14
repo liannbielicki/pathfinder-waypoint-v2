@@ -1,10 +1,11 @@
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import MeasurementIndicator, MeasurementPlan, RunCreate
-from waypoint.tables import HandoffRow, RunRow
+from waypoint.tables import HandoffRow, PersonaEvalRow, RunRow, TouchOutcomeRow
 
 
 def test_run_requires_clean_audience_lineage() -> None:
@@ -176,3 +177,34 @@ async def test_loop_config_snapshot_and_defaults_columns(db_session: AsyncSessio
     fleet = await db_session.get(FleetControlRow, 1)
     assert run is not None and run.loop_config == {"MAX_ROUNDS": 4}
     assert fleet is not None and fleet.loop_defaults == {"PATIENCE": 2}
+
+
+async def test_touch_outcome_and_persona_eval_roundtrip(db_session) -> None:
+    db_session.add(
+        TouchOutcomeRow(
+            recommendation_id="w-1",
+            source="iterable_n8n",
+            pro_id="pro_1",
+            channel="sms",
+            mechanism="invoice_delivery",
+            journey_window="churn_risk",
+            returned_7d=True,
+        )
+    )
+    db_session.add(
+        PersonaEvalRow(cache_key="abc123", reactions={"p1": 5.0}, snapshot_version="s1")
+    )
+    await db_session.commit()
+    outcome = (await db_session.execute(
+        select(TouchOutcomeRow).where(TouchOutcomeRow.recommendation_id == "w-1")
+    )).scalar_one()
+    assert outcome.returned_7d is True
+    assert outcome.returned_30d is None  # not-yet-measurable stays honestly unknown
+    assert outcome.evidence_limitation is None
+
+
+async def test_run_defaults_to_churn_risk_window(db_session) -> None:
+    run = RunRow(pro_ids=["p"], audience_query="q", audience_run="r", channels=["sms"])
+    db_session.add(run)
+    await db_session.commit()
+    assert run.journey_window == "churn_risk"

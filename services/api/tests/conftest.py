@@ -22,6 +22,8 @@ _TABLES = (
     "evolve_rounds",
     "llm_calls",
     "candidates",
+    "touch_outcomes",
+    "persona_evals",
     "runs",
     "llm_usage",
     "fleet_control",
