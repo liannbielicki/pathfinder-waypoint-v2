@@ -7,27 +7,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.handoff import HandoffUnavailable, LCMClient, handoff_key
-from waypoint.models import MeasurementIndicator, MeasurementPlan
 from waypoint.tables import HandoffRow, RunRow, WinnerRow
 
 LCM_URL = "https://lcm.example/handoff"
 
-PLAN = MeasurementPlan(indicators=[MeasurementIndicator(
-    key="invoices_sent", label="Invoices sent", direction="increase",
-    source="billing", window_days=30, rationale="The proposal sends invoices.",
-)])
-
-WINNER = {
-    "run_id": "run-1",
-    "winner_id": "win-1",
-    "pro_id": "pro_1",
-    "org_id": "org_1",
-    "recommendation": {"title": "Send open invoices reminder",
-                       "mechanism": "invoice_delivery"},
-    "score": {"reduction_pp": 4.2, "ci_lower_pp": 3.1, "ci_upper_pp": 5.3},
+ROW = {
+    "pro_uuid": "pro_fb73ab6510404409bafe684fbc6564fc",
+    "theme": "Human-assist outreach for an HVAC owner-operator stalled on overdue AR",
+    "theme_category": "other",
+    "org_id": "882486",
+    "row_id": "win-1",
 }
-
-LINEAGE = {"audience_query": "audience_v7", "audience_run": "2026-08-06T18:00:00Z"}
 
 
 async def handoff_count(session: AsyncSession, key: str) -> int:
@@ -49,54 +39,60 @@ async def seeded_run(db_session: AsyncSession) -> None:
 
 
 def make_client(db_session: AsyncSession) -> LCMClient:
-    return LCMClient(url=LCM_URL, token="lcm-token", session=db_session)
+    return LCMClient(url=LCM_URL, token="lcm-token", bypass_token="bypass-secret",
+                      session=db_session)
 
 
 def test_handoff_key_is_deterministic() -> None:
-    assert handoff_key("run_1", "winner_1") == "run_1:winner_1"
+    assert handoff_key("run_1", "win_1") == "run_1:win_1"
 
 
 async def test_retry_returns_one_durable_receipt(
     httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
 ) -> None:
-    httpx_mock.add_response(json={"status": "accepted", "lcm_id": "lcm-123"})
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
     client = make_client(db_session)
-    first = await client.handoff(WINNER, PLAN, LINEAGE)
-    second = await client.handoff(WINNER, PLAN, LINEAGE)
-    assert second.idempotency_key == first.idempotency_key
+    first = await client.handoff("run-1", [ROW])
+    second = await client.handoff("run-1", [ROW])
+    assert second[0].idempotency_key == first[0].idempotency_key
     assert len(httpx_mock.get_requests()) == 1
-    assert await handoff_count(db_session, first.idempotency_key) == 1
+    assert await handoff_count(db_session, first[0].idempotency_key) == 1
 
 
-async def test_payload_stops_before_send_and_preserves_lineage(
+async def test_payload_is_one_batch_with_no_pii(
     httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
 ) -> None:
-    httpx_mock.add_response(json={"status": "accepted"})
-    await make_client(db_session).handoff(WINNER, PLAN, LINEAGE)
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    await make_client(db_session).handoff("run-1", [ROW])
     request = httpx_mock.get_request()
     assert request is not None
     payload = json.loads(request.content)
-    assert payload["audience_lineage"] == LINEAGE
-    assert payload["pro_id"] == "pro_1"
-    assert payload["org_id"] == "org_1"
-    assert payload["measurement_plan"]["indicators"][0]["key"] == "invoices_sent"
-    assert payload["idempotency_key"] == "run-1:win-1"
-    # Pathfinder never sends: no send/dispatch/schedule command crosses this boundary.
-    assert not any("send" in key or "dispatch" in key for key in payload)
+    assert payload["batch"] == "run-1"
+    assert payload["rows"] == [ROW]
+    # No email/name crosses this boundary — pro_uuid only.
+    assert not any("email" in key or "name" in key for key in ROW)
     assert request.headers["authorization"] == "Bearer lcm-token"
+    assert request.headers["x-vercel-protection-bypass"] == "bypass-secret"
 
 
-async def test_rejected_handoff_is_recorded_honestly(
+async def test_rejected_row_is_recorded_honestly(
     httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
 ) -> None:
-    httpx_mock.add_response(status_code=422, json={"error": "bad category"})
-    receipt = await make_client(db_session).handoff(WINNER, PLAN, LINEAGE)
-    assert receipt.status == "rejected"
+    httpx_mock.add_response(json={
+        "batch": "run-1",
+        "rows": [{"row_id": "win-1", "status": "rejected", "reason": "bad category"}],
+    })
+    receipts = await make_client(db_session).handoff("run-1", [ROW])
+    assert receipts[0].status == "rejected"
     row = (await db_session.execute(
-        select(HandoffRow).where(HandoffRow.idempotency_key == receipt.idempotency_key)
+        select(HandoffRow).where(HandoffRow.idempotency_key == receipts[0].idempotency_key)
     )).scalar_one()
     assert row.status == "rejected"
-    assert row.response == {"error": "bad category"}
+    assert row.response == {"row_id": "win-1", "status": "rejected", "reason": "bad category"}
 
 
 async def test_lcm_outage_raises_and_recovers_idempotently(
@@ -107,9 +103,11 @@ async def test_lcm_outage_raises_and_recovers_idempotently(
     httpx_mock.add_exception(httpx.ConnectError("boom"))
     client = make_client(db_session)
     with pytest.raises(HandoffUnavailable):
-        await client.handoff(WINNER, PLAN, LINEAGE)
+        await client.handoff("run-1", [ROW])
     # Recovery: the pending row is completed by one successful retry.
-    httpx_mock.add_response(json={"status": "accepted"})
-    receipt = await client.handoff(WINNER, PLAN, LINEAGE)
-    assert receipt.status == "accepted"
-    assert await handoff_count(db_session, receipt.idempotency_key) == 1
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    receipts = await client.handoff("run-1", [ROW])
+    assert receipts[0].status == "accepted"
+    assert await handoff_count(db_session, receipts[0].idempotency_key) == 1

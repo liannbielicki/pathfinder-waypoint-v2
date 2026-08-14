@@ -83,4 +83,4 @@ class MeasurementPlan(BaseModel):
 class HandoffReceipt(BaseModel):
     handoff_id: str
     idempotency_key: str
-    status: Literal["accepted", "rejected"]
+    status: Literal["accepted", "rejected", "duplicate"]

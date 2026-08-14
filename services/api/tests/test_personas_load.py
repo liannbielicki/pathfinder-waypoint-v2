@@ -15,6 +15,7 @@ SETTINGS = Settings(
     PERSONA_TOKEN="persona-key",
     HANDOFF_URL="https://lcm.example/handoff",
     HANDOFF_TOKEN="lcm-token",
+    BYPASS_TOKEN="bypass-secret",
     RUN_COST_USD="25.00",
     DAY_COST_USD="500.00",
     WORKER_COUNT=1,

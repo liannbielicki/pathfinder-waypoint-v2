@@ -99,23 +99,19 @@ class ProductionStack:
         ).scalar_one()
         plan = MeasurementPlan.model_validate({"indicators": measurement.indicators})
 
-        self.httpx_mock.add_response(url=LCM_URL, json={"status": "accepted"})
-        client = LCMClient(url=LCM_URL, token="t", session=self.session)
-        await client.handoff(
-            {
-                "run_id": run.id,
-                "winner_id": winner.id,
-                "pro_id": winner.pro_id,
-                "org_id": winner.evidence["org_id"],
-                "recommendation": candidate.recommendation,
-                "score": winner.evidence["final"],
-            },
-            plan,
-            {"audience_query": run.audience_query, "audience_run": run.audience_run},
-        )
+        self.httpx_mock.add_response(url=LCM_URL, json={
+            "batch": run.id, "rows": [{"row_id": winner.id, "status": "accepted"}],
+        })
+        client = LCMClient(url=LCM_URL, token="t", bypass_token="b", session=self.session)
+        await client.handoff(run.id, [{
+            "pro_uuid": winner.pro_id,
+            "theme": candidate.recommendation["title"],
+            "theme_category": candidate.recommendation["mechanism"],
+            "org_id": winner.evidence["org_id"],
+            "row_id": winner.id,
+        }])
         request = self.httpx_mock.get_requests(url=LCM_URL)[-1]
-        payload = json.loads(request.content)
-        payload["winner"] = payload.pop("winner")  # keep key order irrelevant
+        payload = json.loads(request.content)["rows"][0]
         return ParityResult(
             outcome="winner",
             org_id=winner.evidence["org_id"],

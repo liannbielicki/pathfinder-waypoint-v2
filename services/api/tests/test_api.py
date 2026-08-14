@@ -35,6 +35,7 @@ TEST_SETTINGS = Settings(
     PERSONA_TOKEN="test",
     HANDOFF_URL="https://lcm.example/handoff",
     HANDOFF_TOKEN="lcm-token",
+    BYPASS_TOKEN="bypass-secret",
     RUN_COST_USD="25.00",
     DAY_COST_USD="500.00",
     WORKER_COUNT=1,
@@ -223,7 +224,11 @@ async def test_handoff_creates_durable_receipt(
     row = (
         await db_session.execute(select(HandoffRow).where(HandoffRow.run_id == run_id))
     ).scalar_one()
-    assert row.payload["audience_lineage"]["audience_query"] == "audience_v7"
+    # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
+    assert row.payload == {
+        "pro_uuid": "pro_1", "theme": "T", "theme_category": "invoice_delivery",
+        "org_id": "org_1", "row_id": winner.id,
+    }
 
 
 async def test_health_has_no_secret_or_dependency_payload(client: httpx.AsyncClient) -> None:
