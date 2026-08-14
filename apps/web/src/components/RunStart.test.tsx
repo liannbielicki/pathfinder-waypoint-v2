@@ -210,6 +210,22 @@ describe("RunStart", () => {
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
   });
 
+  it("sends the selected journey window", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.selectOptions(
+      screen.getByLabelText(/journey window/i), "onboarding",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ journey_window: "onboarding" }),
+    );
+  });
+
   it("disables loop controls and still submits when the settings fetch fails", async () => {
     const { createCalls } = stubFetch({ settings: new Error("network down") });
     const onStarted = vi.fn();

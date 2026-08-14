@@ -37,6 +37,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
     () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   );
   const [channel, setChannel] = useState("sms");
+  const [journeyWindow, setJourneyWindow] = useState("churn_risk");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaults, setDefaults] = useState<Record<string, number> | null>(null);
@@ -116,6 +117,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
         channels: [channel],
+        journey_window: journeyWindow as "churn_risk" | "onboarding" | "upsell",
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
       onStarted(run);
@@ -160,6 +162,20 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           <option value="sms">sms</option>
           <option value="email">email</option>
         </select>
+        <label htmlFor="journey-window">Journey window</label>
+        <select
+          id="journey-window"
+          value={journeyWindow}
+          onChange={(e) => setJourneyWindow(e.target.value)}
+        >
+          <option value="churn_risk">churn risk (not using the app)</option>
+          <option value="onboarding">onboarding</option>
+          <option value="upsell">upsell / expansion</option>
+        </select>
+        <p className="helper">
+          The customer state this run optimizes a touch for. Touches are
+          selected for return-to-app impact within this window.
+        </p>
       </fieldset>
 
       <fieldset disabled={defaults === null}>
