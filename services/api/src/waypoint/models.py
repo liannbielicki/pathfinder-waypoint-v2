@@ -86,6 +86,27 @@ class MeasurementPlan(BaseModel):
     indicators: list[MeasurementIndicator] = Field(min_length=1, max_length=2)
 
 
+class TouchOutcomeIn(BaseModel):
+    """One observed-outcome record from an outcome source (n8n Iterable/Amplitude
+    flow, or manual backfill). recommendation_id is the Waypoint winner_id carried
+    through LCM -> Iterable (TODOS: stable recommendation attribution)."""
+
+    recommendation_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    pro_id: str = ""
+    org_id: str = ""
+    channel: str = ""
+    sent_at: datetime | None = None
+    delivered: bool | None = None
+    clicked: bool | None = None
+    replied: bool | None = None
+    unsubscribed: bool | None = None
+    returned_7d: bool | None = None
+    returned_14d: bool | None = None
+    returned_30d: bool | None = None
+    returned_90d: bool | None = None
+
+
 class HandoffReceipt(BaseModel):
     handoff_id: str
     idempotency_key: str

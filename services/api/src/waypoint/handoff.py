@@ -50,10 +50,15 @@ class LCMClient:
 
         payload = {
             "idempotency_key": key,
+            # Stable attribution ID: LCM must preserve this through Iterable so
+            # outcome ingestion can echo it back (TODOS.md).
+            "recommendation_id": winner["winner_id"],
             "pro_id": winner["pro_id"],
             "org_id": winner["org_id"],
+            "journey_window": winner.get("journey_window", "churn_risk"),
             "winner": winner["recommendation"],
             "score": winner.get("score", {}),
+            "follow_up": winner.get("follow_up"),
             "measurement_plan": plan.model_dump(),
             "audience_lineage": lineage,
         }

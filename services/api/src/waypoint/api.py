@@ -25,6 +25,7 @@ from waypoint.models import (
     MeasurementPlan,
     RunCreate,
     RunView,
+    TouchOutcomeIn,
 )
 from waypoint.settings import Settings
 from waypoint.tables import (
@@ -34,6 +35,7 @@ from waypoint.tables import (
     JobRow,
     MeasurementRow,
     RunRow,
+    TouchOutcomeRow,
     WinnerRow,
 )
 
@@ -313,6 +315,72 @@ def create_app(
         await session.commit()
         return _view(run, spent=await _spent(session, run))
 
+    _OUTCOME_FLAGS = ("delivered", "clicked", "replied", "unsubscribed",
+                      "returned_7d", "returned_14d", "returned_30d", "returned_90d")
+
+    @app.post("/api/outcomes", status_code=202)
+    async def ingest_outcomes(
+        body: list[TouchOutcomeIn], session: SessionDep, _: AuthDep
+    ) -> dict[str, int]:
+        """Observed messaging/app-usage outcomes, keyed by recommendation_id.
+        Attributable records backfill run/mechanism/journey_window from the
+        winner; unattributable ones are stored with an explicit
+        evidence_limitation label (spec: label the limitation, never pretend)."""
+        unattributed = 0
+        for item in body:
+            winner = await session.get(WinnerRow, item.recommendation_id)
+            fill: dict[str, Any] = {}
+            limitation: str | None = None
+            if winner is None:
+                limitation = "unattributed: recommendation_id matches no winner"
+                unattributed += 1
+            else:
+                run = await session.get(RunRow, winner.run_id)
+                candidate = (
+                    await session.get(CandidateRow, winner.candidate_id)
+                    if winner.candidate_id else None
+                )
+                fill = {
+                    "run_id": winner.run_id,
+                    "pro_id": item.pro_id or winner.pro_id,
+                    "journey_window": run.journey_window if run else "churn_risk",
+                    "mechanism": (
+                        candidate.recommendation.get("mechanism", "") if candidate else ""
+                    ),
+                }
+            existing = (
+                await session.execute(
+                    select(TouchOutcomeRow).where(
+                        TouchOutcomeRow.recommendation_id == item.recommendation_id,
+                        TouchOutcomeRow.source == item.source,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                fields = {
+                    "recommendation_id": item.recommendation_id,
+                    "source": item.source,
+                    "org_id": item.org_id,
+                    "channel": item.channel,
+                    "sent_at": item.sent_at,
+                    "evidence_limitation": limitation,
+                    "pro_id": item.pro_id,
+                    **{k: getattr(item, k) for k in _OUTCOME_FLAGS},
+                    **fill,
+                }
+                session.add(TouchOutcomeRow(**fields))
+            else:
+                # Later horizons arrive later; non-None fields win, None never
+                # erases a measured value.
+                for key in _OUTCOME_FLAGS:
+                    value = getattr(item, key)
+                    if value is not None:
+                        setattr(existing, key, value)
+                if item.sent_at is not None:
+                    existing.sent_at = item.sent_at
+        await session.commit()
+        return {"stored": len(body), "unattributed": unattributed}
+
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(
         request: Request, run_id: str, session: SessionDep, _: AuthDep
@@ -371,6 +439,8 @@ def create_app(
                             "org_id": winner.evidence.get("org_id", ""),
                             "recommendation": candidate.recommendation,
                             "score": winner.evidence.get("final", {}),
+                            "journey_window": run.journey_window,
+                            "follow_up": winner.evidence.get("follow_up"),
                         },
                         MeasurementPlan.model_validate({"indicators": measurement.indicators}),
                         lineage,

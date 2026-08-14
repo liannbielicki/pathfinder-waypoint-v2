@@ -99,6 +99,24 @@ async def test_rejected_handoff_is_recorded_honestly(
     assert row.response == {"error": "bad category"}
 
 
+async def test_handoff_payload_carries_attribution_fields(
+    httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
+) -> None:
+    httpx_mock.add_response(json={"status": "accepted"})
+    winner = {
+        **WINNER,
+        "journey_window": "churn_risk",
+        "follow_up": {"on_no_interaction": {"action": "stop", "channel": "none"}},
+    }
+    await make_client(db_session).handoff(winner, PLAN, LINEAGE)
+    request = httpx_mock.get_request()
+    assert request is not None
+    payload = json.loads(request.content)
+    assert payload["recommendation_id"] == winner["winner_id"]
+    assert payload["journey_window"] == "churn_risk"
+    assert payload["follow_up"] == winner["follow_up"]
+
+
 async def test_lcm_outage_raises_and_recovers_idempotently(
     httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
 ) -> None:
