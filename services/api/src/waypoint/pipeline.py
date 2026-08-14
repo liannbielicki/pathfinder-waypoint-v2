@@ -264,9 +264,9 @@ async def _abstain_pro(
         await deps.store.session.commit()
 
 
-def _reaction_cache_key(panel: PanelSelection, concept: str, channel: str) -> str:
+def _reaction_cache_key(panel: PanelSelection, concept: str, channel: str, tier: str) -> str:
     ids = sorted(i.persona_id for i in panel.items)
-    raw = json.dumps([PROMPT_VERSION, ids, concept, channel])
+    raw = json.dumps([PROMPT_VERSION, panel.snapshot_version, tier, ids, concept, channel])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -288,7 +288,7 @@ async def _react(
     # candidate/ledger rows are flushed/committed after _react returns, never
     # concurrently — so this commit only ever carries the cache row.
     session = deps.store.session
-    key = _reaction_cache_key(panel, concept, channel)
+    key = _reaction_cache_key(panel, concept, channel, tier)
     cached = (
         await session.execute(select(PersonaEvalRow).where(PersonaEvalRow.cache_key == key))
     ).scalar_one_or_none()

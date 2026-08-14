@@ -8,7 +8,8 @@ from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import PENDING_AUDIENCE_QUERY
-from waypoint.pipeline import finalize_run, run_job
+from waypoint.personas import PanelItem, PanelSelection
+from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
     CandidateRow,
@@ -784,6 +785,34 @@ async def test_persona_reactions_are_cached_across_jobs(
     await run_job(job2, deps)
     # No new screen/final spend: reactions came from the cache.
     assert deps.gateway.calls_for("screen") == screen_calls_first
+
+
+def test_reaction_cache_key_changes_with_snapshot_version_and_tier() -> None:
+    panel = PanelSelection(
+        items=[
+            PanelItem(
+                persona_id="p1",
+                label="Persona 1",
+                family="fam",
+                role="closest",
+                fit_score=0.9,
+                rationale="r",
+            )
+        ],
+        fit_threshold=0.5,
+        snapshot_version="v1",
+        match_features={},
+    )
+    base = _reaction_cache_key(panel, "concept", "sms", "deep")
+
+    # Persona cards changed (new snapshot) but PROMPT_VERSION didn't bump —
+    # the key must still change or a stale reaction is served forever.
+    newer_panel = panel.model_copy(update={"snapshot_version": "v2"})
+    assert _reaction_cache_key(newer_panel, "concept", "sms", "deep") != base
+
+    # Same panel/concept/channel but a different tier must not collide —
+    # a fast-tier reaction can't satisfy a later deep-tier lookup.
+    assert _reaction_cache_key(panel, "concept", "sms", "fast") != base
 
 
 async def test_winner_carries_bounded_follow_up(
