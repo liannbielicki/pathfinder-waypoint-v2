@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
+from waypoint.feasibility import gate_pro
 from waypoint.llm import LLMResult, RateLimitExhausted, extract_json
 from waypoint.loop import (
     LoopConfig,
@@ -413,6 +414,12 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     brief = state.brief
     if brief is None:
         return {"skipped": "no_brief"}
+    gate = gate_pro(brief, list(state.run.channels), state.run.journey_window)
+    if gate.blocked:
+        # Spec stage 1: reject before any LLM or persona budget is spent.
+        await _abstain_pro(state, deps, state.pro_id, f"infeasible: {gate.reason}")
+        return {"skipped": "feasibility", "reason": gate.reason}
+    channels = list(gate.allowed_channels)
     config = LoopConfig.from_mapping(state.run.loop_config or {})
     ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
     lstate = replay(ledger, config)
@@ -440,7 +447,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             best_json=best_json,
             history_json=json.dumps(history),
             tried_mechanisms=list(lstate.tried_mechanisms),
-            channels=list(state.run.channels),
+            channels=channels,
         )
         idea: Recommendation = await _valid_json_call(
             deps,
@@ -454,31 +461,45 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             parse=lambda text: Recommendation.model_validate(extract_json(text)),
         )
 
-        # Fail closed: a dead critic must never silently disable the only
-        # grounding gate (legacy incident class) — _valid_json_call raises
-        # PipelineFailure after retries, it never returns an empty verdict set.
-        verdicts = await _valid_json_call(
-            deps,
-            base_key=f"{key}:critic",
-            tier="fast",
-            prompt=critic_prompt(
-                brief.model_dump_json(), json.dumps([{"idea_index": 0, **idea.model_dump()}])
-            ),
-            run_id=state.run.id,
-            pro_id=state.pro_id,
-            stage="critics",
-            system=CRITIC_SYSTEM,
-            parse=lambda text: {int(v["idea_index"]): v for v in extract_json(text)},
-        )
-        verdict = verdicts.get(0, {"block_kind": "unreviewed", "reason": "no verdict returned"})
-        if "block_kind" not in verdict:
-            # Fail closed on a verdict that parsed but is missing the field.
-            verdict = {"block_kind": "unreviewed", "reason": "malformed verdict"}
+        # The critic is only paid for channel-feasible ideas: a channel the
+        # gate already blocked is suppressed here, before critic spend.
+        if idea.channel != "none" and idea.channel not in channels:
+            verdict: dict[str, Any] = {
+                "block_kind": "infeasible_channel",
+                "reason": f"channel {idea.channel!r} blocked by the consent gate",
+            }
+        else:
+            # Fail closed: a dead critic must never silently disable the only
+            # grounding gate (legacy incident class) — _valid_json_call raises
+            # PipelineFailure after retries, it never returns an empty verdict set.
+            verdicts = await _valid_json_call(
+                deps,
+                base_key=f"{key}:critic",
+                tier="fast",
+                prompt=critic_prompt(
+                    brief.model_dump_json(), json.dumps([{"idea_index": 0, **idea.model_dump()}])
+                ),
+                run_id=state.run.id,
+                pro_id=state.pro_id,
+                stage="critics",
+                system=CRITIC_SYSTEM,
+                parse=lambda text: {int(v["idea_index"]): v for v in extract_json(text)},
+            )
+            verdict = verdicts.get(0, {"block_kind": "unreviewed", "reason": "no verdict returned"})
+            if "block_kind" not in verdict:
+                # Fail closed on a verdict that parsed but is missing the field.
+                verdict = {"block_kind": "unreviewed", "reason": "malformed verdict"}
 
         score: CandidateScore | None = None
         panel = None
         reactions: list[float] | None = None
-        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data"):
+        if verdict["block_kind"] in (
+            "ungrounded",
+            "unreviewed",
+            "per_pro_data",
+            "infeasible_channel",
+            "recently_failed",
+        ):
             outcome, score_pp = "suppressed", None  # a loss, no persona spend
         else:
             try:

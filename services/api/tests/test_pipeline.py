@@ -681,3 +681,41 @@ async def test_budget_exhausted_on_deep_final_never_falls_back(
     await run_job(seeded_job.id, deps)
     assert [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"] == ["deep"]
     assert await run_status(deps.db, seeded_job.run_id) == "stopped"
+
+
+async def test_gate_blocked_pro_abstains_without_spend(deps: FakeDeps, seeded_job) -> None:
+    # Make the only run channel affirmatively non-consented for this pro.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"sms_consent_state": "opted_out"}
+    )
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "abstained"
+    assert winner.rationale.startswith("infeasible:")
+    assert deps.gateway.call_count == 0  # zero LLM spend before the gate
+
+
+async def test_infeasible_channel_candidate_is_suppressed_without_panel(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Generator ignores the directive and emits an email idea on an sms-only,
+    # email-blocked pro: suppressed without critic or persona spend.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"email_consent_state": "unsubscribed"}
+    )
+    email_idea = json.loads(idea_json("invoice_delivery"))
+    email_idea["channel"] = "email"
+    deps.gateway.responses["evolve"] = [json.dumps(email_idea)]
+    await run_job(seeded_job.id, deps)
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalars().first()
+    assert candidate is not None
+    assert candidate.status == "suppressed"
+    assert candidate.critics["block_kind"] == "infeasible_channel"
+    assert deps.gateway.calls_for("critics") == 0
+    assert deps.gateway.calls_for("screen") == 0
