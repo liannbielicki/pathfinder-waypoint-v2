@@ -214,7 +214,9 @@ async def test_handoff_creates_durable_receipt(
     )
     await db_session.commit()
 
-    httpx_mock.add_response(json={"status": "accepted", "lcm_id": "lcm-9"})
+    httpx_mock.add_response(json={
+        "batch": run_id, "rows": [{"row_id": winner.id, "status": "accepted"}],
+    })
     response = await auth_client.post(f"/api/runs/{run_id}/handoff")
     assert response.status_code == 200
     receipts = response.json()["receipts"]

@@ -13,11 +13,12 @@ side is also idempotent per (batch, row_id), so retrying the whole batch is
 always safe.
 """
 
+import typing
 from typing import Any, Literal, cast
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import HandoffReceipt
@@ -32,7 +33,7 @@ def handoff_key(run_id: str, row_id: str) -> str:
     return f"{run_id}:{row_id}"
 
 
-_STATUSES: tuple[str, ...] = ("accepted", "rejected", "duplicate")
+_STATUSES: tuple[str, ...] = typing.get_args(HandoffReceipt.model_fields["status"].annotation)
 
 
 def _receipt_status(status: str) -> Literal["accepted", "rejected", "duplicate"]:
@@ -75,21 +76,28 @@ class LCMClient:
         keys = [key(row) for row in rows]
         existing = await self._load_existing(keys)
 
-        to_insert = [row for row in rows if key(row) not in existing]
+        # Dedupe by idempotency_key first: ON CONFLICT can't affect the same
+        # conflict target twice within one statement, so two rows with the
+        # same row_id in this call must collapse to a single insert row.
+        to_insert = {key(row): row for row in rows if key(row) not in existing}
         if to_insert:
             # Durable pending row BEFORE the POST: a crash between send and
             # receipt leaves a row whose retry reuses the same idempotency key.
-            for row in to_insert:
-                self.session.add(HandoffRow(
-                    run_id=run_id, winner_id=row["row_id"],
-                    idempotency_key=key(row), payload=row, status="pending",
-                ))
-            try:
-                await self.session.commit()
-            except IntegrityError:
-                # A concurrent request won some of these inserts; adopt the
-                # true state instead of racing to send duplicates.
-                await self.session.rollback()
+            # A concurrent handoff() call inserting the same key is a no-op
+            # here, not an exception — no rollback that could drop siblings.
+            await self.session.execute(
+                pg_insert(HandoffRow).on_conflict_do_nothing(
+                    index_elements=["idempotency_key"]
+                ),
+                [
+                    {
+                        "run_id": run_id, "winner_id": row["row_id"],
+                        "idempotency_key": ikey, "payload": row, "status": "pending",
+                    }
+                    for ikey, row in to_insert.items()
+                ],
+            )
+            await self.session.commit()
             existing = await self._load_existing(keys)
 
         pending = unanswered(existing)
@@ -100,6 +108,13 @@ class LCMClient:
                 )
             except httpx.HTTPError as error:
                 raise HandoffUnavailable(f"LCM intake unreachable: {error}") from error
+            if response.status_code >= 300:
+                # Batch-level failure carries no per-row information (see
+                # Pathfinder Intake API §4/§5) — leave every row pending so
+                # the whole batch is safely retried next call.
+                raise HandoffUnavailable(
+                    f"LCM intake returned {response.status_code}: {response.text}"
+                )
             try:
                 body = response.json()
             except ValueError:
@@ -107,14 +122,19 @@ class LCMClient:
             per_row = {
                 item.get("row_id"): item for item in body.get("rows", [])
             } if isinstance(body, dict) else {}
+            missing = [row["row_id"] for row in pending if row["row_id"] not in per_row]
+            if missing:
+                # Only a 202 carries a real per-row breakdown; don't guess a
+                # status for an unconfirmed row, and don't partially commit —
+                # leave the whole batch pending so it's safely retryable.
+                raise HandoffUnavailable(
+                    f"LCM intake response missing rows for row_ids: {missing}"
+                )
             for row in pending:
-                result = per_row.get(row["row_id"])
+                result = per_row[row["row_id"]]
                 handoff_row = existing[key(row)]
-                handoff_row.response = result if result is not None else body
-                if result is not None:
-                    handoff_row.status = result.get("status", "rejected")
-                else:
-                    handoff_row.status = "accepted" if response.status_code < 300 else "rejected"
+                handoff_row.response = result
+                handoff_row.status = _receipt_status(result.get("status", "rejected"))
             await self.session.commit()
 
         return [

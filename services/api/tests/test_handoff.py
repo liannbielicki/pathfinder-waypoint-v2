@@ -111,3 +111,64 @@ async def test_lcm_outage_raises_and_recovers_idempotently(
     receipts = await client.handoff("run-1", [ROW])
     assert receipts[0].status == "accepted"
     assert await handoff_count(db_session, receipts[0].idempotency_key) == 1
+
+
+async def test_batch_level_failure_leaves_row_pending_and_retries(
+    httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
+) -> None:
+    httpx_mock.add_response(status_code=500, json={"error": "boom"})
+    client = make_client(db_session)
+    with pytest.raises(HandoffUnavailable):
+        await client.handoff("run-1", [ROW])
+
+    key = handoff_key("run-1", ROW["row_id"])
+    row = (await db_session.execute(
+        select(HandoffRow).where(HandoffRow.idempotency_key == key)
+    )).scalar_one()
+    assert row.status == "pending"
+    assert row.response is None
+
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    receipts = await client.handoff("run-1", [ROW])
+    assert receipts[0].status == "accepted"
+    assert len(httpx_mock.get_requests()) == 2
+
+
+async def test_incomplete_per_row_response_leaves_row_pending_and_retries(
+    httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
+) -> None:
+    httpx_mock.add_response(json={"batch": "run-1", "rows": []})
+    client = make_client(db_session)
+    with pytest.raises(HandoffUnavailable):
+        await client.handoff("run-1", [ROW])
+
+    key = handoff_key("run-1", ROW["row_id"])
+    row = (await db_session.execute(
+        select(HandoffRow).where(HandoffRow.idempotency_key == key)
+    )).scalar_one()
+    assert row.status == "pending"
+    assert row.response is None
+
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    receipts = await client.handoff("run-1", [ROW])
+    assert receipts[0].status == "accepted"
+    assert len(httpx_mock.get_requests()) == 2
+
+
+async def test_duplicate_row_id_in_one_call_collapses_to_one_row(
+    httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
+) -> None:
+    httpx_mock.add_response(json={
+        "batch": "run-1",
+        "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    receipts = await make_client(db_session).handoff("run-1", [ROW, dict(ROW)])
+
+    assert len(receipts) == 2
+    assert receipts[0].idempotency_key == receipts[1].idempotency_key
+    assert receipts[0].status == receipts[1].status == "accepted"
+    assert await handoff_count(db_session, receipts[0].idempotency_key) == 1

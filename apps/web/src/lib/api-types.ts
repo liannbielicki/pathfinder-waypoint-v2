@@ -142,7 +142,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "accepted" | "rejected";
+            status: "accepted" | "rejected" | "duplicate";
         };
         /** HandoffResponse */
         HandoffResponse: {
