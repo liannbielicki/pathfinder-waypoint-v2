@@ -29,6 +29,18 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   );
 }
 
+// Distinct evolve rounds among a Pro's candidates. CANDIDATE_COUNT candidate
+// rows are persisted per round (round is stamped on each), so a naive
+// candidates.length overcounts rounds by that factor. Rows without a round
+// (legacy data) fall back to one-row-one-round, same as before this fix.
+function countRounds(candidates: Candidate[]): number {
+  const withRound = new Set(
+    candidates.filter((c) => c.round != null).map((c) => c.round),
+  );
+  const withoutRound = candidates.filter((c) => c.round == null).length;
+  return withRound.size + withoutRound;
+}
+
 function Rounds({ rounds, championRound }: { rounds: number; championRound?: number }) {
   if (rounds === 0) return null;
   return (
@@ -89,14 +101,14 @@ function NoActionCard({
   winner: Winner;
   proCandidates: Candidate[];
 }) {
-  const rounds = proCandidates.length;
+  const rounds = countRounds(proCandidates);
   const champion = proCandidates.find((c) => c.status === "champion");
   const finalScore = champion?.score?.final;
-  const screened = proCandidates.filter((c) => c.score?.screen).length;
-  const suppressed = proCandidates.filter((c) => c.status === "suppressed").length;
-  const unevaluated = proCandidates.filter(
-    (c) => c.status === "discarded" && !c.score?.screen,
-  ).length;
+  const screened = countRounds(proCandidates.filter((c) => c.score?.screen));
+  const suppressed = countRounds(proCandidates.filter((c) => c.status === "suppressed"));
+  const unevaluated = countRounds(
+    proCandidates.filter((c) => c.status === "discarded" && !c.score?.screen),
+  );
   const ending = noActionEnding(winner.rationale, champion, screened, rounds);
   return (
     <div className="card">
@@ -201,8 +213,9 @@ export function WinnerReview({
     (w) => w.kind === "winner" && measuredWinnerIds.has(w.id),
   );
   const candidateById = new Map(run.candidates.map((c) => [c.id, c]));
-  // One candidate row is persisted per evolve round, so candidates-per-Pro is
-  // both the loop count and the evidence trail for that result.
+  // CANDIDATE_COUNT candidate rows are persisted per evolve round, so
+  // candidates-per-Pro is the evidence trail for that result but not the
+  // round count — see countRounds.
   const candidatesByPro = new Map<string, Candidate[]>();
   for (const c of run.candidates) {
     const list = candidatesByPro.get(c.pro_id) ?? [];
@@ -219,7 +232,7 @@ export function WinnerReview({
           key={winner.id}
           winner={winner}
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
-          rounds={(candidatesByPro.get(winner.pro_id) ?? []).length}
+          rounds={countRounds(candidatesByPro.get(winner.pro_id) ?? [])}
           proCandidates={candidatesByPro.get(winner.pro_id) ?? []}
         />
       ))}

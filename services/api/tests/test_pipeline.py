@@ -50,6 +50,13 @@ async def candidate_count(session: AsyncSession, run_id: str) -> int:
     ).scalar_one()
 
 
+async def set_loop_config(deps: FakeDeps, run_id: str, **overrides) -> None:
+    run = await deps.db.get(RunRow, run_id)
+    assert run is not None
+    run.loop_config = {**(run.loop_config or {}), **overrides}
+    await deps.db.commit()
+
+
 async def rounds(session: AsyncSession, run_id: str) -> list[EvolveRoundRow]:
     return list(
         (
@@ -152,6 +159,9 @@ async def test_win_stays_then_loss_shifts_and_forbids_tried_mechanisms(
     deps: FakeDeps,
     seeded_job,
 ) -> None:
+    # One idea per round: this is a loop-sequencing test, so the generation
+    # prompts map 1:1 to rounds and the ranker stays out of the way.
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     deps.gateway.responses["evolve"] = [
         idea_json("invoice_delivery", 1),
         idea_json("invoice_delivery", 2),
@@ -276,6 +286,7 @@ async def test_run_loop_config_snapshot_beats_fleet_defaults(
 
 
 async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seeded_job) -> None:
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     deps.gateway.responses["critics"] = [CRITIC_BLOCK, CRITIC_OK]
     deps.gateway.responses["screen"] = [reactions_json(LOSE)]
     await run_job(seeded_job.id, deps)
@@ -373,7 +384,8 @@ async def test_evolve_retries_model_output_missing_a_required_field(
     fresh call key (the same key would replay the cached bad response) and the
     run completes."""
     run = await deps.db.get(RunRow, seeded_job.run_id)
-    run.loop_config = {"WIN_THRESHOLD_PP": 3.0}  # win on round 1 → single round
+    # win on round 1 → single round; one idea per round → one re-ask, no refills
+    run.loop_config = {"WIN_THRESHOLD_PP": 3.0, "CANDIDATE_COUNT": 1}
     await deps.db.commit()
     deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS, idea_json("invoice_delivery")]
     deps.gateway.responses["screen"] = [reactions_json(GREAT)]
@@ -713,6 +725,7 @@ async def test_infeasible_channel_candidate_is_suppressed_without_panel(
     deps.context.batch.organizations[0] = brief.model_copy(
         update={"email_consent_state": "unsubscribed"}
     )
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     email_idea = json.loads(idea_json("invoice_delivery"))
     email_idea["channel"] = "email"
     deps.gateway.responses["evolve"] = [json.dumps(email_idea)]
@@ -736,7 +749,8 @@ async def test_recently_failed_mechanism_is_suppressed(
         unsubscribed=True,
     ))
     await db_session.commit()
-    # FakeLLM's default evolve response proposes mechanism "invoice_delivery".
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+    # FakeLLM's default evolve batch leads with mechanism "invoice_delivery".
     await run_job(seeded_job.id, deps)
     candidates = (await db_session.execute(
         select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id)
@@ -867,6 +881,7 @@ async def test_war_game_prompt_omits_channels_this_pro_opted_out_of(
         audience_run="2026-08-06T18:00:00Z",
         channels=["sms", "email"],
         cost_limit=Decimal("100.00"),
+        loop_config={"CANDIDATE_COUNT": 1},
     )
     db_session.add(run)
     db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))

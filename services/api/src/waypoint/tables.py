@@ -106,6 +106,9 @@ class EvolveRoundRow(Base):
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"), default=None)
     outcome: Mapped[str]  # win | lose | suppressed | unavailable
     score_pp: Mapped[float | None] = mapped_column(Numeric(8, 4, asdecimal=False), default=None)
+    # Batch-ranking evidence for the round decision: rank order, ranker scores,
+    # tie margin/decision, finalists, and the selection reason.
+    ranking: Mapped[dict[str, Any]] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

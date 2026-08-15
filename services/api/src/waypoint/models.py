@@ -73,6 +73,42 @@ class Recommendation(BaseModel):
     risk: str = ""
 
 
+class RankedCandidate(BaseModel):
+    candidate_id: str = Field(min_length=1)
+    rank: int = Field(ge=1)
+    # 0-1 expected return-to-app value. NaN fails the bound checks, so an
+    # invalid score is a validation error, never a silent comparison surprise.
+    score: float = Field(ge=0.0, le=1.0)
+
+
+class RankerDecision(BaseModel):
+    """Strict ranker output contract: every candidate exactly once, contiguous
+    unique ranks, bounded scores, and an EXPLICIT tie decision (the field is
+    required — an omitted tie call is a malformed ranking, not an implied no)."""
+
+    ranking: list[RankedCandidate] = Field(min_length=1)
+    tie: bool
+    tie_reason: str = ""
+
+    def by_rank(self) -> list[RankedCandidate]:
+        return sorted(self.ranking, key=lambda r: r.rank)
+
+
+def validate_ranking(decision: RankerDecision, expected_ids: list[str]) -> RankerDecision:
+    """Reject unknown ids, missing/duplicated candidates, and duplicate or
+    gapped ranks. Raises ValueError so the caller re-asks under a fresh key."""
+    ids = [r.candidate_id for r in decision.ranking]
+    if sorted(ids) != sorted(expected_ids):
+        raise ValueError(
+            f"ranking must cover every candidate exactly once: expected {sorted(expected_ids)}, "
+            f"got {sorted(ids)}"
+        )
+    ranks = sorted(r.rank for r in decision.ranking)
+    if ranks != list(range(1, len(expected_ids) + 1)):
+        raise ValueError(f"ranks must be unique 1..{len(expected_ids)}; got {ranks}")
+    return decision
+
+
 class MeasurementIndicator(BaseModel):
     key: str
     label: str

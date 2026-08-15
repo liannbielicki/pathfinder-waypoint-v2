@@ -15,6 +15,7 @@ export const RUN_FIXTURE: RunDetail = {
   loop_config: {
     MAX_ROUNDS: 10, MAX_NO_IMPROVE: 3, PATIENCE: 1,
     KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
+    CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05,
   },
   cost_limit_usd: "25.00",
   cost_reserved_usd: "0.40",
@@ -101,12 +102,13 @@ describe("RunStatus", () => {
     for (const label of [
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
-      /stop-early reduction/i,
+      /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
     ]) {
       expect(within(settings).getByText(label)).toBeInTheDocument();
     }
     expect(within(settings).getByText("10")).toBeInTheDocument();
     expect(within(settings).getByText("0.5")).toBeInTheDocument();
+    expect(within(settings).getByText("0.05")).toBeInTheDocument();
     // Audit view, never an editor: no inputs inside the snapshot.
     expect(within(settings).queryAllByRole("textbox")).toEqual([]);
     expect(within(settings).queryAllByRole("spinbutton")).toEqual([]);

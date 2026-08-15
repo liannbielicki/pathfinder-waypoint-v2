@@ -338,6 +338,8 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
         "PATIENCE": 1,
         "KEEP_DELTA_PP": 0.5,
         "WIN_THRESHOLD_PP": 15.0,
+        "CANDIDATE_COUNT": 3,
+        "TIE_MARGIN": 0.05,
     }
 
 

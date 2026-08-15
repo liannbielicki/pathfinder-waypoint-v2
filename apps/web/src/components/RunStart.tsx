@@ -27,6 +27,11 @@ const LOOP_FIELDS: LoopField[] = [
     min: 0 },
   { key: "WIN_THRESHOLD_PP", label: "Stop-early reduction (pp)",
     help: "A reduction above this ends the search as a success.", min: 0 },
+  { key: "CANDIDATE_COUNT", label: "Ideas per round",
+    help: "How many candidate ideas are generated and ranked each round.", min: 1 },
+  { key: "TIE_MARGIN", label: "Ranker tie margin (0-1)",
+    help: "Ranker-score gap at or under which the top two candidates are both persona-screened.",
+    min: 0 },
 ];
 
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {

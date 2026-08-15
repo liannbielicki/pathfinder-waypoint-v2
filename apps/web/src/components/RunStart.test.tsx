@@ -7,6 +7,7 @@ const FLEET_SETTINGS = {
   loop_defaults: {
     MAX_ROUNDS: 10, MAX_NO_IMPROVE: 3, PATIENCE: 1,
     KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
+    CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05,
   },
   max_in_flight_llm_calls: 4,
 };
@@ -98,7 +99,7 @@ describe("RunStart", () => {
       /pro ids/i, /audience run/i, /channel/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
-      /stop-early reduction/i,
+      /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
     ]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }

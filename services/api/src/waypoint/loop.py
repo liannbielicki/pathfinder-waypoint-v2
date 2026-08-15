@@ -9,8 +9,20 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 _KEYS = frozenset(
-    {"MAX_ROUNDS", "MAX_NO_IMPROVE", "PATIENCE", "KEEP_DELTA_PP", "WIN_THRESHOLD_PP"}
+    {
+        "MAX_ROUNDS",
+        "MAX_NO_IMPROVE",
+        "PATIENCE",
+        "KEEP_DELTA_PP",
+        "WIN_THRESHOLD_PP",
+        "CANDIDATE_COUNT",
+        "TIE_MARGIN",
+    }
 )
+
+# Safety ceiling on the per-round idea batch: an operator typo (or a bad
+# default merge) must never turn one round into an unbounded generation bill.
+MAX_CANDIDATE_COUNT = 10
 
 
 @dataclass(frozen=True)
@@ -20,6 +32,8 @@ class LoopConfig:
     patience: int
     keep_delta_pp: float
     win_threshold_pp: float
+    candidate_count: int
+    tie_margin: float
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> LoopConfig:
@@ -33,9 +47,17 @@ class LoopConfig:
             patience=int(merged["PATIENCE"]),
             keep_delta_pp=float(merged["KEEP_DELTA_PP"]),
             win_threshold_pp=float(merged["WIN_THRESHOLD_PP"]),
+            candidate_count=int(merged["CANDIDATE_COUNT"]),
+            tie_margin=float(merged["TIE_MARGIN"]),
         )
         if config.patience < 1:
             raise ValueError("PATIENCE must be >= 1")
+        if config.candidate_count < 1:
+            raise ValueError("CANDIDATE_COUNT must be a positive integer")
+        if config.candidate_count > MAX_CANDIDATE_COUNT:
+            raise ValueError(f"CANDIDATE_COUNT must be <= {MAX_CANDIDATE_COUNT}")
+        if not 0 <= config.tie_margin <= 1:
+            raise ValueError("TIE_MARGIN must be between 0 and 1 (ranker scores are 0-1)")
         if (
             min(
                 config.max_rounds,
@@ -57,6 +79,8 @@ class LoopConfig:
             "PATIENCE": self.patience,
             "KEEP_DELTA_PP": self.keep_delta_pp,
             "WIN_THRESHOLD_PP": self.win_threshold_pp,
+            "CANDIDATE_COUNT": self.candidate_count,
+            "TIE_MARGIN": self.tie_margin,
         }
 
 
@@ -66,6 +90,8 @@ DEFAULT_LOOP_CONFIG = LoopConfig(
     patience=1,
     keep_delta_pp=0.5,
     win_threshold_pp=15.0,
+    candidate_count=3,
+    tie_margin=0.05,
 )
 
 

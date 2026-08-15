@@ -103,6 +103,29 @@ describe("WinnerReview", () => {
     expect(screen.getByText(/evolve loop: 2 rounds/i)).toBeInTheDocument();
   });
 
+  it("counts distinct rounds, not candidate rows, when CANDIDATE_COUNT rows share a round", () => {
+    // 3 candidates persisted per round (CANDIDATE_COUNT=3) across 2 rounds
+    // must show 2 rounds, not 6.
+    const rowsForRound = (round: number) =>
+      [0, 1, 2].map((i) => ({
+        ...WINNER_RUN.candidates[0],
+        id: `cand-r${round}-${i}`,
+        round,
+        status: i === 0 ? "generated" : "discarded",
+      }));
+    render(
+      <WinnerReview
+        run={{
+          ...WINNER_RUN,
+          candidates: [...rowsForRound(1), ...rowsForRound(2)],
+        }}
+        onHandoff={vi.fn()}
+        handingOff={false}
+      />,
+    );
+    expect(screen.getByText(/evolve loop: 2 rounds/i)).toBeInTheDocument();
+  });
+
   it("renders no-action as a legitimate outcome, not an error", () => {
     render(
       <WinnerReview

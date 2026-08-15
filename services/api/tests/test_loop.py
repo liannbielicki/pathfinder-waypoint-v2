@@ -4,6 +4,7 @@ import pytest
 
 from waypoint.loop import (
     DEFAULT_LOOP_CONFIG,
+    MAX_CANDIDATE_COUNT,
     LoopConfig,
     LoopState,
     apply_round,
@@ -23,6 +24,8 @@ def cfg(**overrides) -> LoopConfig:
         "patience": 1,
         "keep_delta_pp": 0.5,
         "win_threshold_pp": 15.0,
+        "candidate_count": 3,
+        "tie_margin": 0.05,
     }
     return LoopConfig(**{**base, **overrides})
 
@@ -49,8 +52,39 @@ def test_from_mapping_round_trips_to_dict() -> None:
         "PATIENCE": 2,
         "KEEP_DELTA_PP": 0.5,
         "WIN_THRESHOLD_PP": 15.0,
+        "CANDIDATE_COUNT": 3,
+        "TIE_MARGIN": 0.05,
     }
     assert LoopConfig.from_mapping(config.to_dict()) == config
+
+
+# --- CANDIDATE_COUNT / TIE_MARGIN -------------------------------------------
+
+
+def test_candidate_count_defaults_to_three() -> None:
+    assert DEFAULT_LOOP_CONFIG.candidate_count == 3
+
+
+@pytest.mark.parametrize("value", [1, 2, 5, MAX_CANDIDATE_COUNT])
+def test_candidate_count_accepts_explicit_values_up_to_the_ceiling(value: int) -> None:
+    config = LoopConfig.from_mapping({"CANDIDATE_COUNT": value})
+    assert config.candidate_count == value
+
+
+@pytest.mark.parametrize("value", [0, -1, "abc", MAX_CANDIDATE_COUNT + 1])
+def test_candidate_count_rejects_bad_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"CANDIDATE_COUNT": value})
+
+
+def test_tie_margin_defaults_to_point_zero_five() -> None:
+    assert DEFAULT_LOOP_CONFIG.tie_margin == 0.05
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5])
+def test_tie_margin_rejects_out_of_bounds(value: float) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"TIE_MARGIN": value})
 
 
 @pytest.mark.parametrize(
