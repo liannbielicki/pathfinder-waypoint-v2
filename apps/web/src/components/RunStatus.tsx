@@ -27,6 +27,7 @@ const SETTING_LABELS: [string, string][] = [
   ["WIN_THRESHOLD_PP", "Stop-early reduction (pp)"],
   ["CANDIDATE_COUNT", "Ideas per round"],
   ["TIE_MARGIN", "Ranker tie margin (0-1)"],
+  ["WARM_START_THRESHOLD", "Warm-start similarity (0-1)"],
 ];
 
 export function RunStatus({

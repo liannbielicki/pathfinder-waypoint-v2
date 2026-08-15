@@ -7,6 +7,10 @@ label (spec: label the limitation, never pretend). A resubmission that arrives
 after the winner now exists clears a stale evidence_limitation instead of
 carrying it forever.
 
+This is also the ONLY path that grants warm-start eligibility: an attributable
+winner whose merged record carries a measured 7-day return is promoted here
+(see warmstart.py). Nothing on the scoring/persona side may set it.
+
 Batched: winners/runs/candidates/existing rows are prefetched with IN()
 queries keyed on the batch's distinct ids, not one SELECT per item. A
 concurrent duplicate `(recommendation_id, source)` submission from a sibling
@@ -101,6 +105,26 @@ def _apply_flags(row: TouchOutcomeRow, item: TouchOutcomeIn) -> None:
         row.sent_at = item.sent_at
 
 
+def _promote_warm_start(
+    row: TouchOutcomeRow, winner: WinnerRow | None, candidate: CandidateRow | None
+) -> None:
+    """The ONLY path that grants warm-start eligibility: a real observed 7-day
+    return on an attributable winner. Derived purely from the row's merged
+    state, so duplicates and late arrivals converge on the same values."""
+    if winner is None or winner.kind != "winner" or row.returned_7d is None:
+        return
+    recommendation = candidate.recommendation if candidate else {}
+    winner.warm_start_eligible = row.returned_7d
+    winner.validation_status = "validated" if row.returned_7d else "validated_negative"
+    # Mechanism/channel ride along so retrieval never joins org-scoped rows.
+    winner.warm_start_evidence = {
+        "returned_7d": row.returned_7d,
+        "source": row.source,
+        "mechanism": recommendation.get("mechanism", ""),
+        "channel": row.channel or "",
+    }
+
+
 def _apply_item(
     session: AsyncSession,
     item: TouchOutcomeIn,
@@ -128,6 +152,7 @@ def _apply_item(
         row = TouchOutcomeRow(**fields)
         session.add(row)
         existing_by_key[key] = row
+        _promote_warm_start(row, winner, candidate)
     else:
         # A row stored unattributed must not keep evidence_limitation forever
         # once the winner exists — re-attribute on resubmission.
@@ -136,6 +161,7 @@ def _apply_item(
                 setattr(existing, field_name, value)
             existing.evidence_limitation = None
         _apply_flags(existing, item)
+        _promote_warm_start(existing, winner, candidate)
     return limitation is not None
 
 

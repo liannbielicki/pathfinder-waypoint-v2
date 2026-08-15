@@ -87,6 +87,7 @@ from waypoint.tables import (
     RunRow,
     WinnerRow,
 )
+from waypoint.warmstart import FINGERPRINT_VERSION, build_fingerprint, retrieve
 
 STAGES = ("context", "evolve", "final", "score", "measure", "ready")
 
@@ -573,12 +574,13 @@ def _prompt_builder(
     channels: list[str],
     journey_window: str,
     evidence: str,
-) -> Callable[[str, int, list[str]], str]:
-    """(mode, count, forbidden mechanisms) -> evolve prompt, with this round's
-    context bound once — refills reuse it with a different count and forbidden
-    list."""
+) -> Callable[..., str]:
+    """(mode, count, forbidden mechanisms[, warm mechanism]) -> evolve prompt,
+    with this round's context bound once — refills reuse it with a different
+    count and forbidden list (and never a warm start: it is already in the
+    batch)."""
 
-    def build(mode: str, ask: int, forbidden: list[str]) -> str:
+    def build(mode: str, ask: int, forbidden: list[str], warm: str | None = None) -> str:
         return evolve_prompt(
             org_context,
             mode=mode,
@@ -589,6 +591,7 @@ def _prompt_builder(
             journey_window=journey_window,
             evidence=evidence,
             count=ask,
+            warm_start_mechanism=warm,
         )
 
     return build
@@ -601,7 +604,7 @@ async def _generate_batch(
     key: str,
     count: int,
     prompt: str,
-    build_prompt: Callable[[str, int, list[str]], str],
+    build_prompt: Callable[..., str],
     tried: list[str],
 ) -> list[Recommendation]:
     """One batched generation call, then bounded refills for whatever the
@@ -894,17 +897,49 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         )
         count = config.candidate_count
         tried = list(lstate.tried_mechanisms)
-        prompt = build_prompt(mode, count, tried)
-        await _reserve_round_worst_case(state, deps, _round_worst_case(deps, prompt, count))
+        # Warm start: round 1 only, and only while round 1 is still uncommitted.
+        # The ledger row commits atomically with the round, so once round 1 is
+        # durable lstate.round is 1+ here forever after and its recorded
+        # warm_start evidence is the authoritative account of that decision —
+        # no resumed round can retrieve again and overwrite it. A re-run of an
+        # UNcommitted round 1 replays the recorded generation call, so the ideas
+        # are identical regardless of what a second retrieval decides; the
+        # mechanism_in_batch flag below keeps the stored evidence honest either
+        # way. Retrieval itself is pure SQL — no paid call is added.
+        warm_mechanism, warm_evidence = None, None
+        if lstate.round == 0:
+            match, warm_evidence = await retrieve(
+                session, brief, threshold=config.warm_start_threshold
+            )
+            if match is not None:
+                warm_evidence = {
+                    **warm_evidence,
+                    "winner_id": match.winner_id,
+                    "score": match.score,
+                    "mechanism": match.mechanism,
+                }
+                if match.mechanism in failed:
+                    # The pro already rejected this mechanism; a cross-pro win
+                    # does not override this pro's own observed failure.
+                    warm_evidence |= {"outcome": "cold", "skipped": "recently_failed"}
+                else:
+                    warm_mechanism = match.mechanism
+        batch_count = count + (1 if warm_mechanism else 0)
+        prompt = build_prompt(mode, count, tried, warm_mechanism)
+        await _reserve_round_worst_case(state, deps, _round_worst_case(deps, prompt, batch_count))
         ideas = await _generate_batch(
             state,
             deps,
             key=key,
-            count=count,
+            count=batch_count,
             prompt=prompt,
             build_prompt=build_prompt,
             tried=tried,
         )
+        if warm_mechanism is not None and warm_evidence is not None:
+            warm_evidence["mechanism_in_batch"] = any(
+                idea.mechanism == warm_mechanism for idea in ideas
+            )
         verdicts = await _verdicts_for_batch(
             state,
             deps,
@@ -1065,6 +1100,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     ranker_model=ranker_model,
                     screens=screens,
                     ranking_failure=ranking_failure,
+                    warm_start=warm_evidence,
                 ),
             )
         )
@@ -1088,6 +1124,7 @@ def _ranking_evidence(
     ranker_model: str,
     screens: list[_ScreenOutcome],
     ranking_failure: str | None,
+    warm_start: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The round decision's audit trail: who was ranked, in what order, why the
     challenger was chosen, and what failed on the way."""
@@ -1118,6 +1155,8 @@ def _ranking_evidence(
         evidence["screen_failures"] = failures
     if ranking_failure is not None:
         evidence["ranking_failure"] = ranking_failure
+    if warm_start is not None:
+        evidence["warm_start"] = warm_start
     return evidence
 
 
@@ -1252,6 +1291,10 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     "screen": champion.score.get("screen", {}),
                     "org_id": state.brief.org_uuid if state.brief else "",
                 },
+                # Sanitized bands only, and never eligible here: eligibility is
+                # earned in outcomes.ingest from an observed 7d return.
+                fingerprint=build_fingerprint(state.brief) if state.brief else {},
+                fingerprint_version=FINGERPRINT_VERSION if state.brief else None,
             )
         )
     else:

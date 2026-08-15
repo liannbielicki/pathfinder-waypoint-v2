@@ -17,6 +17,7 @@ _KEYS = frozenset(
         "WIN_THRESHOLD_PP",
         "CANDIDATE_COUNT",
         "TIE_MARGIN",
+        "WARM_START_THRESHOLD",
     }
 )
 
@@ -34,6 +35,7 @@ class LoopConfig:
     win_threshold_pp: float
     candidate_count: int
     tie_margin: float
+    warm_start_threshold: float
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> LoopConfig:
@@ -49,6 +51,7 @@ class LoopConfig:
             win_threshold_pp=float(merged["WIN_THRESHOLD_PP"]),
             candidate_count=int(merged["CANDIDATE_COUNT"]),
             tie_margin=float(merged["TIE_MARGIN"]),
+            warm_start_threshold=float(merged["WARM_START_THRESHOLD"]),
         )
         if config.patience < 1:
             raise ValueError("PATIENCE must be >= 1")
@@ -58,6 +61,8 @@ class LoopConfig:
             raise ValueError(f"CANDIDATE_COUNT must be <= {MAX_CANDIDATE_COUNT}")
         if not 0 <= config.tie_margin <= 1:
             raise ValueError("TIE_MARGIN must be between 0 and 1 (ranker scores are 0-1)")
+        if not 0 <= config.warm_start_threshold <= 1:
+            raise ValueError("WARM_START_THRESHOLD must be between 0 and 1 (similarity is 0-1)")
         if (
             min(
                 config.max_rounds,
@@ -81,6 +86,7 @@ class LoopConfig:
             "WIN_THRESHOLD_PP": self.win_threshold_pp,
             "CANDIDATE_COUNT": self.candidate_count,
             "TIE_MARGIN": self.tie_margin,
+            "WARM_START_THRESHOLD": self.warm_start_threshold,
         }
 
 
@@ -92,6 +98,7 @@ DEFAULT_LOOP_CONFIG = LoopConfig(
     win_threshold_pp=15.0,
     candidate_count=3,
     tie_margin=0.05,
+    warm_start_threshold=0.75,
 )
 
 

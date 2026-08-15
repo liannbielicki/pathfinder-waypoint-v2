@@ -23,6 +23,7 @@ from waypoint.tables import (
     TouchOutcomeRow,
     WinnerRow,
 )
+from waypoint.warmstart import FINGERPRINT_VERSION
 
 from .conftest import (
     CRITIC_BLOCK,
@@ -103,6 +104,16 @@ async def test_happy_path_completes_with_champion_and_measurement(
     assert winner.kind == "winner"
     assert winner.candidate_id is not None
     assert winner.evidence["final"]["reduction_pp"] > 1.0
+    # Scoring stamps the sanitized fingerprint but NEVER eligibility — that is
+    # earned only from an observed 7d return in outcome ingestion.
+    assert winner.fingerprint == {
+        "segment": "1A", "vertical": "hvac", "plan_tier": "basic",
+        "tenure_band": "0-3m", "org_size_band": "solo", "open_ar_band": "low",
+        "feature_adoption_band": "medium",
+    }
+    assert winner.fingerprint_version == FINGERPRINT_VERSION
+    assert winner.warm_start_eligible is False
+    assert winner.validation_status is None
     measurement = (
         await deps.db.execute(
             select(MeasurementRow).where(MeasurementRow.run_id == seeded_job.run_id)

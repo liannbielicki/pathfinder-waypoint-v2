@@ -26,6 +26,7 @@ def cfg(**overrides) -> LoopConfig:
         "win_threshold_pp": 15.0,
         "candidate_count": 3,
         "tie_margin": 0.05,
+        "warm_start_threshold": 0.75,
     }
     return LoopConfig(**{**base, **overrides})
 
@@ -54,6 +55,7 @@ def test_from_mapping_round_trips_to_dict() -> None:
         "WIN_THRESHOLD_PP": 15.0,
         "CANDIDATE_COUNT": 3,
         "TIE_MARGIN": 0.05,
+        "WARM_START_THRESHOLD": 0.75,
     }
     assert LoopConfig.from_mapping(config.to_dict()) == config
 
@@ -75,6 +77,21 @@ def test_candidate_count_accepts_explicit_values_up_to_the_ceiling(value: int) -
 def test_candidate_count_rejects_bad_values(value: object) -> None:
     with pytest.raises(ValueError):
         LoopConfig.from_mapping({"CANDIDATE_COUNT": value})
+
+
+def test_warm_start_threshold_defaults_to_point_seven_five() -> None:
+    assert DEFAULT_LOOP_CONFIG.warm_start_threshold == 0.75
+
+
+@pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+def test_warm_start_threshold_accepts_the_full_similarity_range(value: float) -> None:
+    assert LoopConfig.from_mapping({"WARM_START_THRESHOLD": value}).warm_start_threshold == value
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5, "abc"])
+def test_warm_start_threshold_rejects_out_of_bounds(value: object) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"WARM_START_THRESHOLD": value})
 
 
 def test_tie_margin_defaults_to_point_zero_five() -> None:

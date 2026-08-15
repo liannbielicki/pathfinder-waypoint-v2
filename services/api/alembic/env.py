@@ -11,7 +11,10 @@ from waypoint.tables import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: the default silently DISABLES every
+    # already-configured logger (waypoint.*), so an in-process migration run
+    # would mute the app's own logging for the rest of the process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # DATABASE_URL wins over alembic.ini so Railway and CI need no ini edits.
 _env_url = os.environ.get("DATABASE_URL")

@@ -116,7 +116,11 @@ class LlmCallRow(Base):
     """Durable paid-call lifecycle: pending → committed → reconciled | abandoned."""
 
     __tablename__ = "llm_calls"
-    __table_args__ = (UniqueConstraint("call_key", name="uq_llm_calls_key"),)
+    __table_args__ = (
+        UniqueConstraint("call_key", name="uq_llm_calls_key"),
+        # backs abandon_stale / replay lookups, which filter (run_id, pro_id, status)
+        Index("ix_llm_calls_run_pro_status", "run_id", "pro_id", "status"),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     call_key: Mapped[str]
@@ -135,8 +139,21 @@ class LlmCallRow(Base):
 
 
 class WinnerRow(Base):
+    """A winner is warm-start eligible ONLY after outcomes.ingest observes a
+    real 7-day return; nothing on the scoring path may set eligibility.
+    fingerprint carries the sanitized band allowlist (warmstart.py) so
+    cross-org retrieval never joins back into org-scoped rows."""
+
     __tablename__ = "winners"
-    __table_args__ = (UniqueConstraint("run_id", "pro_id", name="uq_winners_run_pro"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "pro_id", name="uq_winners_run_pro"),
+        Index(
+            "ix_winners_warm_start",
+            "fingerprint_version",
+            text("created_at DESC"),
+            postgresql_where=text("warm_start_eligible"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
@@ -145,6 +162,12 @@ class WinnerRow(Base):
     kind: Mapped[str]  # winner | no_action | abstained
     rationale: Mapped[str] = mapped_column(default="")
     evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    fingerprint: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    fingerprint_version: Mapped[str | None] = mapped_column(default=None)
+    warm_start_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    warm_start_evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    # None = pending | "validated" = observed 7d return | "validated_negative"
+    validation_status: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

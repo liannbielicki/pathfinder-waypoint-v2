@@ -149,7 +149,23 @@ def evolve_prompt(
     journey_window: str,
     evidence: str,
     count: int = 1,
+    warm_start_mechanism: str | None = None,
 ) -> str:
+    # A warm start adds ONE candidate to the batch — it never replaces one and
+    # it gets no other privilege: it is critiqued, ranked, and persona-screened
+    # exactly like the ideas generated beside it.
+    warm_start = ""
+    if warm_start_mechanism:
+        count += 1
+        warm_start = f"""
+WARM START (one ADDITIONAL idea, included in the {count} above): exactly ONE
+idea in this batch must use the mechanism "{warm_start_mechanism}". That
+mechanism has been validated by an observed return for pros with a similar
+profile — that is the ONLY thing known about it here. Nothing about the other
+pro, their data, or their copy is available or may be assumed. Build the idea
+from THIS Pro's context below, under all the same rules as the others. It
+competes on equal terms and wins nothing automatically.
+"""
     ideas_word = "idea" if count == 1 else "ideas"
     if mode == "stay":
         rest = (
@@ -204,7 +220,7 @@ prefer patterns with measured returns, avoid patterns with unsubscribes or
 measured no-returns):
 {evidence}
 
-{directive}
+{directive}{warm_start}
 History of this Pro's rounds so far (score_pp is the frozen churn-reduction
 metric; higher is better):
 {history_json}

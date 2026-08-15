@@ -107,6 +107,22 @@ async def test_run_detail_exposes_lifecycle_and_evidence(
     assert detail["killed"] is False
 
 
+async def test_run_detail_winner_shows_warm_start_eligibility(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    db_session.add(
+        WinnerRow(run_id=created["id"], pro_id="pro_1", kind="winner",
+                  fingerprint_version="fp_v1")
+    )
+    await db_session.commit()
+    winner = (await auth_client.get(f"/api/runs/{created['id']}")).json()["winners"][0]
+    assert winner["warm_start_eligible"] is False
+    assert winner["validation_status"] is None
+    assert winner["fingerprint_version"] == "fp_v1"
+
+
 async def test_unknown_run_is_404(auth_client: httpx.AsyncClient) -> None:
     assert (await auth_client.get("/api/runs/missing")).status_code == 404
 
@@ -340,6 +356,7 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
         "WIN_THRESHOLD_PP": 15.0,
         "CANDIDATE_COUNT": 3,
         "TIE_MARGIN": 0.05,
+        "WARM_START_THRESHOLD": 0.75,
     }
 
 

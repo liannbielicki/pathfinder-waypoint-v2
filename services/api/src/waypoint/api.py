@@ -276,6 +276,9 @@ def create_app(
                     "candidate_id": w.candidate_id,
                     "rationale": w.rationale,
                     "evidence": w.evidence,
+                    "warm_start_eligible": w.warm_start_eligible,
+                    "validation_status": w.validation_status,
+                    "fingerprint_version": w.fingerprint_version,
                 }
                 for w in winners
             ],

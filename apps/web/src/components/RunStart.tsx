@@ -32,6 +32,9 @@ const LOOP_FIELDS: LoopField[] = [
   { key: "TIE_MARGIN", label: "Ranker tie margin (0-1)",
     help: "Ranker-score gap at or under which the top two candidates are both persona-screened.",
     min: 0 },
+  { key: "WARM_START_THRESHOLD", label: "Warm-start similarity (0-1)",
+    help: "How similar a past validated winner's Pro must be before its mechanism seeds round 1.",
+    min: 0 },
 ];
 
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {

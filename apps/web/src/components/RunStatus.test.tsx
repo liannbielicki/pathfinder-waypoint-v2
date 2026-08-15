@@ -15,7 +15,7 @@ export const RUN_FIXTURE: RunDetail = {
   loop_config: {
     MAX_ROUNDS: 10, MAX_NO_IMPROVE: 3, PATIENCE: 1,
     KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
-    CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05,
+    CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
   cost_limit_usd: "25.00",
   cost_reserved_usd: "0.40",
