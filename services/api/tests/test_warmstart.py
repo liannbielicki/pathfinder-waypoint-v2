@@ -469,6 +469,22 @@ async def test_broken_retrieval_degrades_visibly(
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
+async def test_a_db_level_failure_leaves_the_session_writable(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller keeps writing the round through this same session, so a DB
+    failure inside retrieve must not leave it needing a rollback."""
+
+    # A real failing statement, so the session is genuinely left needing a
+    # rollback — a fake exception would not reproduce the bug.
+    monkeypatch.setattr(warmstart, "select", lambda *_: text("SELECT * FROM no_such_table"))
+    match, telemetry = await retrieve(db_session, QUERY_BRIEF, threshold=0.75)
+    assert match is None
+    assert telemetry["outcome"] == "degraded"
+    # Would raise PendingRollbackError if retrieve had left the session poisoned.
+    assert (await db_session.execute(select(WinnerRow))).scalars().all() == []
+
+
 async def test_every_retrieval_logs_one_structured_line(
     db_session: AsyncSession, caplog: pytest.LogCaptureFixture
 ) -> None:

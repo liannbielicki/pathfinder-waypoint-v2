@@ -32,6 +32,7 @@ from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summari
 from waypoint.feasibility import gate_pro
 from waypoint.llm import LLMResult, Pricing, RateLimitExhausted, extract_json, worst_case_cost
 from waypoint.loop import (
+    MAX_CANDIDATE_COUNT,
     LoopConfig,
     apply_round,
     is_win,
@@ -495,7 +496,12 @@ SUPPRESSING_BLOCK_KINDS = (
 
 
 def _batch_max_tokens(count: int) -> int:
-    return min(1200 * count, 6000)
+    """1200 tokens per idea, never capped below what the batch needs. A ceiling
+    that truncates the array mid-JSON is unparseable — extract_json cannot
+    salvage a cut-off array — so the round burns every JSON_CALL_ATTEMPTS re-ask
+    at full price and then fails. MAX_CANDIDATE_COUNT (+1 for a warm start) is
+    what bounds the batch, so this stays bounded with it."""
+    return 1200 * min(count, MAX_CANDIDATE_COUNT + 1)
 
 
 def _ranker_tier(pricing: Pricing) -> str:
@@ -1079,6 +1085,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             score_pp=score_pp,
             outcome=outcome,
             config=config,
+            # The batch's other mechanisms were generated, critiqued and ranked
+            # this round; forbid them next round instead of re-buying them.
+            also_tried=[i.mechanism for index, i in enumerate(ideas) if index != challenger],
         )
         session.add(
             EvolveRoundRow(

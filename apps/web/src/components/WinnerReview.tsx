@@ -41,6 +41,33 @@ function countRounds(candidates: Candidate[]): number {
   return withRound.size + withoutRound;
 }
 
+// Rounds bucketed by what actually happened in them, so the three counts
+// partition `rounds`. A batch round persists CANDIDATE_COUNT candidates and
+// screens only the ranked finalist(s): the discarded non-finalists are normal
+// operation, NOT missing evidence. So a round is only "could not be evaluated"
+// when nothing in it was screened, and only "critic-suppressed" when the critic
+// suppressed everything in it.
+function roundBuckets(candidates: Candidate[]): {
+  screened: number;
+  suppressed: number;
+  unevaluated: number;
+} {
+  const byRound = new Map<string, Candidate[]>();
+  candidates.forEach((c, i) => {
+    const key = c.round != null ? `r${c.round}` : `legacy${i}`;
+    byRound.set(key, [...(byRound.get(key) ?? []), c]);
+  });
+  let screened = 0;
+  let suppressed = 0;
+  let unevaluated = 0;
+  for (const group of byRound.values()) {
+    if (group.some((c) => c.score?.screen)) screened += 1;
+    else if (group.every((c) => c.status === "suppressed")) suppressed += 1;
+    else unevaluated += 1;
+  }
+  return { screened, suppressed, unevaluated };
+}
+
 function Rounds({ rounds, championRound }: { rounds: number; championRound?: number }) {
   if (rounds === 0) return null;
   return (
@@ -104,11 +131,7 @@ function NoActionCard({
   const rounds = countRounds(proCandidates);
   const champion = proCandidates.find((c) => c.status === "champion");
   const finalScore = champion?.score?.final;
-  const screened = countRounds(proCandidates.filter((c) => c.score?.screen));
-  const suppressed = countRounds(proCandidates.filter((c) => c.status === "suppressed"));
-  const unevaluated = countRounds(
-    proCandidates.filter((c) => c.status === "discarded" && !c.score?.screen),
-  );
+  const { screened, suppressed, unevaluated } = roundBuckets(proCandidates);
   const ending = noActionEnding(winner.rationale, champion, screened, rounds);
   return (
     <div className="card">

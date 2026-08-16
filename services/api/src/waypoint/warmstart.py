@@ -19,6 +19,7 @@ from time import perf_counter
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.n8n import OrgBrief
@@ -149,6 +150,17 @@ async def retrieve(
         if best is not None and best.score >= threshold:
             match, telemetry["outcome"] = best, "warm"
     except Exception as error:  # degraded cold start, never a crash
+        # The caller writes the round's candidate/ledger rows through THIS
+        # session: a DB-level failure here (timeout, reset, serialization)
+        # leaves it needing a rollback, and without one the whole round dies at
+        # commit after every paid call has already been made. That transaction
+        # is doomed either way. A non-DB failure leaves the session healthy, so
+        # rolling back there would needlessly discard the round's pending work.
+        if isinstance(error, SQLAlchemyError):
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001 — a dead connection is still a cold start
+                log.warning("warm_start rollback failed after a degraded retrieval", exc_info=True)
         match = None
         telemetry["outcome"] = "degraded"
         telemetry["error"] = str(error)

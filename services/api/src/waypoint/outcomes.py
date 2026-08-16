@@ -106,16 +106,21 @@ def _apply_flags(row: TouchOutcomeRow, item: TouchOutcomeIn) -> None:
 
 
 def _promote_warm_start(
-    row: TouchOutcomeRow, winner: WinnerRow | None, candidate: CandidateRow | None
+    rows: list[TouchOutcomeRow], winner: WinnerRow | None, candidate: CandidateRow | None
 ) -> None:
     """The ONLY path that grants warm-start eligibility: a real observed 7-day
-    return on an attributable winner. Derived purely from the row's merged
-    state, so duplicates and late arrivals converge on the same values."""
-    if winner is None or winner.kind != "winner" or row.returned_7d is None:
+    return on an attributable winner. Derived from EVERY source's row for this
+    winner (any observed return wins, ties broken by source name), so
+    duplicates, late arrivals, and a lagging second source converge on the same
+    values whatever order the batch applies them in."""
+    observed = [row for row in rows if row.returned_7d is not None]
+    if winner is None or winner.kind != "winner" or not observed:
         return
+    positive = [row for row in observed if row.returned_7d]
+    row = min(positive or observed, key=lambda r: r.source)
     recommendation = candidate.recommendation if candidate else {}
-    winner.warm_start_eligible = row.returned_7d
-    winner.validation_status = "validated" if row.returned_7d else "validated_negative"
+    winner.warm_start_eligible = bool(positive)
+    winner.validation_status = "validated" if positive else "validated_negative"
     # Mechanism/channel ride along so retrieval never joins org-scoped rows.
     winner.warm_start_evidence = {
         "returned_7d": row.returned_7d,
@@ -152,7 +157,6 @@ def _apply_item(
         row = TouchOutcomeRow(**fields)
         session.add(row)
         existing_by_key[key] = row
-        _promote_warm_start(row, winner, candidate)
     else:
         # A row stored unattributed must not keep evidence_limitation forever
         # once the winner exists — re-attribute on resubmission.
@@ -161,7 +165,13 @@ def _apply_item(
                 setattr(existing, field_name, value)
             existing.evidence_limitation = None
         _apply_flags(existing, item)
-        _promote_warm_start(existing, winner, candidate)
+    # Every source's row for this recommendation, not just the one applied now:
+    # eligibility must not depend on which source lands last in the batch.
+    _promote_warm_start(
+        [row for (rec_id, _), row in existing_by_key.items() if rec_id == item.recommendation_id],
+        winner,
+        candidate,
+    )
     return limitation is not None
 
 

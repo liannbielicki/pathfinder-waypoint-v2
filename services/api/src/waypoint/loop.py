@@ -135,10 +135,16 @@ def apply_round(
     score_pp: float | None,
     outcome: str,
     config: LoopConfig,
+    also_tried: Sequence[str] = (),
 ) -> LoopState:
+    # also_tried: the round's other generated mechanisms. They were proposed,
+    # critiqued and ranked, so a later SHIFT must forbid them or it re-proposes
+    # and re-pays for the same losers every round. Only `mechanism` drives the
+    # win / patience / dry bookkeeping below.
     tried = state.tried_mechanisms
-    if mechanism not in tried:
-        tried = (*tried, mechanism)
+    for name in (mechanism, *also_tried):
+        if name not in tried:
+            tried = (*tried, name)
     if outcome == "win":
         return replace(
             state,
