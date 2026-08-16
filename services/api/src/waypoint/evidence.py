@@ -1,7 +1,8 @@
 """Historical outcome evidence (spec stage 2).
 
 Aggregates observed touch outcomes into per-(channel, mechanism) patterns for
-one journey window, and lists mechanisms that recently failed for a specific
+one journey window (plus any window sharing its objective, see
+evidence_windows), and lists mechanisms that recently failed for a specific
 pro. Only attributable rows (evidence_limitation IS NULL) count as evidence —
 unattributed records exist for audit but must never masquerade as proof.
 
@@ -17,6 +18,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from waypoint.tables import TouchOutcomeRow
 
 _HORIZONS = ("7d", "14d", "30d", "90d")
+
+# Journey windows that are ONE evidence corpus: they optimize for the same
+# thing, so a touch that worked in one is real evidence for the other. Reads are
+# symmetric — every window in a group sees every row in that group — otherwise
+# an ungated variant would run blind while its gated twin held all the history.
+_EVIDENCE_GROUPS = (frozenset({"churn_risk", "churn_risk_open"}),)
+
+
+def evidence_windows(journey_window: str) -> list[str]:
+    """The window values whose outcomes count as evidence for this window."""
+    for group in _EVIDENCE_GROUPS:
+        if journey_window in group:
+            return sorted(group)
+    return [journey_window]
 
 
 @dataclass(frozen=True)
@@ -35,7 +50,7 @@ async def pattern_summaries(
         await session.execute(
             select(TouchOutcomeRow)
             .where(
-                TouchOutcomeRow.journey_window == journey_window,
+                TouchOutcomeRow.journey_window.in_(evidence_windows(journey_window)),
                 TouchOutcomeRow.channel.in_(channels),
                 TouchOutcomeRow.evidence_limitation.is_(None),
             )

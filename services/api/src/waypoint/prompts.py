@@ -138,6 +138,22 @@ EVOLVE_SYSTEM = (
 )
 
 
+# What each window means to the model. Only windows whose key is not
+# self-explanatory need an entry; everything else passes through verbatim.
+# churn_risk_open shares churn_risk's objective — the only difference is that
+# nobody is gated out of it upstream, which the model has no part in.
+_WINDOW_BRIEF = {
+    "churn_risk_open": (
+        "retention, open audience (this Pro may or may not show a churn "
+        "signal — optimize for retention and minimizing churn risk either way)"
+    ),
+}
+
+
+def window_brief(journey_window: str) -> str:
+    return _WINDOW_BRIEF.get(journey_window, journey_window)
+
+
 def evolve_prompt(
     org_context: str,
     *,
@@ -211,7 +227,7 @@ email or SMS copy.
 
 {channel_directive(channels)}
 
-Journey window: {journey_window}. The touch must be relevant to this window and
+Journey window: {window_brief(journey_window)}. The touch must be relevant to this window and
 aim at one outcome: the Pro returns to and uses the app. Opens, clicks, and
 replies are diagnostics, not the goal.
 
@@ -249,7 +265,7 @@ objective is expected return-to-app value: the Pro returns to and uses the app.
 Opens, clicks, and replies are diagnostics, not the goal.
 
 Weigh, in order of evidence strength: historical outcome evidence for similar
-patterns, relevance to the {journey_window} journey window, feasibility of the
+patterns, relevance to the {window_brief(journey_window)} journey window, feasibility of the
 touch as described, downside risk, and uncertainty. Prefer grounded, concrete
 touches over vague ones.
 

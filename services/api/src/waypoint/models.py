@@ -29,7 +29,12 @@ PENDING_AUDIENCE_QUERY = "pending_n8n"
 
 # Closed set of high-leverage customer states (spec "Journey window"). Narrow
 # on purpose; widening it is a product decision, not a code default.
-JourneyWindow = Literal["churn_risk", "onboarding", "upsell"]
+# churn_risk_open is churn_risk's targeting without its gate: it optimizes for
+# retention and minimizing churn risk just the same, but no brief may ever
+# exclude a Pro from it. For audiences already filtered upstream, or where the
+# churn signal is missing or untrusted. It shares churn_risk's evidence corpus
+# (see evidence.evidence_windows) — same objective, same history.
+JourneyWindow = Literal["churn_risk", "churn_risk_open", "onboarding", "upsell"]
 
 
 class RunCreate(BaseModel):

@@ -5,6 +5,7 @@ import {
   PENDING_AUDIENCE_QUERY,
   createRun,
   getFleetSettings,
+  type RunCreateInput,
   type RunView,
 } from "@/lib/api";
 
@@ -60,8 +61,13 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       .then((settings) => {
         if (cancelled) return;
         setDefaults(settings.loop_defaults);
+        // Only fields the server actually advertises get a value. A key the
+        // API does not know (an older API than this UI) would otherwise render
+        // as the string "undefined" — an empty number input that reads as
+        // edited, demands a confirm, and is then POSTed as an unknown key.
         setValues(Object.fromEntries(
-          LOOP_FIELDS.map((f) => [f.key, String(settings.loop_defaults[f.key])]),
+          LOOP_FIELDS.filter((f) => f.key in settings.loop_defaults)
+            .map((f) => [f.key, String(settings.loop_defaults[f.key])]),
         ));
       })
       .catch(() => {
@@ -71,8 +77,17 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   }, []);
 
   const ids = proIds.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  // Fields this UI knows about but the API does not report a default for. They
+  // are hidden rather than shown as dead inputs — but the operator is told, so
+  // a silently shorter form is never mistaken for the whole set of controls.
+  const omitted =
+    defaults === null
+      ? []
+      : LOOP_FIELDS.filter((f) => !(f.key in defaults)).map((f) => f.key);
+  // A field the server has no default for can never be "changed": there is
+  // nothing to change it from, and sending it would be an unknown-key 422.
   const changed = (key: string) =>
-    defaults !== null && Number(values[key]) !== defaults[key];
+    defaults !== null && key in defaults && Number(values[key]) !== defaults[key];
 
   function focusField(id: string) {
     formRef.current?.querySelector<HTMLElement>(`#${id}`)?.focus();
@@ -125,7 +140,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
         channels: [channel],
-        journey_window: journeyWindow as "churn_risk" | "onboarding" | "upsell",
+        journey_window: journeyWindow as RunCreateInput["journey_window"],
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
       onStarted(run);
@@ -177,6 +192,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           onChange={(e) => setJourneyWindow(e.target.value)}
         >
           <option value="churn_risk">churn risk (not using the app)</option>
+          <option value="churn_risk_open">
+            churn risk — everyone (no one is excluded)
+          </option>
           <option value="onboarding">onboarding</option>
           <option value="upsell">upsell / expansion</option>
         </select>
@@ -194,7 +212,16 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
             uses the server defaults.
           </p>
         )}
-        {LOOP_FIELDS.map((field) => (
+        {omitted.length > 0 && (
+          <p className="helper">
+            {`Not editable here — this API does not report a default for `}
+            <span className="technical">{omitted.join(", ")}</span>
+            {`. The run uses the server's own values. (The API is older than this UI.)`}
+          </p>
+        )}
+        {LOOP_FIELDS.filter(
+          (field) => defaults === null || field.key in defaults,
+        ).map((field) => (
           <div key={field.key}>
             <label htmlFor={`loop-${field.key}`}>
               {field.label} <small className="technical">{field.key}</small>

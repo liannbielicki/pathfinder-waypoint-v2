@@ -109,7 +109,7 @@ export const login = (password: string) =>
 // journey_window postdates the generated api-types.ts; regenerate from the
 // live OpenAPI schema to fold it into RunCreate proper.
 export type RunCreateInput = RunCreate & {
-  journey_window?: "churn_risk" | "onboarding" | "upsell";
+  journey_window?: "churn_risk" | "churn_risk_open" | "onboarding" | "upsell";
 };
 
 export const createRun = (body: RunCreateInput) =>

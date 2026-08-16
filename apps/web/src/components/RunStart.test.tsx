@@ -227,6 +227,61 @@ describe("RunStart", () => {
     );
   });
 
+  it("offers the ungated churn-risk window and sends it", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.selectOptions(
+      screen.getByLabelText(/journey window/i), "churn_risk_open",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ journey_window: "churn_risk_open" }),
+    );
+  });
+
+  it("ignores loop fields the server has no default for", async () => {
+    // An API older than this UI: it advertises no CANDIDATE_COUNT. The field
+    // must not render as an empty input that demands a confirm and is then
+    // POSTed as an unknown key (422: unknown loop config keys).
+    const partial = { ...FLEET_SETTINGS.loop_defaults };
+    delete (partial as Partial<typeof partial>).CANDIDATE_COUNT;
+    const { createCalls } = stubFetch({
+      settings: { ...FLEET_SETTINGS, loop_defaults: partial },
+    });
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.queryByLabelText(/ideas per round/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/type "confirm" to apply the new ideas per round/i))
+      .not.toBeInTheDocument();
+    // Hidden, but never silently: the operator is told which control is gone.
+    expect(screen.getByText(/not editable here/i)).toBeVisible();
+    expect(screen.getByText("CANDIDATE_COUNT")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).not.toHaveProperty("loop_config");
+  });
+
+  it("does not demand a confirm for untouched loop fields", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+    // Nothing has been edited, so no field may be showing a confirm box.
+    expect(screen.queryAllByLabelText(/type "confirm" to apply/i)).toEqual([]);
+  });
+
+  it("says nothing about omitted fields when the API reports them all", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.queryByText(/not editable here/i)).not.toBeInTheDocument();
+  });
+
   it("disables loop controls and still submits when the settings fetch fails", async () => {
     const { createCalls } = stubFetch({ settings: new Error("network down") });
     const onStarted = vi.fn();

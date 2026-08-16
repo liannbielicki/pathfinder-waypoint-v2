@@ -43,6 +43,23 @@ def test_unknown_churn_state_passes_churn_window() -> None:
     assert not gate_pro(brief(), ["sms"], "churn_risk").blocked
 
 
+def test_churn_risk_open_never_excludes_anyone() -> None:
+    """The whole point of the window: same objective as churn_risk, but no
+    brief may gate a Pro out of it — not even the state that blocks churn_risk."""
+    for state in ("low", "none", "minimal", "high", None):
+        result = gate_pro(brief(churn_risk_state=state), ["sms"], "churn_risk_open")
+        assert not result.blocked, state
+    # A non-onboarding lifecycle is likewise irrelevant here.
+    assert not gate_pro(brief(lifecycle_stage="mature"), ["sms"], "churn_risk_open").blocked
+
+
+def test_churn_risk_open_still_honors_consent() -> None:
+    """Ungated on journey window is NOT ungated on consent."""
+    result = gate_pro(brief(sms_consent_state="opted_out"), ["sms"], "churn_risk_open")
+    assert result.blocked
+    assert result.reason is not None and "no_contactable_channel" in result.reason
+
+
 def test_non_onboarding_lifecycle_contradicts_onboarding_window() -> None:
     result = gate_pro(brief(lifecycle_stage="mature"), ["sms"], "onboarding")
     assert result.blocked

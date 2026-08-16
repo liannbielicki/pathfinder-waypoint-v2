@@ -9,6 +9,9 @@ so this gate is belt-and-braces against contradictory briefs, not a re-filter.
     removed; a Pro with no contactable channel abstains.
   * journey-window relevance: a brief that affirmatively contradicts the run's
     journey window (e.g. churn_risk_state=low in a churn_risk run) abstains.
+    The churn_risk_open window opts out of this rule entirely: it optimizes for
+    retention and minimizing churn risk exactly as churn_risk does, but
+    excludes nobody.
 """
 
 from dataclasses import dataclass
@@ -46,6 +49,11 @@ def _consent_blocks(brief: OrgBrief, channel: str) -> bool:
 def window_conflict(brief: OrgBrief, journey_window: str) -> str | None:
     """An affirmative contradiction between the brief and the run's window.
     Unknown/None values never conflict — the audience SQL owns targeting."""
+    if journey_window == "churn_risk_open":
+        # Load-bearing: this window exists precisely so that NO brief can
+        # exclude a Pro from it. It must stay above the churn_risk branch —
+        # otherwise a low churn signal would gate the ungated window.
+        return None
     if journey_window == "churn_risk":
         state = (brief.churn_risk_state or "").strip().lower()
         if state in _LOW_CHURN:
