@@ -10,7 +10,7 @@ import logging
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import literal_column, select, table, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import pipeline, warmstart
@@ -475,13 +475,22 @@ async def test_a_db_level_failure_leaves_the_session_writable(
     """The caller keeps writing the round through this same session, so a DB
     failure inside retrieve must not leave it needing a rollback."""
 
-    # A real failing statement, so the session is genuinely left needing a
-    # rollback — a fake exception would not reproduce the bug.
-    monkeypatch.setattr(warmstart, "select", lambda *_: text("SELECT * FROM no_such_table"))
+    # The scan must fail at the DB layer, not in Python: only a real aborted
+    # statement leaves the transaction needing a rollback. Still a Select, so
+    # retrieve's .where/.order_by/.limit chain applies as usual.
+    monkeypatch.setattr(
+        warmstart,
+        "select",
+        lambda *_: select(literal_column("*")).select_from(table("no_such_table")),
+    )
     match, telemetry = await retrieve(db_session, QUERY_BRIEF, threshold=0.75)
     assert match is None
     assert telemetry["outcome"] == "degraded"
-    # Would raise PendingRollbackError if retrieve had left the session poisoned.
+    # Guards the injection itself: a Python-level failure here would leave the
+    # session healthy and make the assertion below pass for the wrong reason.
+    assert "no_such_table" in telemetry["error"]
+    # Without the rollback this raises InFailedSQLTransactionError, and in the
+    # real pipeline the round dies at commit with all its spend already made.
     assert (await db_session.execute(select(WinnerRow))).scalars().all() == []
 
 
