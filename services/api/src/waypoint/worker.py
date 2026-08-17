@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.db import make_engine, make_session_factory
+from waypoint.handoff import push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
@@ -147,6 +148,7 @@ async def _worker_loop(
     create_plan: Any,
     metric_catalog: dict[str, Any],
     maintenance: bool,
+    settings: Settings,
 ) -> None:
     """One claim→process loop. WORKER_COUNT of these run concurrently in-process;
     each owns a distinct worker_id (for lease ownership) and its own fleet-slot
@@ -204,6 +206,23 @@ async def _worker_loop(
                     # checkpoint; attempts-exhausted jobs get reaped as failed.
                     log.exception("job %s crashed; leaving for lease recovery", job.id)
                     await session.rollback()
+                    continue
+            # Trickle handoff: stream this run's ready winners to the LCM as
+            # each Pro finishes so QA runs concurrently with the run. Best
+            # effort — push_ready_winners is idempotent (answered rows are
+            # skipped), so the next Pro's completion or the manual
+            # POST /handoff retries anything that failed here.
+            try:
+                async with factory() as handoff_session:
+                    sent = await push_ready_winners(handoff_session, settings, job.run_id)
+                if sent:
+                    log.info("trickled %d winner row(s) to LCM for run %s", sent, job.run_id)
+            except Exception:
+                log.warning(
+                    "trickle handoff failed for run %s; POST /handoff remains available",
+                    job.run_id,
+                    exc_info=True,
+                )
 
 
 async def main() -> None:
@@ -254,6 +273,7 @@ async def main() -> None:
                 create_plan=create_measurement_plan,
                 metric_catalog=METRIC_CATALOG,
                 maintenance=(index == 0),
+                settings=settings,
             )
         finally:
             await slots_connection.close()

@@ -6,7 +6,7 @@ the grounding hard rule, seeds-not-final-copy, and the internal-jargon ban.
 Org context is untrusted input and is always fenced.
 """
 
-PROMPT_VERSION = "waypoint_v3"  # v3: sms gated to realistic single-touch events
+PROMPT_VERSION = "waypoint_v4"  # v4: consent-ask ideas forbidden and critic-blocked
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -49,6 +49,13 @@ def channel_directive(channels: list[str]) -> str:
             "a ~160-character text and could plausibly land on a Pro's phone as-is. "
             "No sequences, follow-ups, drips, multi-step or multi-part flows, and "
             "no email-only mechanics; each idea stands alone as exactly one send."
+        )
+    if "sms" in allowed:
+        lines.append(
+            "Never propose an idea that opens by (or consists of) asking the Pro "
+            "for SMS consent, opt-in, or permission to text them. Messaging consent "
+            "is handled upstream of this system; a consent request is not a "
+            "retention idea."
         )
     return "\n".join(lines)
 
@@ -202,12 +209,15 @@ This Pro's context:
 
 def critic_prompt(org_context: str, ideas_json: str) -> str:
     return f"""You are auditing action ideas proposed for ONE specific Pro. The ONLY data
-we have about this Pro is the context below. Classify the PRIMARY grounding
-problem for each idea into exactly one block_kind:
+we have about this Pro is the context below. Classify the PRIMARY problem
+for each idea into exactly one block_kind:
 
   - "ungrounded" (HARD BLOCK): the message or execution depends on a specific
     value about this Pro that is NOT in the context — an exact AR balance, job
     count, revenue figure, date, or a definite claim about an unknown factor.
+  - "consent_ask" (HARD BLOCK): the idea's touch opens by (or consists of)
+    asking the Pro for SMS/messaging consent, opt-in, or permission to contact
+    them. Consent is handled upstream; a consent request is not a retention idea.
   - "generic" (NOT a hard block): grounded but broad boilerplate that could be
     sent to any Pro. Record as a note; do NOT bench it.
   - "none": individualized AND grounded.

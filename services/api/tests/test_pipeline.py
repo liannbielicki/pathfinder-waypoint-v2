@@ -405,13 +405,35 @@ async def test_flat_reactions_resolve_to_no_action(deps: FakeDeps, seeded_job) -
     assert await run_status(deps.db, seeded_job.run_id) == "no_action"
 
 
-async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
+async def test_short_panel_degrades_with_flagged_output_instead_of_abstaining(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Only one family qualifies (2 personas, no counterweight): the Pro still
+    # gets an output, flagged as evaluated on a short-handed panel.
     solo = [p for p in PERSONAS if p.family == "solo_operators"]
 
     async def _solo(segment: str):
         return solo
 
     deps.get_personas = _solo
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"
+    disclaimer = winner.evidence["panel_disclaimer"]
+    assert "only 2 of" in disclaimer["final"]
+
+
+async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
+    # Below the 2-persona floor there is no panel at all: still an abstention.
+    lone = [p for p in PERSONAS if p.family == "solo_operators"][:1]
+
+    async def _lone(segment: str):
+        return lone
+
+    deps.get_personas = _lone
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "abstained"
     winner = (

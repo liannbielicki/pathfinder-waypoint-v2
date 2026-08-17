@@ -3,8 +3,9 @@
 Matching uses permitted organizational/lifecycle/product-usage/financial/
 behavioral features only. Identity, contact data, and protected traits never
 enter matching. Counterweights are related (threshold-clearing) personas from
-a different family — never generic dissenters. If enough qualifying matches do
-not exist, we report low panel fit instead of inventing representativeness.
+a different family — never generic dissenters. When qualifying matches run
+short the panel degrades (flagged, minimum 2) rather than abstaining the Pro;
+below that we report low panel fit instead of inventing representativeness.
 """
 
 from typing import Any, Literal
@@ -18,6 +19,9 @@ PERMITTED_MATCH_FEATURES = (
 )
 
 FIT_THRESHOLD = 0.5
+# Smallest panel worth evaluating: with one persona there is no panel, just an
+# opinion. Two qualifying matches run as a flagged, degraded panel.
+MIN_PANEL_SIZE = 2
 
 
 class InsufficientPanelFit(Exception):
@@ -56,6 +60,11 @@ class PanelSelection(BaseModel):
     fit_threshold: float
     snapshot_version: str
     match_features: dict[str, Any]
+    # Degraded-panel provenance: a panel may run short-handed (>= MIN_PANEL_SIZE
+    # qualifying matches) rather than abstain. Defaults keep old stored
+    # evidence readable.
+    requested_size: int = 0
+    degraded: bool = False
 
 
 def match_features(pro: ProMatchInput) -> dict[str, Any]:
@@ -88,8 +97,6 @@ def select_panel(
     ranked = sorted(scored, key=lambda item: (-item.fit_score, item.persona_id))
 
     closest = [item for item in ranked[:closest_count] if item.fit_score >= FIT_THRESHOLD]
-    if len(closest) != closest_count:
-        raise InsufficientPanelFit(size=size, available=len(closest))
 
     used_families = {item.family for item in closest}
     counterweights: list[PanelItem] = []
@@ -101,13 +108,19 @@ def select_panel(
         if item.fit_score >= FIT_THRESHOLD and item.family not in used_families:
             counterweights.append(item.model_copy(update={"role": "counterweight"}))
             used_families.add(item.family)
-    if len(counterweights) != counter_count:
-        raise InsufficientPanelFit(size=size, available=len(closest) + len(counterweights))
+
+    items = [*closest, *counterweights]
+    # A short-handed panel still evaluates (flagged as degraded downstream)
+    # rather than abstaining the Pro; below MIN_PANEL_SIZE there is no panel.
+    if len(items) < MIN_PANEL_SIZE:
+        raise InsufficientPanelFit(size=size, available=len(items))
 
     snapshot = personas[0].snapshot_version if personas else "unknown"
     return PanelSelection(
-        items=[*closest, *counterweights],
+        items=items,
         fit_threshold=FIT_THRESHOLD,
         snapshot_version=snapshot,
         match_features=features,
+        requested_size=size,
+        degraded=len(items) < size,
     )

@@ -10,13 +10,13 @@
     "expected_handoff_fields": ["pro_uuid", "org_id", "theme", "theme_category", "row_id"]
   },
   {
-    "case": "low_panel_fit_abstention",
+    "case": "low_panel_fit_degraded_winner",
     "pro_id": "pro_2",
-    "expected_outcome": "abstained",
+    "expected_outcome": "winner",
     "expected_org_id": "pro_2",
     "expected_context_version": "org-context-v2",
-    "expected_panel_sizes": [],
-    "expected_metric": null,
-    "expected_handoff_fields": []
+    "expected_panel_sizes": [2, 2],
+    "expected_metric": "invoices_sent",
+    "expected_handoff_fields": ["pro_uuid", "org_id", "theme", "theme_category", "row_id"]
   }
 ]

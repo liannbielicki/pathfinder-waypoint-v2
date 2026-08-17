@@ -21,8 +21,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.models import HandoffReceipt
-from waypoint.tables import HandoffRow
+from waypoint.models import PENDING_AUDIENCE_QUERY, HandoffReceipt
+from waypoint.tables import CandidateRow, HandoffRow, MeasurementRow, RunRow, WinnerRow
+
+if typing.TYPE_CHECKING:
+    from waypoint.settings import Settings
 
 
 class HandoffUnavailable(Exception):
@@ -145,3 +148,73 @@ class LCMClient:
             )
             for row in rows
         ]
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+async def ready_rows(session: AsyncSession, run_id: str) -> list[dict[str, Any]]:
+    """Every winner of `run_id` that is fully ready to hand off (has a
+    measurement plan and its candidate), shaped as Pathfinder Intake rows.
+    No PII — rows are keyed by pro_uuid."""
+    winners = (
+        (
+            await session.execute(
+                select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rows: list[dict[str, Any]] = []
+    for winner in winners:
+        measurement = (
+            await session.execute(
+                select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
+            )
+        ).scalar_one_or_none()
+        candidate = (
+            await session.get(CandidateRow, winner.candidate_id) if winner.candidate_id else None
+        )
+        if measurement is not None and candidate is not None:
+            rows.append(
+                {
+                    "pro_uuid": winner.pro_id,
+                    "theme": candidate.recommendation["title"],
+                    "theme_category": candidate.recommendation["mechanism"],
+                    "org_id": winner.evidence.get("org_id", ""),
+                    "row_id": winner.id,
+                }
+            )
+    return rows
+
+
+async def push_ready_winners(session: AsyncSession, settings: Settings, run_id: str) -> int:
+    """Trickle push: one batch POST of every ready winner for the run. LCMClient
+    skips rows a prior call already answered, so calling this after EVERY
+    completed Pro streams new winners to Allison's LCM as they land — QA can
+    start while the run is still going. Returns how many rows went on the wire
+    (0 when nothing new, lineage is unresolved, or nothing is ready)."""
+    run = await session.get(RunRow, run_id)
+    if run is None or run.audience_query == PENDING_AUDIENCE_QUERY:
+        # Unverified audience lineage: same refusal as the manual endpoint.
+        return 0
+    rows = await ready_rows(session, run_id)
+    if not rows:
+        return 0
+    client = LCMClient(
+        url=str(settings.HANDOFF_URL),
+        token=settings.HANDOFF_TOKEN.get_secret_value(),
+        bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
+        session=session,
+    )
+    try:
+        already_answered = {
+            key for key, row in (await client._load_existing(
+                [handoff_key(run_id, r["row_id"]) for r in rows]
+            )).items() if row.response is not None
+        }
+        await client.handoff(run_id, rows)
+    finally:
+        await client.aclose()
+    return len(rows) - len(already_answered)

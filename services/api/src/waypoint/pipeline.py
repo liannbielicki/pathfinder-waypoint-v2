@@ -478,7 +478,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         score: CandidateScore | None = None
         panel = None
         reactions: list[float] | None = None
-        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data"):
+        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data", "consent_ask"):
             outcome, score_pp = "suppressed", None  # a loss, no persona spend
         else:
             try:
@@ -682,6 +682,16 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         return {}
     outcome = select_winner({champion.id: CandidateScore.model_validate(final)})
     if isinstance(outcome, Winner):
+        # A stage that ran on a short-handed panel is flagged on the winner —
+        # the output still ships, with the disclaimer, instead of abstaining.
+        degraded_panels = {
+            stage: (
+                f"only {len(panel.get('items', []))} of "
+                f"{panel.get('requested_size')} personas qualified"
+            )
+            for stage, stage_evidence in (champion.persona_evidence or {}).items()
+            if (panel := stage_evidence.get("panel", {})).get("degraded")
+        }
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
@@ -693,6 +703,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     "final": final,
                     "screen": champion.score.get("screen", {}),
                     "org_id": state.brief.org_uuid if state.brief else "",
+                    **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
             )
         )

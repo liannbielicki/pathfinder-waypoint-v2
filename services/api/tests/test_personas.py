@@ -76,10 +76,27 @@ def test_insufficient_qualifying_matches_reports_low_panel_fit() -> None:
         select_panel(distant, PERSONAS, size=3)
 
 
-def test_counterweight_shortage_never_relaxes_the_threshold() -> None:
+def test_counterweight_shortage_degrades_with_a_flag_instead_of_abstaining() -> None:
+    # Only one family qualifies: no counterweight exists. The panel runs
+    # short-handed and says so, rather than abstaining the Pro entirely.
     same_family = [p for p in PERSONAS if p.family == "solo_operators"]
+    panel = select_panel(PRO_FIXTURE, same_family, size=3)
+    assert panel.degraded is True
+    assert panel.requested_size == 3
+    assert len(panel.items) == 2
+    assert all(item.fit_score >= panel.fit_threshold for item in panel.items)
+
+
+def test_full_panel_is_not_flagged_degraded() -> None:
+    panel = select_panel(PRO_FIXTURE, PERSONAS, size=3)
+    assert panel.degraded is False
+    assert panel.requested_size == 3
+
+
+def test_fewer_than_two_qualifying_matches_still_abstains() -> None:
+    lone = [p for p in PERSONAS if p.family == "solo_operators"][:1]
     with pytest.raises(InsufficientPanelFit):
-        select_panel(PRO_FIXTURE, same_family, size=3)
+        select_panel(PRO_FIXTURE, lone, size=3)
 
 
 def test_segment_is_enough_when_personas_are_flat() -> None:

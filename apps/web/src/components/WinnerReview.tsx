@@ -163,6 +163,17 @@ function WinnerCard({
         </small>
       </p>
       <Rounds rounds={rounds} championRound={candidate?.round} />
+      {winner.evidence?.panel_disclaimer != null && (
+        <p role="alert">
+          <strong>⚠ Degraded panel:</strong>{" "}
+          {Object.entries(
+            winner.evidence.panel_disclaimer as Record<string, string>,
+          )
+            .map(([stage, detail]) => `${stage}: ${detail}`)
+            .join("; ")}
+          {" — evaluated with fewer personas than requested."}
+        </p>
+      )}
       <h5>Why (manager rationale)</h5>
       <p>{winner.rationale}</p>
       {finalScore && <ScoreBlock score={finalScore} />}
