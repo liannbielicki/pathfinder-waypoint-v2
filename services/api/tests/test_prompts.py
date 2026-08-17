@@ -20,7 +20,7 @@ RECOMMENDATION_FIXTURE = {
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "waypoint_v2"
+    assert PROMPT_VERSION == "waypoint_v3"
 
 
 def test_fenced_context_wraps_untrusted_input() -> None:

@@ -6,7 +6,7 @@ the grounding hard rule, seeds-not-final-copy, and the internal-jargon ban.
 Org context is untrusted input and is always fenced.
 """
 
-PROMPT_VERSION = "waypoint_v2"  # v2: reaction embodiment + delivery-channel framing
+PROMPT_VERSION = "waypoint_v3"  # v3: sms gated to realistic single-touch events
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -29,8 +29,9 @@ def fenced_context(context: str) -> str:
 
 def channel_directive(channels: list[str]) -> str:
     """Gate idea generation to the run's operator-selected delivery channels.
-    SMS carries an extra brevity constraint so ideas are shaped for a single
-    ~160-character text, not long-form mechanics that only work in email."""
+    SMS carries an extra constraint so ideas are shaped as one realistic
+    single-touch event fitting a ~160-character text — never a sequence or
+    long-form mechanics that only work in email."""
     allowed = [c for c in channels if c in ("sms", "email")]
     if not allowed:  # defensive: never leave the model unconstrained
         allowed = ["sms", "email"]
@@ -43,9 +44,11 @@ def channel_directive(channels: list[str]) -> str:
     ]
     if allowed == ["sms"]:
         lines.append(
-            "This will be delivered as a single SMS: shape the concept as one brief, "
-            "self-contained ask that fits a ~160-character text — no long-form, "
-            "multi-part, or email-only mechanics."
+            "This will be delivered as ONE short SMS: shape every idea as a "
+            "realistic SINGLE touch event — one brief, self-contained ask that fits "
+            "a ~160-character text and could plausibly land on a Pro's phone as-is. "
+            "No sequences, follow-ups, drips, multi-step or multi-part flows, and "
+            "no email-only mechanics; each idea stands alone as exactly one send."
         )
     return "\n".join(lines)
 
