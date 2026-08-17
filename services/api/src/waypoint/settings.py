@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     LLM_API_KEY: SecretStr
     N8N_CONTEXT_URL: AnyHttpUrl
     N8N_TOKEN: SecretStr
+    # The context flow (Snowflake + Iterable behind one webhook) can
+    # legitimately run 10-15 minutes per call under load, and it degrades
+    # badly when every worker loop hits it at once.
+    N8N_TIMEOUT_SECONDS: float = Field(default=900.0, gt=0)
+    N8N_MAX_CONCURRENT: int = Field(default=3, ge=1)
     PERSONA_URL: AnyHttpUrl
     PERSONA_TOKEN: SecretStr
     HANDOFF_URL: AnyHttpUrl

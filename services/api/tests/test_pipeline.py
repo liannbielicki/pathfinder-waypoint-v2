@@ -451,6 +451,43 @@ async def test_context_outage_waits_for_retry(deps: FakeDeps, seeded_job) -> Non
     assert await run_status(deps.db, seeded_job.run_id) == "waiting"
 
 
+async def test_context_outage_for_one_pro_never_fails_the_run(deps: FakeDeps) -> None:
+    # The 504-for-one-id incident: when one Pro's context flow stays dead
+    # through its last retry, that Pro's job fails — the run must NOT go
+    # terminal while sibling Pros are still working.
+    run = RunRow(
+        id="run-isolated",
+        pro_ids=["pro_1", "pro_2"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms"],
+        cost_limit=Decimal("100.00"),
+    )
+    deps.db.add(run)
+    deps.db.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await deps.db.flush()
+    doomed = await enqueue(deps.db, run.id, stage="pro", pro_id="pro_1")
+    healthy = await enqueue(deps.db, run.id, stage="pro", pro_id="pro_2")
+    doomed_job = await deps.db.get(JobRow, doomed)
+    doomed_job.attempts = doomed_job.max_attempts  # retries already spent
+    await deps.db.commit()
+
+    deps.context.unavailable = True
+    await run_job(doomed, deps)
+
+    await deps.db.refresh(doomed_job)
+    assert doomed_job.status == "failed"
+    assert "context_unavailable" in doomed_job.checkpoint["failure"]["reason"]
+    # The run stays live for the sibling; it only aggregates once ALL jobs
+    # are terminal — and then to degraded, not failed.
+    assert await run_status(deps.db, run.id) not in ("failed", "stopped")
+    healthy_job = await deps.db.get(JobRow, healthy)
+    assert healthy_job.status == "queued"
+    healthy_job.status = "done"
+    await deps.db.commit()
+    assert await finalize_run(deps.db, run.id) == "degraded"
+
+
 async def test_lost_lease_stops_paid_work_immediately(deps: FakeDeps, seeded_job) -> None:
     async with deps.db.begin_nested():
         claimed = await claim_job(deps.db, "worker-other")

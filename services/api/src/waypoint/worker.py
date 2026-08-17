@@ -36,7 +36,10 @@ from waypoint.tables import FleetControlRow
 log = logging.getLogger("waypoint.worker")
 
 POLL_SECONDS = 2.0
-LEASE_SECONDS = 600
+# Must comfortably exceed one n8n context call (up to N8N_TIMEOUT_SECONDS):
+# nothing heartbeats during that fetch, and a lease shorter than the call gets
+# the job re-claimed mid-fetch and worked twice.
+LEASE_SECONDS = 1800
 CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibration_cards.json"
 
 
@@ -221,7 +224,10 @@ async def main() -> None:
     persona_source = make_persona_source(settings)
     calibration = load_calibration(CALIBRATION_PATH)
     context = N8NContextClient(
-        url=str(settings.N8N_CONTEXT_URL), token=settings.N8N_TOKEN.get_secret_value()
+        url=str(settings.N8N_CONTEXT_URL),
+        token=settings.N8N_TOKEN.get_secret_value(),
+        timeout=settings.N8N_TIMEOUT_SECONDS,
+        max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
 
     async with factory() as session:

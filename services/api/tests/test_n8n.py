@@ -19,7 +19,10 @@ N8N_URL = "https://n8n.example/webhook/context"
 
 
 def make_client(batch_size: int = 5) -> N8NContextClient:
-    return N8NContextClient(url=N8N_URL, token="test-token", batch_size=batch_size)
+    # backoff 0 so retry tests don't sleep for real
+    return N8NContextClient(
+        url=N8N_URL, token="test-token", batch_size=batch_size, backoff_seconds=0.0
+    )
 
 
 def _rows() -> list[dict]:
@@ -130,9 +133,31 @@ async def test_n8n_refuses_redirects(httpx_mock: HTTPXMock) -> None:
 
 
 async def test_n8n_outage_is_explicit_not_empty(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(status_code=503)
+    # A persistent outage is retried, then surfaced explicitly — never as an
+    # empty batch.
+    for _ in range(3):
+        httpx_mock.add_response(status_code=503)
     with pytest.raises(ContextUnavailable):
         await make_client().fetch(["pro_1"])
+    assert len(httpx_mock.get_requests()) == 3
+
+
+async def test_transient_504_is_retried_not_fatal(httpx_mock: HTTPXMock) -> None:
+    # The incident shape: one gateway timeout from a slow Snowflake query must
+    # not burn the job attempt when the next try succeeds.
+    httpx_mock.add_response(status_code=504)
+    httpx_mock.add_response(json=_rows())
+    batch = await make_client().fetch(["pro_1"])
+    assert len(batch.organizations) == 2
+    assert len(httpx_mock.get_requests()) == 2
+
+
+async def test_hard_errors_are_not_retried(httpx_mock: HTTPXMock) -> None:
+    # A 4xx contract problem won't fix itself; retrying just hammers the flow.
+    httpx_mock.add_response(status_code=400)
+    with pytest.raises(ContextUnavailable):
+        await make_client().fetch(["pro_1"])
+    assert len(httpx_mock.get_requests()) == 1
 
 
 async def test_rows_rekeyed_to_submitted_id_format(httpx_mock: HTTPXMock) -> None:

@@ -928,7 +928,15 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
         if await store.requeue_job(job_id):
             await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
         else:
-            await store.set_run_status(run_id, "failed", f"context_unavailable: {error}")
+            # Attempts exhausted for THIS Pro only: its job fails (requeue_job
+            # already marked it) and finalize_run aggregates to failed/degraded
+            # once every sibling is terminal — one id's dead context flow must
+            # never take the whole run down.
+            await queue.checkpoint_job(
+                store.session, job_id, "failure",
+                {"reason": f"context_unavailable: {error}"},
+            )
+            await finalize_run(store.session, run_id)
         return
     state.brief = next(
         (brief for brief in batch.organizations if brief.pro_id == state.pro_id),
