@@ -4,8 +4,10 @@ Matching uses permitted organizational/lifecycle/product-usage/financial/
 behavioral features only. Identity, contact data, and protected traits never
 enter matching. Counterweights are related (threshold-clearing) personas from
 a different family — never generic dissenters. When qualifying matches run
-short the panel degrades (flagged, minimum 2) rather than abstaining the Pro;
-below that we report low panel fit instead of inventing representativeness.
+short (minimum 2), the remaining seats are BACKFILLED with the next-closest
+personas above a lower fit floor — ranked fit, never random, new families
+first — and the panel is flagged as degraded. Below 2 qualifying matches we
+report low panel fit instead of inventing representativeness.
 """
 
 from typing import Any, Literal
@@ -22,6 +24,10 @@ FIT_THRESHOLD = 0.5
 # Smallest panel worth evaluating: with one persona there is no panel, just an
 # opinion. Two qualifying matches run as a flagged, degraded panel.
 MIN_PANEL_SIZE = 2
+# Backfill seats admit the next-closest personas below FIT_THRESHOLD but above
+# this floor. A 0.4-fit persona is weak evidence; below the floor it is noise
+# wearing a persona costume — those seats stay empty instead.
+BACKFILL_FIT_FLOOR = 0.3
 
 
 class InsufficientPanelFit(Exception):
@@ -50,7 +56,7 @@ class PanelItem(BaseModel):
     persona_id: str
     label: str
     family: str
-    role: Literal["closest", "counterweight"]
+    role: Literal["closest", "counterweight", "backfill"]
     fit_score: float
     rationale: str
 
@@ -110,10 +116,32 @@ def select_panel(
             used_families.add(item.family)
 
     items = [*closest, *counterweights]
-    # A short-handed panel still evaluates (flagged as degraded downstream)
-    # rather than abstaining the Pro; below MIN_PANEL_SIZE there is no panel.
+    # The floor counts THRESHOLD-CLEARING members only: backfill supplements a
+    # real panel, it never constitutes one. Below MIN_PANEL_SIZE, abstain.
     if len(items) < MIN_PANEL_SIZE:
         raise InsufficientPanelFit(size=size, available=len(items))
+
+    if len(items) < size:
+        # Backfill the empty seats with the next-closest personas above the
+        # floor — ranked fit, never random, so every seat is evidence (however
+        # weak, and visibly so: the seat keeps role="backfill" and its real
+        # fit_score). New families first, restoring a dissenting voice.
+        seated = {item.persona_id for item in items}
+        pool = [
+            item for item in ranked
+            if item.persona_id not in seated and item.fit_score >= BACKFILL_FIT_FLOOR
+        ]
+        for prefer_new_family in (True, False):
+            for item in pool:
+                if len(items) == size:
+                    break
+                if item.persona_id in seated:
+                    continue
+                if prefer_new_family and item.family in used_families:
+                    continue
+                items.append(item.model_copy(update={"role": "backfill"}))
+                seated.add(item.persona_id)
+                used_families.add(item.family)
 
     snapshot = personas[0].snapshot_version if personas else "unknown"
     return PanelSelection(
@@ -122,5 +150,7 @@ def select_panel(
         snapshot_version=snapshot,
         match_features=features,
         requested_size=size,
-        degraded=len(items) < size,
+        # Backfilled seats degrade the panel even when it reaches full size:
+        # the flag means "not every seat cleared the threshold", not "short".
+        degraded=len(items) < size or any(item.role == "backfill" for item in items),
     )

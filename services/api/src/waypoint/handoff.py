@@ -153,21 +153,66 @@ class LCMClient:
         await self._client.aclose()
 
 
-async def ready_rows(session: AsyncSession, run_id: str) -> list[dict[str, Any]]:
-    """Every winner of `run_id` that is fully ready to hand off (has a
-    measurement plan and its candidate), shaped as Pathfinder Intake rows.
-    No PII — rows are keyed by pro_uuid."""
-    winners = (
-        (
-            await session.execute(
-                select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
-            )
-        )
-        .scalars()
-        .all()
+class AudienceLineageUnresolved(Exception):
+    """The n8n flow never reported its query version; winners must not ship."""
+
+
+def lcm_http_client(settings: Settings, timeout: float = 30.0) -> httpx.AsyncClient:
+    """A long-lived transport for the LCM boundary — build once, share across
+    calls (LCMClient accepts it via `client=`) instead of paying a TLS
+    handshake per push."""
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        headers={
+            "authorization": f"Bearer {settings.HANDOFF_TOKEN.get_secret_value()}",
+            "x-vercel-protection-bypass": settings.BYPASS_TOKEN.get_secret_value(),
+        },
     )
+
+
+def make_lcm_client(
+    settings: Settings, session: AsyncSession, client: httpx.AsyncClient | None = None
+) -> LCMClient:
+    """The one place LCM wiring (url/token/bypass) is assembled."""
+    return LCMClient(
+        url=str(settings.HANDOFF_URL),
+        token=settings.HANDOFF_TOKEN.get_secret_value(),
+        bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
+        session=session,
+        client=client,
+    )
+
+
+async def ready_rows(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    pro_id: str | None = None,
+    include_degraded: bool = True,
+) -> list[dict[str, Any]]:
+    """Every winner of `run_id` (optionally one Pro's) that is fully ready to
+    hand off (has a measurement plan and its candidate), shaped as Pathfinder
+    Intake rows. No PII — rows are keyed by pro_uuid.
+
+    The audience-lineage guard lives HERE, on the one path every handoff
+    caller routes through: a run whose n8n flow never reported its query
+    version raises instead of returning shippable rows. With
+    include_degraded=False, winners flagged with a panel_disclaimer are held
+    back for operator-initiated handoff."""
+    run = await session.get(RunRow, run_id)
+    if run is None or run.audience_query == PENDING_AUDIENCE_QUERY:
+        raise AudienceLineageUnresolved(
+            "audience lineage unresolved: the n8n flow never reported a query version"
+        )
+    query = select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
+    if pro_id is not None:
+        query = query.where(WinnerRow.pro_id == pro_id)
+    winners = (await session.execute(query)).scalars().all()
     rows: list[dict[str, Any]] = []
     for winner in winners:
+        if not include_degraded and winner.evidence.get("panel_disclaimer"):
+            continue
         measurement = (
             await session.execute(
                 select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
@@ -189,32 +234,39 @@ async def ready_rows(session: AsyncSession, run_id: str) -> list[dict[str, Any]]
     return rows
 
 
-async def push_ready_winners(session: AsyncSession, settings: Settings, run_id: str) -> int:
-    """Trickle push: one batch POST of every ready winner for the run. LCMClient
-    skips rows a prior call already answered, so calling this after EVERY
-    completed Pro streams new winners to Allison's LCM as they land — QA can
-    start while the run is still going. Returns how many rows went on the wire
-    (0 when nothing new, lineage is unresolved, or nothing is ready)."""
+async def push_ready_winners(
+    session: AsyncSession,
+    settings: Settings,
+    run_id: str,
+    *,
+    pro_id: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> int:
+    """Trickle push: one batch POST of the finished Pro's ready winner(s).
+    LCMClient skips rows a prior call already answered, so calling this after
+    EVERY completed Pro streams new winners to Allison's LCM as they land —
+    QA can start while the run is still going. Scoping to `pro_id` keeps
+    concurrent worker loops on disjoint rows (the job lease guarantees one
+    worker per Pro), so pushes never race on the same handoff row.
+
+    Returns how many ready rows were ensured delivered (0 when the run is
+    stopped/failed, lineage is unresolved, or nothing is ready). Degraded-
+    panel winners are held back for the operator's manual POST /handoff."""
     run = await session.get(RunRow, run_id)
-    if run is None or run.audience_query == PENDING_AUDIENCE_QUERY:
-        # Unverified audience lineage: same refusal as the manual endpoint.
+    if run is None or run.status in ("stopped", "failed"):
+        # An operator kill (or a failed run) must keep working: automatic
+        # handoff would ship winners the operator just tried to withhold.
         return 0
-    rows = await ready_rows(session, run_id)
+    try:
+        rows = await ready_rows(session, run_id, pro_id=pro_id, include_degraded=False)
+    except AudienceLineageUnresolved:
+        return 0  # same refusal as the manual endpoint, silently for the trickle
     if not rows:
         return 0
-    client = LCMClient(
-        url=str(settings.HANDOFF_URL),
-        token=settings.HANDOFF_TOKEN.get_secret_value(),
-        bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
-        session=session,
-    )
+    lcm = make_lcm_client(settings, session, client=client)
     try:
-        already_answered = {
-            key for key, row in (await client._load_existing(
-                [handoff_key(run_id, r["row_id"]) for r in rows]
-            )).items() if row.response is not None
-        }
-        await client.handoff(run_id, rows)
+        await lcm.handoff(run_id, rows)
     finally:
-        await client.aclose()
-    return len(rows) - len(already_answered)
+        if client is None:  # a shared transport outlives this call
+            await lcm.aclose()
+    return len(rows)

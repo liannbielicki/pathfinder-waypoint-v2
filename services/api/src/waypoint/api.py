@@ -16,10 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
 from waypoint.db import make_engine, make_session_factory
-from waypoint.handoff import HandoffUnavailable, LCMClient, ready_rows
+from waypoint.handoff import (
+    AudienceLineageUnresolved,
+    HandoffUnavailable,
+    make_lcm_client,
+    ready_rows,
+)
 from waypoint.loop import LoopConfig
 from waypoint.models import (
-    PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
     HandoffReceipt,
     RunCreate,
@@ -315,25 +319,19 @@ def create_app(
         request: Request, run_id: str, session: SessionDep, _: AuthDep
     ) -> HandoffResponse:
         settings: Settings = request.app.state.settings
-        run = await _run_or_404(session, run_id)
-        rows = await ready_rows(session, run_id)
+        await _run_or_404(session, run_id)
+        try:
+            # The lineage guard lives in ready_rows so every handoff caller
+            # inherits it; refusing beats handing off a winner sourced from an
+            # unverified audience.
+            rows = await ready_rows(session, run_id)
+        except AudienceLineageUnresolved as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         if not rows:
             raise HTTPException(
                 status_code=409, detail="No persisted winner with a measurement plan"
             )
-        if run.audience_query == PENDING_AUDIENCE_QUERY:
-            # The n8n flow never reported its query version; refusing beats
-            # handing off a winner sourced from an unverified audience.
-            raise HTTPException(
-                status_code=409,
-                detail="audience lineage unresolved: the n8n flow never reported a query version",
-            )
-        client = LCMClient(
-            url=str(settings.HANDOFF_URL),
-            token=settings.HANDOFF_TOKEN.get_secret_value(),
-            bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
-            session=session,
-        )
+        client = make_lcm_client(settings, session)
         # Pathfinder Intake API: no PII, one POST per batch (never per row).
         try:
             receipts = await client.handoff(run_id, rows)

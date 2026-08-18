@@ -294,6 +294,32 @@ async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seede
     assert len(suppressed) == 1
 
 
+async def test_consent_ask_idea_is_suppressed_deterministically(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # The critic approves ("none") but the idea's pro-facing surface asks for
+    # SMS opt-in: the deterministic gate must bench it with no persona spend.
+    consent_idea = json.loads(idea_json("invoice_delivery"))
+    consent_idea["pro_facing_concept"] = "Reply YES to opt in to text updates."
+    deps.gateway.responses["evolve"] = [json.dumps(consent_idea), idea_json("job_reminders")]
+    deps.gateway.responses["critics"] = CRITIC_OK
+    await run_job(seeded_job.id, deps)
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "suppressed"
+    suppressed = (
+        (
+            await deps.db.execute(
+                select(CandidateRow).where(
+                    CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "suppressed"
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert suppressed.critics["block_kind"] == "consent_ask"
+
+
 async def test_generation_failure_fails_the_run_honestly(deps: FakeDeps, seeded_job) -> None:
     deps.gateway.fail_stage("evolve")
     await run_job(seeded_job.id, deps)
@@ -424,6 +450,10 @@ async def test_short_panel_degrades_with_flagged_output_instead_of_abstaining(
     assert winner.kind == "winner"
     disclaimer = winner.evidence["panel_disclaimer"]
     assert "only 2 of" in disclaimer["final"]
+    # The notes name what the short panel actually voids: no dissenting
+    # family, and a "held-out" final check that reused the screen's personas.
+    assert "no counterweight" in disclaimer["final"]
+    assert "reused the screen panel" in disclaimer["final"]
 
 
 async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:

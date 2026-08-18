@@ -15,7 +15,7 @@
     "expected_outcome": "winner",
     "expected_org_id": "pro_2",
     "expected_context_version": "org-context-v2",
-    "expected_panel_sizes": [2, 2],
+    "expected_panel_sizes": [3, 5],
     "expected_metric": "invoices_sent",
     "expected_handoff_fields": ["pro_uuid", "org_id", "theme", "theme_category", "row_id"]
   }

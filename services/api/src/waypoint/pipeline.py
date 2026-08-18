@@ -11,6 +11,7 @@ is no canned fallback anywhere: a model failure is a failed job.
 """
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -395,6 +396,21 @@ async def _valid_json_call(
 
 # --- stage handlers --------------------------------------------------------
 
+# Critic verdicts that bench an idea before any persona spend. consent_ask is
+# also enforced deterministically below — both prompt layers are probabilistic.
+SUPPRESSING_BLOCK_KINDS = ("ungrounded", "unreviewed", "per_pro_data", "consent_ask")
+
+_CONSENT_ASK = re.compile(
+    r"\b(opt[ -]?in|consent|permission to (text|message|contact))\b", re.IGNORECASE
+)
+
+
+def _is_consent_ask(idea: Recommendation) -> bool:
+    """Deterministic consent-ask gate on the pro-facing surfaces of an idea.
+    manager_rationale/risk are excluded: they may legitimately discuss the
+    Pro's consent STATE without the touch asking for consent."""
+    return bool(_CONSENT_ASK.search(" ".join([idea.title, idea.pro_facing_concept, *idea.actions])))
+
 
 async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     if state.brief is None:
@@ -474,11 +490,19 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         if "block_kind" not in verdict:
             # Fail closed on a verdict that parsed but is missing the field.
             verdict = {"block_kind": "unreviewed", "reason": "malformed verdict"}
+        if verdict["block_kind"] not in SUPPRESSING_BLOCK_KINDS and _is_consent_ask(idea):
+            # Deterministic backstop: the prompt-level ban and the critic are
+            # both probabilistic, and the critic labels only the PRIMARY
+            # problem — a consent-ask idea must never reach the panel.
+            verdict = {
+                "block_kind": "consent_ask",
+                "reason": "deterministic gate: idea asks for messaging consent/opt-in",
+            }
 
         score: CandidateScore | None = None
         panel = None
         reactions: list[float] | None = None
-        if verdict["block_kind"] in ("ungrounded", "unreviewed", "per_pro_data", "consent_ask"):
+        if verdict["block_kind"] in SUPPRESSING_BLOCK_KINDS:
             outcome, score_pp = "suppressed", None  # a loss, no persona spend
         else:
             try:
@@ -658,6 +682,30 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     return {}
 
 
+def _degraded_panel_notes(persona_evidence: dict[str, Any] | None) -> dict[str, str]:
+    """Reviewer-facing notes per stage whose panel ran short-handed. Named
+    honestly: a missing counterweight and a final check that re-used the
+    screen's exact personas both void invariants the full panel guarantees."""
+    notes: dict[str, str] = {}
+    members: dict[str, set[str]] = {}
+    for stage, stage_evidence in (persona_evidence or {}).items():
+        panel = stage_evidence.get("panel", {})
+        if not panel.get("degraded"):
+            continue
+        items = panel.get("items", [])
+        qualified = [item for item in items if item.get("role") != "backfill"]
+        note = f"only {len(qualified)} of {panel.get('requested_size')} personas qualified"
+        if len(items) > len(qualified):
+            note += f", {len(items) - len(qualified)} below-threshold backfill seat(s)"
+        if not any(item.get("role") == "counterweight" for item in items):
+            note += ", no counterweight on the panel"
+        notes[stage] = note
+        members[stage] = {item.get("persona_id") for item in items}
+    if {"screen", "final"} <= members.keys() and members["screen"] == members["final"]:
+        notes["final"] += "; final check reused the screen panel (not held out)"
+    return notes
+
+
 async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     if await deps.store.winner_for(state.run.id, state.pro_id) is not None:
         return {}
@@ -684,14 +732,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     if isinstance(outcome, Winner):
         # A stage that ran on a short-handed panel is flagged on the winner —
         # the output still ships, with the disclaimer, instead of abstaining.
-        degraded_panels = {
-            stage: (
-                f"only {len(panel.get('items', []))} of "
-                f"{panel.get('requested_size')} personas qualified"
-            )
-            for stage, stage_evidence in (champion.persona_evidence or {}).items()
-            if (panel := stage_evidence.get("panel", {})).get("degraded")
-        }
+        degraded_panels = _degraded_panel_notes(champion.persona_evidence)
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
