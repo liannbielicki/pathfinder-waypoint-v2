@@ -10,11 +10,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -44,6 +46,7 @@ class RunRow(Base):
     audience_query: Mapped[str]
     audience_run: Mapped[str]
     channels: Mapped[list[str]]
+    journey_window: Mapped[str] = mapped_column(default="churn_risk")
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
@@ -103,6 +106,9 @@ class EvolveRoundRow(Base):
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"), default=None)
     outcome: Mapped[str]  # win | lose | suppressed | unavailable
     score_pp: Mapped[float | None] = mapped_column(Numeric(8, 4, asdecimal=False), default=None)
+    # Batch-ranking evidence for the round decision: rank order, ranker scores,
+    # tie margin/decision, finalists, and the selection reason.
+    ranking: Mapped[dict[str, Any]] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -110,7 +116,11 @@ class LlmCallRow(Base):
     """Durable paid-call lifecycle: pending → committed → reconciled | abandoned."""
 
     __tablename__ = "llm_calls"
-    __table_args__ = (UniqueConstraint("call_key", name="uq_llm_calls_key"),)
+    __table_args__ = (
+        UniqueConstraint("call_key", name="uq_llm_calls_key"),
+        # backs abandon_stale / replay lookups, which filter (run_id, pro_id, status)
+        Index("ix_llm_calls_run_pro_status", "run_id", "pro_id", "status"),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     call_key: Mapped[str]
@@ -129,8 +139,21 @@ class LlmCallRow(Base):
 
 
 class WinnerRow(Base):
+    """A winner is warm-start eligible ONLY after outcomes.ingest observes a
+    real 7-day return; nothing on the scoring path may set eligibility.
+    fingerprint carries the sanitized band allowlist (warmstart.py) so
+    cross-org retrieval never joins back into org-scoped rows."""
+
     __tablename__ = "winners"
-    __table_args__ = (UniqueConstraint("run_id", "pro_id", name="uq_winners_run_pro"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "pro_id", name="uq_winners_run_pro"),
+        Index(
+            "ix_winners_warm_start",
+            "fingerprint_version",
+            text("created_at DESC"),
+            postgresql_where=text("warm_start_eligible"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
@@ -139,6 +162,12 @@ class WinnerRow(Base):
     kind: Mapped[str]  # winner | no_action | abstained
     rationale: Mapped[str] = mapped_column(default="")
     evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    fingerprint: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    fingerprint_version: Mapped[str | None] = mapped_column(default=None)
+    warm_start_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    warm_start_evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    # None = pending | "validated" = observed 7d return | "validated_negative"
+    validation_status: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -195,4 +224,65 @@ class UsageRow(Base):
     cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class TouchOutcomeRow(Base):
+    """One observed outcome record per (recommendation, source). Horizon fields
+    are tri-state: True/False are measured facts, None means not yet measurable.
+    evidence_limitation labels records that cannot honestly claim attribution."""
+
+    __tablename__ = "touch_outcomes"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "source", name="uq_touch_outcomes_rec_source"),
+        Index(
+            "ix_touch_outcomes_window_channel_created_at",
+            "journey_window",
+            "channel",
+            text("created_at DESC"),
+            postgresql_where=text("evidence_limitation IS NULL"),
+        ),
+        Index(
+            "ix_touch_outcomes_pro_id_evidence_limitation",
+            "pro_id",
+            "evidence_limitation",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    recommendation_id: Mapped[str]  # Waypoint winner_id carried through LCM → Iterable
+    source: Mapped[str]  # e.g. "iterable_n8n", "manual"
+    run_id: Mapped[str | None] = mapped_column(default=None)
+    pro_id: Mapped[str] = mapped_column(default="")
+    org_id: Mapped[str] = mapped_column(default="")
+    journey_window: Mapped[str] = mapped_column(default="churn_risk")
+    channel: Mapped[str] = mapped_column(default="")
+    mechanism: Mapped[str] = mapped_column(default="")
+    churn_risk_state: Mapped[str | None] = mapped_column(default=None)
+    sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    delivered: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    clicked: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    replied: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    unsubscribed: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_7d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_14d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_30d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    returned_90d: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    evidence_limitation: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class PersonaEvalRow(Base):
+    """Cached persona reactions keyed by (prompt version, panel ids, concept,
+    channel) hash — spec: reuse persona evaluation where the persona, journey
+    state, and touch pattern are materially equivalent."""
+
+    __tablename__ = "persona_evals"
+    __table_args__ = (UniqueConstraint("cache_key", name="uq_persona_evals_key"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    cache_key: Mapped[str]
+    reactions: Mapped[dict[str, Any]]  # persona_id -> reaction number
+    snapshot_version: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

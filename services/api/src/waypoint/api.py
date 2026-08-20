@@ -28,7 +28,9 @@ from waypoint.models import (
     HandoffReceipt,
     RunCreate,
     RunView,
+    TouchOutcomeIn,
 )
+from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
 from waypoint.tables import (
     CandidateRow,
@@ -74,6 +76,7 @@ def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
         cost_spent_usd=run.cost_spent if spent is None else spent,
         stop_reason=run.stop_reason,
         created_at=run.created_at,
+        journey_window=run.journey_window,
     )
 
 
@@ -175,6 +178,7 @@ def create_app(
             audience_query=body.audience_query,
             audience_run=body.audience_run,
             channels=body.channels,
+            journey_window=body.journey_window,
             loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )
@@ -276,6 +280,9 @@ def create_app(
                     "candidate_id": w.candidate_id,
                     "rationale": w.rationale,
                     "evidence": w.evidence,
+                    "warm_start_eligible": w.warm_start_eligible,
+                    "validation_status": w.validation_status,
+                    "fingerprint_version": w.fingerprint_version,
                 }
                 for w in winners
             ],
@@ -313,6 +320,14 @@ def create_app(
                 job.status = "stopped"
         await session.commit()
         return _view(run, spent=await _spent(session, run))
+
+    @app.post("/api/outcomes", status_code=202)
+    async def ingest_outcomes(
+        body: list[TouchOutcomeIn], session: SessionDep, _: AuthDep
+    ) -> dict[str, int]:
+        """Observed messaging/app-usage outcomes, keyed by recommendation_id.
+        See waypoint.outcomes for the attribution/backfill/idempotency logic."""
+        return await ingest_outcomes_batch(session, body)
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(

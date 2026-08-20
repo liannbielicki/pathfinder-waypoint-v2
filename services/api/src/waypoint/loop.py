@@ -9,8 +9,21 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 _KEYS = frozenset(
-    {"MAX_ROUNDS", "MAX_NO_IMPROVE", "PATIENCE", "KEEP_DELTA_PP", "WIN_THRESHOLD_PP"}
+    {
+        "MAX_ROUNDS",
+        "MAX_NO_IMPROVE",
+        "PATIENCE",
+        "KEEP_DELTA_PP",
+        "WIN_THRESHOLD_PP",
+        "CANDIDATE_COUNT",
+        "TIE_MARGIN",
+        "WARM_START_THRESHOLD",
+    }
 )
+
+# Safety ceiling on the per-round idea batch: an operator typo (or a bad
+# default merge) must never turn one round into an unbounded generation bill.
+MAX_CANDIDATE_COUNT = 10
 
 
 @dataclass(frozen=True)
@@ -20,6 +33,9 @@ class LoopConfig:
     patience: int
     keep_delta_pp: float
     win_threshold_pp: float
+    candidate_count: int
+    tie_margin: float
+    warm_start_threshold: float
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> LoopConfig:
@@ -33,9 +49,20 @@ class LoopConfig:
             patience=int(merged["PATIENCE"]),
             keep_delta_pp=float(merged["KEEP_DELTA_PP"]),
             win_threshold_pp=float(merged["WIN_THRESHOLD_PP"]),
+            candidate_count=int(merged["CANDIDATE_COUNT"]),
+            tie_margin=float(merged["TIE_MARGIN"]),
+            warm_start_threshold=float(merged["WARM_START_THRESHOLD"]),
         )
         if config.patience < 1:
             raise ValueError("PATIENCE must be >= 1")
+        if config.candidate_count < 1:
+            raise ValueError("CANDIDATE_COUNT must be a positive integer")
+        if config.candidate_count > MAX_CANDIDATE_COUNT:
+            raise ValueError(f"CANDIDATE_COUNT must be <= {MAX_CANDIDATE_COUNT}")
+        if not 0 <= config.tie_margin <= 1:
+            raise ValueError("TIE_MARGIN must be between 0 and 1 (ranker scores are 0-1)")
+        if not 0 <= config.warm_start_threshold <= 1:
+            raise ValueError("WARM_START_THRESHOLD must be between 0 and 1 (similarity is 0-1)")
         if (
             min(
                 config.max_rounds,
@@ -57,6 +84,9 @@ class LoopConfig:
             "PATIENCE": self.patience,
             "KEEP_DELTA_PP": self.keep_delta_pp,
             "WIN_THRESHOLD_PP": self.win_threshold_pp,
+            "CANDIDATE_COUNT": self.candidate_count,
+            "TIE_MARGIN": self.tie_margin,
+            "WARM_START_THRESHOLD": self.warm_start_threshold,
         }
 
 
@@ -66,6 +96,9 @@ DEFAULT_LOOP_CONFIG = LoopConfig(
     patience=1,
     keep_delta_pp=0.5,
     win_threshold_pp=15.0,
+    candidate_count=3,
+    tie_margin=0.05,
+    warm_start_threshold=0.75,
 )
 
 
@@ -102,10 +135,16 @@ def apply_round(
     score_pp: float | None,
     outcome: str,
     config: LoopConfig,
+    also_tried: Sequence[str] = (),
 ) -> LoopState:
+    # also_tried: the round's other generated mechanisms. They were proposed,
+    # critiqued and ranked, so a later SHIFT must forbid them or it re-proposes
+    # and re-pays for the same losers every round. Only `mechanism` drives the
+    # win / patience / dry bookkeeping below.
     tried = state.tried_mechanisms
-    if mechanism not in tried:
-        tried = (*tried, mechanism)
+    for name in (mechanism, *also_tried):
+        if name not in tried:
+            tried = (*tried, name)
     if outcome == "win":
         return replace(
             state,
@@ -145,6 +184,16 @@ class RoundLike(Protocol):
     candidate_id: str | None
     score_pp: float | None
     outcome: str
+    ranking: dict[str, Any]
+
+
+def _round_also_tried(ranking: dict[str, Any]) -> list[str]:
+    """The round's non-challenger mechanisms, recovered from its audit trail.
+    Live execution feeds these to apply_round as `also_tried`; replay must too,
+    or a resumed SHIFT re-proposes and re-pays for mechanisms already generated,
+    critiqued and ranked. Suppressed ideas never reach `order`, but they are
+    re-gated for free on re-proposal, so omitting them costs no paid call."""
+    return [o["mechanism"] for o in ranking.get("order", ()) if o.get("mechanism")]
 
 
 def replay(rounds: Sequence[RoundLike], config: LoopConfig) -> LoopState:
@@ -158,5 +207,6 @@ def replay(rounds: Sequence[RoundLike], config: LoopConfig) -> LoopState:
             score_pp=row.score_pp,
             outcome=row.outcome,
             config=config,
+            also_tried=_round_also_tried(getattr(row, "ranking", None) or {}),
         )
     return state

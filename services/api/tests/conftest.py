@@ -22,6 +22,8 @@ _TABLES = (
     "evolve_rounds",
     "llm_calls",
     "candidates",
+    "touch_outcomes",
+    "persona_evals",
     "runs",
     "llm_usage",
     "fleet_control",
@@ -88,7 +90,7 @@ from waypoint.tables import FleetControlRow, RunRow
 FIXTURES = Path(__file__).parent / "fixtures"
 
 FAKE_PRICING = Pricing(
-    models={"fast": "model-fast", "deep": "model-deep"},
+    models={"fast": "model-fast", "deep": "model-deep", "rank": "model-fast"},
     usd_per_mtok={
         "model-fast": (Decimal(10), Decimal(20)),
         "model-deep": (Decimal(30), Decimal(60)),
@@ -127,11 +129,52 @@ def idea_json(mechanism: str, i: int = 0) -> str:
     )
 
 
+def batch_json(mechanisms: list[str]) -> str:
+    """One evolve-round batch, as the model would return it: a JSON array with
+    one idea per mechanism."""
+    return json.dumps([json.loads(idea_json(m, i)) for i, m in enumerate(mechanisms)])
+
+
+def critics_json(block_kinds: list[str]) -> str:
+    """One verdict per idea_index, in batch order."""
+    return json.dumps(
+        [
+            {"idea_index": i, "block_kind": kind, "reason": f"verdict {kind}"}
+            for i, kind in enumerate(block_kinds)
+        ]
+    )
+
+
+def rank_json(*pairs: tuple[str, float], tie: bool = False, tie_reason: str = "") -> str:
+    """A ranker decision over positional tokens, best first."""
+    return json.dumps(
+        {
+            "ranking": [
+                {"candidate_id": token, "rank": i + 1, "score": score}
+                for i, (token, score) in enumerate(pairs)
+            ],
+            "tie": tie,
+            "tie_reason": tie_reason,
+        }
+    )
+
+
+DEFAULT_MECHANISMS = ["invoice_delivery", "review_requests", "feature_adoption"]
+BATCH_OK = batch_json(DEFAULT_MECHANISMS)
+RANK_OK = rank_json(("c1", 0.9), ("c2", 0.5), ("c3", 0.2))
 CRITIC_OK = json.dumps([{"idea_index": 0, "block_kind": "none", "reason": "grounded"}])
 CRITIC_BLOCK = json.dumps(
     [{"idea_index": 0, "block_kind": "ungrounded", "reason": "invented AR balance"}]
 )
 MEASURE_JSON = json.dumps({"indicators": [{"key": "invoices_sent"}]})
+WARGAME_JSON = json.dumps({
+    "on_return": {"action": "Send a congratulations nudge toward the feature used",
+                  "channel": "email"},
+    "on_click_no_use": {"action": "One simpler ask focused on a single first step",
+                        "channel": "sms"},
+    "on_no_interaction": {"action": "One alternate mechanism touch", "channel": "sms"},
+    "on_negative": {"action": "stop", "channel": "none"},
+})
 
 
 def reactions_json(value: float) -> str:
@@ -143,18 +186,21 @@ class FakeLLM:
 
     A response value may be a str (returned every call), a list (consumed one
     per call; the last entry repeats), or an Exception inside a list (raised
-    on that call). Stages: evolve (generation), critics, screen, final, measure.
+    on that call). Stages: evolve (batched generation), critics, rank, screen,
+    final, measure.
     """
 
     def __init__(self) -> None:
         self.calls: list[dict] = []  # stage, tier, temperature, prompt
         self._fail: set[str] = set()
         self.responses: dict[str, object] = {
-            "evolve": [idea_json("invoice_delivery")],
-            "critics": CRITIC_OK,
+            "evolve": [BATCH_OK],
+            "critics": critics_json(["none"] * len(DEFAULT_MECHANISMS)),
+            "rank": RANK_OK,
             "screen": [reactions_json(5.3)],
             "final": reactions_json(5.3),
             "measure": MEASURE_JSON,
+            "wargame": WARGAME_JSON,
         }
 
     @property

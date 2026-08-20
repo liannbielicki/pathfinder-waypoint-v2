@@ -29,6 +29,45 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   );
 }
 
+// Distinct evolve rounds among a Pro's candidates. CANDIDATE_COUNT candidate
+// rows are persisted per round (round is stamped on each), so a naive
+// candidates.length overcounts rounds by that factor. Rows without a round
+// (legacy data) fall back to one-row-one-round, same as before this fix.
+function countRounds(candidates: Candidate[]): number {
+  const withRound = new Set(
+    candidates.filter((c) => c.round != null).map((c) => c.round),
+  );
+  const withoutRound = candidates.filter((c) => c.round == null).length;
+  return withRound.size + withoutRound;
+}
+
+// Rounds bucketed by what actually happened in them, so the three counts
+// partition `rounds`. A batch round persists CANDIDATE_COUNT candidates and
+// screens only the ranked finalist(s): the discarded non-finalists are normal
+// operation, NOT missing evidence. So a round is only "could not be evaluated"
+// when nothing in it was screened, and only "critic-suppressed" when the critic
+// suppressed everything in it.
+function roundBuckets(candidates: Candidate[]): {
+  screened: number;
+  suppressed: number;
+  unevaluated: number;
+} {
+  const byRound = new Map<string, Candidate[]>();
+  candidates.forEach((c, i) => {
+    const key = c.round != null ? `r${c.round}` : `legacy${i}`;
+    byRound.set(key, [...(byRound.get(key) ?? []), c]);
+  });
+  let screened = 0;
+  let suppressed = 0;
+  let unevaluated = 0;
+  for (const group of byRound.values()) {
+    if (group.some((c) => c.score?.screen)) screened += 1;
+    else if (group.every((c) => c.status === "suppressed")) suppressed += 1;
+    else unevaluated += 1;
+  }
+  return { screened, suppressed, unevaluated };
+}
+
 function Rounds({ rounds, championRound }: { rounds: number; championRound?: number }) {
   if (rounds === 0) return null;
   return (
@@ -89,18 +128,15 @@ function NoActionCard({
   winner: Winner;
   proCandidates: Candidate[];
 }) {
-  const rounds = proCandidates.length;
+  const rounds = countRounds(proCandidates);
   const champion = proCandidates.find((c) => c.status === "champion");
   const finalScore = champion?.score?.final;
-  const screened = proCandidates.filter((c) => c.score?.screen).length;
-  const suppressed = proCandidates.filter((c) => c.status === "suppressed").length;
-  const unevaluated = proCandidates.filter(
-    (c) => c.status === "discarded" && !c.score?.screen,
-  ).length;
+  const { screened, suppressed, unevaluated } = roundBuckets(proCandidates);
   const ending = noActionEnding(winner.rationale, champion, screened, rounds);
   return (
     <div className="card">
       <h4>No action for {winner.pro_id}</h4>
+      <p>No action is a legitimate outcome, not an error — Waypoint stopped on purpose.</p>
       <p>
         <strong>{ending[0]}</strong> {ending[1]}
       </p>
@@ -212,8 +248,9 @@ export function WinnerReview({
     (w) => w.kind === "winner" && measuredWinnerIds.has(w.id),
   );
   const candidateById = new Map(run.candidates.map((c) => [c.id, c]));
-  // One candidate row is persisted per evolve round, so candidates-per-Pro is
-  // both the loop count and the evidence trail for that result.
+  // CANDIDATE_COUNT candidate rows are persisted per evolve round, so
+  // candidates-per-Pro is the evidence trail for that result but not the
+  // round count — see countRounds.
   const candidatesByPro = new Map<string, Candidate[]>();
   for (const c of run.candidates) {
     const list = candidatesByPro.get(c.pro_id) ?? [];
@@ -230,7 +267,7 @@ export function WinnerReview({
           key={winner.id}
           winner={winner}
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
-          rounds={(candidatesByPro.get(winner.pro_id) ?? []).length}
+          rounds={countRounds(candidatesByPro.get(winner.pro_id) ?? [])}
           proCandidates={candidatesByPro.get(winner.pro_id) ?? []}
         />
       ))}

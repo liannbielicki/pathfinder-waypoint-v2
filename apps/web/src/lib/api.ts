@@ -106,7 +106,13 @@ export const login = (password: string) =>
     body: JSON.stringify({ password }),
   });
 
-export const createRun = (body: RunCreate) =>
+// journey_window postdates the generated api-types.ts; regenerate from the
+// live OpenAPI schema to fold it into RunCreate proper.
+export type RunCreateInput = RunCreate & {
+  journey_window?: "churn_risk" | "churn_risk_open" | "onboarding" | "upsell";
+};
+
+export const createRun = (body: RunCreateInput) =>
   api<RunView>("/runs", { method: "POST", body: JSON.stringify(body) });
 
 export interface FleetSettings {

@@ -93,10 +93,12 @@ def test_evolve_prompt_stay_refines_the_best_mechanism() -> None:
         history_json=HISTORY,
         tried_mechanisms=["invoice_delivery"],
         channels=["sms"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
     )
     assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
     assert "160" in prompt  # sms-only run shapes the idea for a brief text
-    assert "exactly ONE" in prompt or "exactly one" in prompt
+    assert "exactly 1" in prompt
     assert "invoice_delivery" in prompt  # the mechanism being refined
     assert BEST in prompt
     assert HISTORY in prompt
@@ -116,6 +118,8 @@ def test_evolve_prompt_shift_forbids_tried_mechanisms() -> None:
         history_json="[]",
         tried_mechanisms=["invoice_delivery", "review_requests"],
         channels=["email"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
     )
     assert "forbidden" in prompt.lower()
     assert "invoice_delivery" in prompt and "review_requests" in prompt
@@ -125,3 +129,91 @@ def test_search_directive_prompt_is_deleted() -> None:
     from waypoint import prompts
 
     assert not hasattr(prompts, "search_directive_prompt")
+
+
+def test_evolve_prompt_carries_window_and_evidence() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="stay",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms"],
+        journey_window="churn_risk",
+        evidence="- invoice_delivery via sms: 4 sent, 7d return 2/3",
+    )
+    assert "churn_risk" in prompt
+    assert "invoice_delivery via sms" in prompt
+
+
+def test_evolve_prompt_batch_demands_distinct_mechanisms() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="shift",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=["invoice_delivery"],
+        channels=["sms", "email"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
+        count=3,
+    )
+    assert "exactly 3" in prompt
+    assert "JSON array" in prompt
+    assert "distinct" in prompt.lower()
+    # Fences + grounding + two-layer split all survive at count > 1.
+    assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
+    assert "GROUNDING" in prompt
+    assert "pro_facing_concept" in prompt
+    assert "manager_rationale" in prompt
+
+
+def test_evolve_prompt_stay_batch_refines_first_and_diversifies_rest() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="stay",
+        best_json=BEST,
+        history_json=HISTORY,
+        tried_mechanisms=["invoice_delivery"],
+        channels=["sms"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available for this journey window yet.",
+        count=3,
+    )
+    assert "FIRST idea" in prompt
+    assert "DIFFERENT grounded mechanism" in prompt
+    assert "exactly 3" in prompt
+
+
+def test_ranker_prompt_fences_candidates_and_states_output_contract() -> None:
+    from waypoint.prompts import ranker_prompt
+
+    prompt = ranker_prompt(
+        org_context="{}",
+        candidates_json='[{"candidate_id": "c1"}, {"candidate_id": "c2"}]',
+        journey_window="churn_risk",
+        evidence="- invoice_delivery via sms: 4 sent, 7d return 2/3",
+    )
+    assert UNTRUSTED_START in prompt and UNTRUSTED_END in prompt
+    assert "c1" in prompt and "c2" in prompt
+    assert "churn_risk" in prompt
+    assert "invoice_delivery via sms" in prompt
+    assert "exactly once" in prompt
+    assert "0-1 scale" in prompt
+    assert '"tie": bool' in prompt
+    assert "EXPLICIT" in prompt
+
+
+def test_war_game_prompt_demands_bounded_branches() -> None:
+    from waypoint.prompts import war_game_prompt
+
+    prompt = war_game_prompt("{}", '{"title": "t"}', ["sms"])
+    for branch in ("on_return", "on_click_no_use", "on_no_interaction", "on_negative"):
+        assert branch in prompt
+    assert "stop" in prompt

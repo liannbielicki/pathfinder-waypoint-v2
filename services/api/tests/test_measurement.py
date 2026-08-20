@@ -114,3 +114,13 @@ async def test_prompt_offers_only_the_finite_catalog(fake_llm: FakeMeasureLLM) -
     for key in METRIC_CATALOG:
         assert key in prompt
     assert "invoice_delivery" in prompt
+
+
+def test_return_to_app_indicators_exist_and_label_their_limitation() -> None:
+    assert METRIC_CATALOG["app_return"].window_days == 7
+    assert METRIC_CATALOG["app_continued_use"].window_days == 30
+    for key in ("app_return", "app_continued_use"):
+        indicator = METRIC_CATALOG[key]
+        assert indicator.source == "amplitude"
+        assert indicator.direction == "increase"
+        assert "pending" in indicator.rationale.lower()

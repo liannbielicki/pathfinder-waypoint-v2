@@ -8,7 +8,8 @@ from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import PENDING_AUDIENCE_QUERY
-from waypoint.pipeline import finalize_run, run_job
+from waypoint.personas import PanelItem, PanelSelection
+from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
     CandidateRow,
@@ -17,9 +18,12 @@ from waypoint.tables import (
     JobRow,
     LlmCallRow,
     MeasurementRow,
+    PersonaEvalRow,
     RunRow,
+    TouchOutcomeRow,
     WinnerRow,
 )
+from waypoint.warmstart import FINGERPRINT_VERSION
 
 from .conftest import (
     CRITIC_BLOCK,
@@ -45,6 +49,13 @@ async def candidate_count(session: AsyncSession, run_id: str) -> int:
             select(func.count()).select_from(CandidateRow).where(CandidateRow.run_id == run_id)
         )
     ).scalar_one()
+
+
+async def set_loop_config(deps: FakeDeps, run_id: str, **overrides) -> None:
+    run = await deps.db.get(RunRow, run_id)
+    assert run is not None
+    run.loop_config = {**(run.loop_config or {}), **overrides}
+    await deps.db.commit()
 
 
 async def rounds(session: AsyncSession, run_id: str) -> list[EvolveRoundRow]:
@@ -93,6 +104,16 @@ async def test_happy_path_completes_with_champion_and_measurement(
     assert winner.kind == "winner"
     assert winner.candidate_id is not None
     assert winner.evidence["final"]["reduction_pp"] > 1.0
+    # Scoring stamps the sanitized fingerprint but NEVER eligibility — that is
+    # earned only from an observed 7d return in outcome ingestion.
+    assert winner.fingerprint == {
+        "segment": "1A", "vertical": "hvac", "plan_tier": "basic",
+        "tenure_band": "0-3m", "org_size_band": "solo", "open_ar_band": "low",
+        "feature_adoption_band": "medium",
+    }
+    assert winner.fingerprint_version == FINGERPRINT_VERSION
+    assert winner.warm_start_eligible is False
+    assert winner.validation_status is None
     measurement = (
         await deps.db.execute(
             select(MeasurementRow).where(MeasurementRow.run_id == seeded_job.run_id)
@@ -149,6 +170,9 @@ async def test_win_stays_then_loss_shifts_and_forbids_tried_mechanisms(
     deps: FakeDeps,
     seeded_job,
 ) -> None:
+    # One idea per round: this is a loop-sequencing test, so the generation
+    # prompts map 1:1 to rounds and the ranker stays out of the way.
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     deps.gateway.responses["evolve"] = [
         idea_json("invoice_delivery", 1),
         idea_json("invoice_delivery", 2),
@@ -273,13 +297,17 @@ async def test_run_loop_config_snapshot_beats_fleet_defaults(
 
 
 async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seeded_job) -> None:
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     deps.gateway.responses["critics"] = [CRITIC_BLOCK, CRITIC_OK]
     deps.gateway.responses["screen"] = [reactions_json(LOSE)]
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].outcome == "suppressed"
-    # One suppressed round + lose rounds: screens = rounds − suppressed.
-    assert deps.gateway.calls_for("screen") == len(ledger) - 1
+    # One suppressed round + lose rounds, but the fixture's evolve idea never
+    # changes across rounds: after the first paid screen, later rounds hit the
+    # persona reaction cache (same panel+concept+channel), so spend stays at 1
+    # regardless of how many non-suppressed rounds ran.
+    assert deps.gateway.calls_for("screen") == 1
     suppressed = (
         (
             await deps.db.execute(
@@ -299,9 +327,12 @@ async def test_consent_ask_idea_is_suppressed_deterministically(
 ) -> None:
     # The critic approves ("none") but the idea's pro-facing surface asks for
     # SMS opt-in: the deterministic gate must bench it with no persona spend.
+    # Pinned to a single-idea round so the whole batch is the consent idea and
+    # the round's only outcome is its deterministic suppression.
+    await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1, CANDIDATE_COUNT=1)
     consent_idea = json.loads(idea_json("invoice_delivery"))
     consent_idea["pro_facing_concept"] = "Reply YES to opt in to text updates."
-    deps.gateway.responses["evolve"] = [json.dumps(consent_idea), idea_json("job_reminders")]
+    deps.gateway.responses["evolve"] = [json.dumps(consent_idea)]
     deps.gateway.responses["critics"] = CRITIC_OK
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
@@ -393,7 +424,8 @@ async def test_evolve_retries_model_output_missing_a_required_field(
     fresh call key (the same key would replay the cached bad response) and the
     run completes."""
     run = await deps.db.get(RunRow, seeded_job.run_id)
-    run.loop_config = {"WIN_THRESHOLD_PP": 3.0}  # win on round 1 → single round
+    # win on round 1 → single round; one idea per round → one re-ask, no refills
+    run.loop_config = {"WIN_THRESHOLD_PP": 3.0, "CANDIDATE_COUNT": 1}
     await deps.db.commit()
     deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS, idea_json("invoice_delivery")]
     deps.gateway.responses["screen"] = [reactions_json(GREAT)]
@@ -770,3 +802,201 @@ async def test_budget_exhausted_on_deep_final_never_falls_back(
     await run_job(seeded_job.id, deps)
     assert [c["tier"] for c in deps.gateway.calls if c["stage"] == "final"] == ["deep"]
     assert await run_status(deps.db, seeded_job.run_id) == "stopped"
+
+
+async def test_gate_blocked_pro_abstains_without_spend(deps: FakeDeps, seeded_job) -> None:
+    # Make the only run channel affirmatively non-consented for this pro.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"sms_consent_state": "opted_out"}
+    )
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "abstained"
+    assert winner.rationale.startswith("infeasible:")
+    assert deps.gateway.call_count == 0  # zero LLM spend before the gate
+
+
+async def test_infeasible_channel_candidate_is_suppressed_without_panel(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Generator ignores the directive and emits an email idea on an sms-only,
+    # email-blocked pro: suppressed without critic or persona spend.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"email_consent_state": "unsubscribed"}
+    )
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+    email_idea = json.loads(idea_json("invoice_delivery"))
+    email_idea["channel"] = "email"
+    deps.gateway.responses["evolve"] = [json.dumps(email_idea)]
+    await run_job(seeded_job.id, deps)
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalars().first()
+    assert candidate is not None
+    assert candidate.status == "suppressed"
+    assert candidate.critics["block_kind"] == "infeasible_channel"
+    assert deps.gateway.calls_for("critics") == 0
+    assert deps.gateway.calls_for("screen") == 0
+
+
+async def test_recently_failed_mechanism_is_suppressed(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    db_session.add(TouchOutcomeRow(
+        recommendation_id="old-w", source="test", pro_id="pro_1",
+        channel="sms", mechanism="invoice_delivery", journey_window="churn_risk",
+        unsubscribed=True,
+    ))
+    await db_session.commit()
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+    # FakeLLM's default evolve batch leads with mechanism "invoice_delivery".
+    await run_job(seeded_job.id, deps)
+    candidates = (await db_session.execute(
+        select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id)
+    )).scalars().all()
+    suppressed = [c for c in candidates if c.critics.get("block_kind") == "recently_failed"]
+    assert suppressed  # the failed mechanism never reached the panel
+    assert all(c.persona_evidence == {} for c in suppressed)
+
+
+async def test_evidence_reaches_the_evolve_prompt(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    db_session.add(TouchOutcomeRow(
+        recommendation_id="old-w", source="test", pro_id="someone_else",
+        channel="sms", mechanism="review_boost", journey_window="churn_risk",
+        returned_7d=True,
+    ))
+    await db_session.commit()
+    await run_job(seeded_job.id, deps)
+    prompts = deps.gateway.prompts_for("evolve")
+    assert prompts and "review_boost via sms" in prompts[0]
+
+
+async def test_persona_reactions_are_cached_across_jobs(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    await run_job(seeded_job.id, deps)
+    screen_calls_first = deps.gateway.calls_for("screen")
+    assert screen_calls_first > 0
+    cached = (await db_session.execute(select(PersonaEvalRow))).scalars().all()
+    assert cached  # every paid reaction round left a cache row
+
+    # Second identical run: same brief, same fake ideas -> same panel+concept.
+    run2 = RunRow(
+        id="run-pipe-2",
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms"],
+        cost_limit=Decimal("100.00"),
+    )
+    db_session.add(run2)
+    await db_session.flush()
+    job2 = await enqueue(db_session, run2.id, stage="pro", pro_id="pro_1")
+    await db_session.commit()
+    await run_job(job2, deps)
+    # No new screen/final spend: reactions came from the cache.
+    assert deps.gateway.calls_for("screen") == screen_calls_first
+
+
+def test_reaction_cache_key_changes_with_snapshot_version_and_tier() -> None:
+    panel = PanelSelection(
+        items=[
+            PanelItem(
+                persona_id="p1",
+                label="Persona 1",
+                family="fam",
+                role="closest",
+                fit_score=0.9,
+                rationale="r",
+            )
+        ],
+        fit_threshold=0.5,
+        snapshot_version="v1",
+        match_features={},
+    )
+    base = _reaction_cache_key(panel, "concept", "sms", "deep")
+
+    # Persona cards changed (new snapshot) but PROMPT_VERSION didn't bump —
+    # the key must still change or a stale reaction is served forever.
+    newer_panel = panel.model_copy(update={"snapshot_version": "v2"})
+    assert _reaction_cache_key(newer_panel, "concept", "sms", "deep") != base
+
+    # Same panel/concept/channel but a different tier must not collide —
+    # a fast-tier reaction can't satisfy a later deep-tier lookup.
+    assert _reaction_cache_key(panel, "concept", "sms", "fast") != base
+
+
+async def test_winner_carries_bounded_follow_up(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await db_session.execute(
+            select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id, WinnerRow.kind == "winner")
+        )
+    ).scalar_one()
+    follow_up = winner.evidence["follow_up"]
+    assert set(follow_up) == {"on_return", "on_click_no_use", "on_no_interaction", "on_negative"}
+    assert follow_up["on_negative"] == {"action": "stop", "channel": "none"}
+
+
+async def test_war_game_failure_does_not_block_the_winner(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job
+) -> None:
+    deps.gateway.responses["wargame"] = "not json at all"
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await db_session.execute(
+            select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id, WinnerRow.kind == "winner")
+        )
+    ).scalar_one()
+    assert "follow_up" not in winner.evidence
+    assert "follow_up_unavailable" in winner.evidence
+    # The measurement plan still landed: the war game is additive, never blocking.
+    measurement = (
+        await db_session.execute(
+            select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
+        )
+    ).scalar_one()
+    assert measurement.indicators
+
+
+async def test_war_game_prompt_omits_channels_this_pro_opted_out_of(
+    db_session: AsyncSession, deps: FakeDeps
+) -> None:
+    # sms is opted out for this pro but the run still offers sms + email;
+    # _stage_evolve gates its own prompt, but the war game must re-gate too,
+    # or a follow_up branch can recommend the un-consented channel verbatim.
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"sms_consent_state": "opted_out"}
+    )
+    run = RunRow(
+        id="run-wargame-gate",
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms", "email"],
+        cost_limit=Decimal("100.00"),
+        loop_config={"CANDIDATE_COUNT": 1},
+    )
+    db_session.add(run)
+    db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await db_session.flush()
+    job_id = await enqueue(db_session, run.id, stage="pro", pro_id="pro_1")
+    await db_session.commit()
+
+    email_idea = json.loads(idea_json("invoice_delivery"))
+    email_idea["channel"] = "email"
+    deps.gateway.responses["evolve"] = [json.dumps(email_idea)]
+
+    await run_job(job_id, deps)
+    prompts = deps.gateway.prompts_for("wargame")
+    assert prompts  # the war game did run (winner exists, gate wasn't blocked)
+    assert '"sms"' not in prompts[0]

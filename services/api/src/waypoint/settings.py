@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     KILL_SWITCH: bool = False
     MODEL_FAST: str
     MODEL_DEEP: str
+    # The candidate ranker's model. Empty means "use MODEL_FAST". Every model
+    # is validated against the price table at startup (Pricing refuses
+    # unmeterable spend), so a typo fails loudly instead of billing blind.
+    # Provider stays the single audited Anthropic gateway — a second provider
+    # is a deliberate infra decision, not an env var.
+    MODEL_RANKER: str = ""
     APP_PASSWORD: SecretStr
     SESSION_KEY: SecretStr = Field(min_length=32)
     LOG_LEVEL: str = "INFO"

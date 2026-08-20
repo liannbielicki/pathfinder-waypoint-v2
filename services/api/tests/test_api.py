@@ -15,6 +15,7 @@ from waypoint.tables import (
     JobRow,
     MeasurementRow,
     RunRow,
+    TouchOutcomeRow,
     WinnerRow,
 )
 
@@ -104,6 +105,22 @@ async def test_run_detail_exposes_lifecycle_and_evidence(
     assert detail["candidates"] == []
     assert detail["winners"] == []
     assert detail["killed"] is False
+
+
+async def test_run_detail_winner_shows_warm_start_eligibility(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    db_session.add(
+        WinnerRow(run_id=created["id"], pro_id="pro_1", kind="winner",
+                  fingerprint_version="fp_v1")
+    )
+    await db_session.commit()
+    winner = (await auth_client.get(f"/api/runs/{created['id']}")).json()["winners"][0]
+    assert winner["warm_start_eligible"] is False
+    assert winner["validation_status"] is None
+    assert winner["fingerprint_version"] == "fp_v1"
 
 
 async def test_unknown_run_is_404(auth_client: httpx.AsyncClient) -> None:
@@ -337,6 +354,9 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
         "PATIENCE": 1,
         "KEEP_DELTA_PP": 0.5,
         "WIN_THRESHOLD_PP": 15.0,
+        "CANDIDATE_COUNT": 3,
+        "TIE_MARGIN": 0.05,
+        "WARM_START_THRESHOLD": 0.75,
     }
 
 
@@ -413,3 +433,202 @@ async def test_stages_aggregate_across_per_pro_jobs(
     # A stage shows done only when EVERY job checkpointed it — an honest floor.
     assert "context" in detail["stages"]
     assert "evolve" not in detail["stages"]
+
+
+async def test_run_carries_journey_window(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post(
+        "/api/runs", json={**RUN_REQUEST, "journey_window": "onboarding"}
+    )
+    assert response.status_code == 202
+    assert response.json()["journey_window"] == "onboarding"
+
+
+async def test_run_defaults_journey_window(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post("/api/runs", json=RUN_REQUEST)
+    assert response.status_code == 202
+    assert response.json()["journey_window"] == "churn_risk"
+
+
+async def test_unknown_journey_window_is_rejected(auth_client: httpx.AsyncClient) -> None:
+    response = await auth_client.post(
+        "/api/runs", json={**RUN_REQUEST, "journey_window": "revenue_maximization"}
+    )
+    assert response.status_code == 422
+
+
+OUTCOME = {
+    "recommendation_id": "nonexistent-winner",
+    "source": "iterable_n8n",
+    "pro_id": "pro_1",
+    "channel": "sms",
+    "returned_7d": True,
+}
+
+
+async def test_outcomes_require_auth(client: httpx.AsyncClient) -> None:
+    assert (await client.post("/api/outcomes", json=[OUTCOME])).status_code == 401
+
+
+async def test_unattributed_outcome_is_stored_with_limitation(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    response = await auth_client.post("/api/outcomes", json=[OUTCOME])
+    assert response.status_code == 202
+    assert response.json() == {"stored": 1, "unattributed": 1}
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.evidence_limitation is not None
+    assert "matches no winner" in row.evidence_limitation
+
+
+async def test_attributed_outcome_backfills_from_winner(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    run = RunRow(pro_ids=["pro_1"], audience_query="q", audience_run="r",
+                 channels=["sms"], journey_window="churn_risk")
+    db_session.add(run)
+    await db_session.flush()
+    candidate = CandidateRow(
+        run_id=run.id, pro_id="pro_1", status="champion",
+        recommendation={"title": "t", "mechanism": "invoice_delivery", "actions": ["a"],
+                        "pro_facing_concept": "c", "manager_rationale": "m",
+                        "channel": "sms", "risk": ""},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(run_id=run.id, pro_id="pro_1", kind="winner",
+                       candidate_id=candidate.id, rationale="m")
+    db_session.add(winner)
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/outcomes",
+        json=[{**OUTCOME, "recommendation_id": winner.id}],
+    )
+    assert response.status_code == 202
+    assert response.json() == {"stored": 1, "unattributed": 0}
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.evidence_limitation is None
+    assert row.mechanism == "invoice_delivery"
+    assert row.journey_window == "churn_risk"
+    assert row.run_id == run.id
+
+
+async def test_attributed_outcome_via_row_id_alias_backfills_from_winner(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    run = RunRow(pro_ids=["pro_1"], audience_query="q", audience_run="r",
+                 channels=["sms"], journey_window="churn_risk")
+    db_session.add(run)
+    await db_session.flush()
+    candidate = CandidateRow(
+        run_id=run.id, pro_id="pro_1", status="champion",
+        recommendation={"title": "t", "mechanism": "invoice_delivery", "actions": ["a"],
+                        "pro_facing_concept": "c", "manager_rationale": "m",
+                        "channel": "sms", "risk": ""},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(run_id=run.id, pro_id="pro_1", kind="winner",
+                       candidate_id=candidate.id, rationale="m")
+    db_session.add(winner)
+    await db_session.commit()
+
+    outcome = {k: v for k, v in OUTCOME.items() if k != "recommendation_id"}
+    response = await auth_client.post(
+        "/api/outcomes",
+        json=[{**outcome, "row_id": winner.id}],
+    )
+    assert response.status_code == 202
+    assert response.json() == {"stored": 1, "unattributed": 0}
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.evidence_limitation is None
+    assert row.mechanism == "invoice_delivery"
+    assert row.journey_window == "churn_risk"
+    assert row.run_id == run.id
+
+
+async def test_outcome_resubmission_updates_in_place(auth_client: httpx.AsyncClient,
+                                                     db_session: AsyncSession) -> None:
+    await auth_client.post("/api/outcomes", json=[OUTCOME])
+    await auth_client.post("/api/outcomes", json=[{**OUTCOME, "returned_30d": False}])
+    rows = (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].returned_7d is True
+    assert rows[0].returned_30d is False
+
+
+async def test_attributed_outcome_without_channel_backfills_and_counts_as_evidence(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    run = RunRow(pro_ids=["pro_1"], audience_query="q", audience_run="r",
+                 channels=["sms"], journey_window="churn_risk")
+    db_session.add(run)
+    await db_session.flush()
+    candidate = CandidateRow(
+        run_id=run.id, pro_id="pro_1", status="champion",
+        recommendation={"title": "t", "mechanism": "invoice_delivery", "actions": ["a"],
+                        "pro_facing_concept": "c", "manager_rationale": "m",
+                        "channel": "sms", "risk": ""},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(run_id=run.id, pro_id="pro_1", kind="winner",
+                       candidate_id=candidate.id, rationale="m",
+                       evidence={"org_id": "org-42"})
+    db_session.add(winner)
+    await db_session.commit()
+
+    # No channel/org_id supplied by the source — the TouchOutcomeIn defaults.
+    outcome = {k: v for k, v in OUTCOME.items() if k != "channel"}
+    response = await auth_client.post(
+        "/api/outcomes", json=[{**outcome, "recommendation_id": winner.id}]
+    )
+    assert response.status_code == 202
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.channel == "sms"  # backfilled from the candidate's recommendation
+    assert row.org_id == "org-42"  # backfilled from the winner's evidence
+
+    from waypoint.evidence import pattern_summaries
+
+    patterns = await pattern_summaries(db_session, "churn_risk", ["sms"])
+    assert any(p.channel == "sms" and p.mechanism == "invoice_delivery" for p in patterns)
+
+
+async def test_resubmission_re_attributes_once_the_winner_exists(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    rec_id = "future-winner"
+    first = await auth_client.post(
+        "/api/outcomes", json=[{**OUTCOME, "recommendation_id": rec_id}]
+    )
+    assert first.json() == {"stored": 1, "unattributed": 1}
+
+    run = RunRow(pro_ids=["pro_1"], audience_query="q", audience_run="r",
+                 channels=["sms"], journey_window="churn_risk")
+    db_session.add(run)
+    await db_session.flush()
+    candidate = CandidateRow(
+        run_id=run.id, pro_id="pro_1", status="champion",
+        recommendation={"title": "t", "mechanism": "invoice_delivery", "actions": ["a"],
+                        "pro_facing_concept": "c", "manager_rationale": "m",
+                        "channel": "sms", "risk": ""},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(id=rec_id, run_id=run.id, pro_id="pro_1", kind="winner",
+                       candidate_id=candidate.id, rationale="m")
+    db_session.add(winner)
+    await db_session.commit()
+
+    second = await auth_client.post(
+        "/api/outcomes", json=[{**OUTCOME, "recommendation_id": rec_id}]
+    )
+    assert second.json() == {"stored": 1, "unattributed": 0}
+    row = (
+        await db_session.execute(
+            select(TouchOutcomeRow).execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.evidence_limitation is None
+    assert row.mechanism == "invoice_delivery"
+    assert row.run_id == run.id

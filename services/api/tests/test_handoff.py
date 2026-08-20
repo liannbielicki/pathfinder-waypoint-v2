@@ -105,6 +105,20 @@ async def test_rejected_row_is_recorded_honestly(
     assert row.response == {"row_id": "win-1", "status": "rejected", "reason": "bad category"}
 
 
+async def test_handoff_rows_carry_attribution_row_id(
+    httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
+) -> None:
+    httpx_mock.add_response(json={
+        "batch": "run-1", "rows": [{"row_id": "win-1", "status": "accepted"}],
+    })
+    await make_client(db_session).handoff("run-1", [ROW])
+    request = httpx_mock.get_request()
+    assert request is not None
+    payload = json.loads(request.content)
+    for row in payload["rows"]:
+        assert row["row_id"] == ROW["row_id"] == "win-1"
+
+
 async def test_lcm_outage_raises_and_recovers_idempotently(
     httpx_mock: HTTPXMock, db_session: AsyncSession, seeded_run: None,
 ) -> None:

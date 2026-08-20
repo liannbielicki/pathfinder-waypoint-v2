@@ -4,6 +4,7 @@ import pytest
 
 from waypoint.loop import (
     DEFAULT_LOOP_CONFIG,
+    MAX_CANDIDATE_COUNT,
     LoopConfig,
     LoopState,
     apply_round,
@@ -23,6 +24,9 @@ def cfg(**overrides) -> LoopConfig:
         "patience": 1,
         "keep_delta_pp": 0.5,
         "win_threshold_pp": 15.0,
+        "candidate_count": 3,
+        "tie_margin": 0.05,
+        "warm_start_threshold": 0.75,
     }
     return LoopConfig(**{**base, **overrides})
 
@@ -49,8 +53,55 @@ def test_from_mapping_round_trips_to_dict() -> None:
         "PATIENCE": 2,
         "KEEP_DELTA_PP": 0.5,
         "WIN_THRESHOLD_PP": 15.0,
+        "CANDIDATE_COUNT": 3,
+        "TIE_MARGIN": 0.05,
+        "WARM_START_THRESHOLD": 0.75,
     }
     assert LoopConfig.from_mapping(config.to_dict()) == config
+
+
+# --- CANDIDATE_COUNT / TIE_MARGIN -------------------------------------------
+
+
+def test_candidate_count_defaults_to_three() -> None:
+    assert DEFAULT_LOOP_CONFIG.candidate_count == 3
+
+
+@pytest.mark.parametrize("value", [1, 2, 5, MAX_CANDIDATE_COUNT])
+def test_candidate_count_accepts_explicit_values_up_to_the_ceiling(value: int) -> None:
+    config = LoopConfig.from_mapping({"CANDIDATE_COUNT": value})
+    assert config.candidate_count == value
+
+
+@pytest.mark.parametrize("value", [0, -1, "abc", MAX_CANDIDATE_COUNT + 1])
+def test_candidate_count_rejects_bad_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"CANDIDATE_COUNT": value})
+
+
+def test_warm_start_threshold_defaults_to_point_seven_five() -> None:
+    assert DEFAULT_LOOP_CONFIG.warm_start_threshold == 0.75
+
+
+@pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+def test_warm_start_threshold_accepts_the_full_similarity_range(value: float) -> None:
+    assert LoopConfig.from_mapping({"WARM_START_THRESHOLD": value}).warm_start_threshold == value
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5, "abc"])
+def test_warm_start_threshold_rejects_out_of_bounds(value: object) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"WARM_START_THRESHOLD": value})
+
+
+def test_tie_margin_defaults_to_point_zero_five() -> None:
+    assert DEFAULT_LOOP_CONFIG.tie_margin == 0.05
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5])
+def test_tie_margin_rejects_out_of_bounds(value: float) -> None:
+    with pytest.raises(ValueError):
+        LoopConfig.from_mapping({"TIE_MARGIN": value})
 
 
 @pytest.mark.parametrize(
@@ -225,11 +276,12 @@ def test_stop_on_round_cap() -> None:
 
 
 class Row:
-    def __init__(self, mechanism, candidate_id, score_pp, outcome):
+    def __init__(self, mechanism, candidate_id, score_pp, outcome, ranking=None):
         self.mechanism = mechanism
         self.candidate_id = candidate_id
         self.score_pp = score_pp
         self.outcome = outcome
+        self.ranking = ranking or {}
 
 
 def test_replay_reproduces_the_live_folded_state() -> None:
@@ -254,3 +306,13 @@ def test_replay_reproduces_the_live_folded_state() -> None:
     assert live.best_score == 3.5
     assert live.best_candidate_id == "c4"
     assert live.round == 4
+
+
+def test_replay_recovers_non_challenger_mechanisms_from_ranking() -> None:
+    """A resumed SHIFT must forbid the batch's other mechanisms, not just the
+    round's challenger — they cost paid critic/ranker calls to evaluate. They
+    live in the round's ranking audit trail (order[].mechanism)."""
+    config = cfg()
+    ranking = {"order": [{"mechanism": "a"}, {"mechanism": "sibling"}]}
+    state = replay([Row("a", "c1", 2.0, "win", ranking=ranking)], config)
+    assert set(state.tried_mechanisms) == {"a", "sibling"}

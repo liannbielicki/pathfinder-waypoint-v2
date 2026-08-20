@@ -5,7 +5,8 @@ Run with: python -m waypoint.worker
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from uuid import uuid4
 
 import httpx
 from anthropic import AsyncAnthropic
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
@@ -135,11 +136,64 @@ def make_persona_source(settings: Settings) -> Callable[[str], Awaitable[list[Pe
     return get_personas
 
 
+def make_pricing(settings: Settings) -> Pricing:
+    """Tier → model. The ranker gets its own tier; empty MODEL_RANKER means
+    "share the fast model" (Pricing still validates it against the price table)."""
+    return Pricing(
+        models={
+            "fast": settings.MODEL_FAST,
+            "deep": settings.MODEL_DEEP,
+            "rank": settings.MODEL_RANKER or settings.MODEL_FAST,
+        }
+    )
+
+
+LLMStacks = Callable[[], AbstractAsyncContextManager[tuple[MeteredLLM, AsyncSession]]]
+
+
+def make_llm_stacks(
+    *,
+    engine: AsyncEngine,
+    factory: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    pricing: Pricing,
+    max_slots: int,
+) -> LLMStacks:
+    """Factory for independent paid-call stacks, one per concurrent screen.
+
+    Nothing here may be shared between concurrent tasks: the advisory-lock
+    slot connection is CONNECTION-scoped (see FleetSlots) and an AsyncSession
+    is single-statement-at-a-time. `max_slots` is the SAME cap as the main
+    limiter, so the fleet-wide ceiling stays one limit rather than two."""
+
+    @asynccontextmanager
+    async def stack() -> AsyncIterator[tuple[MeteredLLM, AsyncSession]]:
+        connection = await engine.connect()
+        try:
+            async with factory() as usage_session, factory() as cache_session:
+                yield (
+                    MeteredLLM(
+                        gateway=LLMGateway(anthropic, usage_session, pricing),
+                        records=RecordedCalls(usage_session),
+                        slots=FleetSlots(connection, max_slots=max_slots),
+                        pricing=pricing,
+                        reserve=partial(queue.reserve_cost, usage_session),
+                        reconcile=partial(queue.reconcile_cost, usage_session),
+                    ),
+                    cache_session,
+                )
+        finally:
+            await connection.close()
+
+    return stack
+
+
 async def _worker_loop(
     worker_id: str,
     *,
     factory: async_sessionmaker[AsyncSession],
     slots: FleetSlots,
+    llm_stacks: LLMStacks,
     context: N8NContextClient,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
@@ -199,6 +253,7 @@ async def _worker_loop(
                     metric_catalog=metric_catalog,
                     worker_id=worker_id,
                     lease_seconds=LEASE_SECONDS,
+                    llm_stacks=llm_stacks,
                 )
                 try:
                     await run_job(job.id, deps)
@@ -244,12 +299,23 @@ async def main() -> None:
     engine = make_engine(
         settings.DATABASE_URL.get_secret_value(),
         # Each loop holds one permanent fleet-slot connection plus, while busy,
-        # a pipeline + usage session; size the pool for all WORKER_COUNT loops.
-        pool_size=settings.WORKER_COUNT * 3 + 2,
+        # a pipeline + usage session, and during a tied round two concurrent
+        # screen stacks of (slot connection + usage + cache session) each.
+        # Sized so the steady state fits the pool proper: max_overflow means the
+        # old size would not have deadlocked, it would have churned overflow
+        # connections and stalled on checkout under load.
+        pool_size=settings.WORKER_COUNT * 9 + 2,
     )
     factory = make_session_factory(engine)
     anthropic = AsyncAnthropic(api_key=settings.LLM_API_KEY.get_secret_value())
-    pricing = Pricing(models={"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP})
+    pricing = make_pricing(settings)
+    llm_stacks = make_llm_stacks(
+        engine=engine,
+        factory=factory,
+        anthropic=anthropic,
+        pricing=pricing,
+        max_slots=settings.MAX_LLM_IN_FLIGHT,
+    )
     persona_source = make_persona_source(settings)
     calibration = load_calibration(CALIBRATION_PATH)
     context = N8NContextClient(
@@ -279,6 +345,7 @@ async def main() -> None:
                 f"worker-{base_id}-{index}",
                 factory=factory,
                 slots=FleetSlots(slots_connection, max_slots=settings.MAX_LLM_IN_FLIGHT),
+                llm_stacks=llm_stacks,
                 context=context,
                 anthropic=anthropic,
                 pricing=pricing,

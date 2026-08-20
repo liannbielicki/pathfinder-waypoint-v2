@@ -8,7 +8,15 @@ from waypoint.pipeline import run_job
 from waypoint.tables import JobRow, LlmCallRow, RunRow, WinnerRow
 
 from .conftest import FakeDeps, InjectedCrash, idea_json, reactions_json
-from .test_pipeline import FIRST_WIN, GREAT, LOSE, candidate_count, rounds, run_status
+from .test_pipeline import (
+    FIRST_WIN,
+    GREAT,
+    LOSE,
+    candidate_count,
+    rounds,
+    run_status,
+    set_loop_config,
+)
 
 
 async def test_resume_skips_completed_paid_stages(deps: FakeDeps, seeded_job) -> None:
@@ -74,6 +82,7 @@ async def test_mid_loop_crash_replays_the_ledger_without_re_paying(
     """Crash inside round 2 at the screen call. Resume must not re-pay round 1,
     must reuse round 2's committed generate/critic responses, and must land on
     the same loop state."""
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
     deps.gateway.responses["evolve"] = [
         idea_json("invoice_delivery", 1),
         idea_json("feature_adoption", 2),
@@ -135,7 +144,7 @@ async def test_abandoned_call_reservation_converts_to_spend_on_resume(
         status in ("reconciled", "abandoned") for status in statuses.values()
     )
     # The re-primed screen call finished its lifecycle.
-    screen_key = f"{seeded_job.run_id}:{seeded_job.pro_id}:r1:screen"
+    screen_key = f"{seeded_job.run_id}:{seeded_job.pro_id}:r1:screen:c1"
     assert statuses[screen_key] == "reconciled"
     assert await run_status(deps.db, seeded_job.run_id) == "complete"
 
