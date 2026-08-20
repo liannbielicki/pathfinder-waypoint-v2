@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.db import make_engine, make_session_factory
+from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
@@ -37,7 +38,10 @@ from waypoint.tables import FleetControlRow
 log = logging.getLogger("waypoint.worker")
 
 POLL_SECONDS = 2.0
-LEASE_SECONDS = 600
+# Must comfortably exceed one n8n context call (up to N8N_TIMEOUT_SECONDS):
+# nothing heartbeats during that fetch, and a lease shorter than the call gets
+# the job re-claimed mid-fetch and worked twice.
+LEASE_SECONDS = 1800
 CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibration_cards.json"
 
 
@@ -198,6 +202,8 @@ async def _worker_loop(
     create_plan: Any,
     metric_catalog: dict[str, Any],
     maintenance: bool,
+    settings: Settings,
+    lcm_client: httpx.AsyncClient,
 ) -> None:
     """One claim→process loop. WORKER_COUNT of these run concurrently in-process;
     each owns a distinct worker_id (for lease ownership) and its own fleet-slot
@@ -256,6 +262,32 @@ async def _worker_loop(
                     # checkpoint; attempts-exhausted jobs get reaped as failed.
                     log.exception("job %s crashed; leaving for lease recovery", job.id)
                     await session.rollback()
+                    continue
+            # Trickle handoff: stream THIS Pro's ready winner to the LCM as it
+            # finishes so QA runs concurrently with the run. Pro-scoped, so
+            # concurrent loops touch disjoint rows. Best effort —
+            # push_ready_winners is idempotent (answered rows are skipped),
+            # so the manual POST /handoff retries anything that failed here.
+            try:
+                async with factory() as handoff_session:
+                    sent = await push_ready_winners(
+                        handoff_session,
+                        settings,
+                        job.run_id,
+                        pro_id=job.pro_id,
+                        client=lcm_client,
+                    )
+                if sent:
+                    log.info(
+                        "trickled %d winner row(s) to LCM for run %s pro %s",
+                        sent, job.run_id, job.pro_id,
+                    )
+            except Exception:
+                log.warning(
+                    "trickle handoff failed for run %s; POST /handoff remains available",
+                    job.run_id,
+                    exc_info=True,
+                )
 
 
 async def main() -> None:
@@ -287,8 +319,15 @@ async def main() -> None:
     persona_source = make_persona_source(settings)
     calibration = load_calibration(CALIBRATION_PATH)
     context = N8NContextClient(
-        url=str(settings.N8N_CONTEXT_URL), token=settings.N8N_TOKEN.get_secret_value()
+        url=str(settings.N8N_CONTEXT_URL),
+        token=settings.N8N_TOKEN.get_secret_value(),
+        timeout=settings.N8N_TIMEOUT_SECONDS,
+        max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
+
+    # One long-lived LCM transport shared by every loop (like the n8n client):
+    # no per-Pro TLS handshake on the trickle path.
+    lcm_client = lcm_http_client(settings)
 
     async with factory() as session:
         await apply_fleet_settings(session, settings)
@@ -315,6 +354,8 @@ async def main() -> None:
                 create_plan=create_measurement_plan,
                 metric_catalog=METRIC_CATALOG,
                 maintenance=(index == 0),
+                settings=settings,
+                lcm_client=lcm_client,
             )
         finally:
             await slots_connection.close()

@@ -6,7 +6,7 @@ the grounding hard rule, seeds-not-final-copy, and the internal-jargon ban.
 Org context is untrusted input and is always fenced.
 """
 
-PROMPT_VERSION = "waypoint_v2"  # v2: reaction embodiment + delivery-channel framing
+PROMPT_VERSION = "waypoint_v4"  # v4: consent-ask ideas forbidden and critic-blocked
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -29,8 +29,9 @@ def fenced_context(context: str) -> str:
 
 def channel_directive(channels: list[str]) -> str:
     """Gate idea generation to the run's operator-selected delivery channels.
-    SMS carries an extra brevity constraint so ideas are shaped for a single
-    ~160-character text, not long-form mechanics that only work in email."""
+    SMS carries an extra constraint so ideas are shaped as one realistic
+    single-touch event fitting a ~160-character text — never a sequence or
+    long-form mechanics that only work in email."""
     allowed = [c for c in channels if c in ("sms", "email")]
     if not allowed:  # defensive: never leave the model unconstrained
         allowed = ["sms", "email"]
@@ -43,9 +44,18 @@ def channel_directive(channels: list[str]) -> str:
     ]
     if allowed == ["sms"]:
         lines.append(
-            "This will be delivered as a single SMS: shape the concept as one brief, "
-            "self-contained ask that fits a ~160-character text — no long-form, "
-            "multi-part, or email-only mechanics."
+            "This will be delivered as ONE short SMS: shape every idea as a "
+            "realistic SINGLE touch event — one brief, self-contained ask that fits "
+            "a ~160-character text and could plausibly land on a Pro's phone as-is. "
+            "No sequences, follow-ups, drips, multi-step or multi-part flows, and "
+            "no email-only mechanics; each idea stands alone as exactly one send."
+        )
+    if "sms" in allowed:
+        lines.append(
+            "Never propose an idea that opens by (or consists of) asking the Pro "
+            "for SMS consent, opt-in, or permission to text them. Messaging consent "
+            "is handled upstream of this system; a consent request is not a "
+            "retention idea."
         )
     return "\n".join(lines)
 
@@ -329,12 +339,15 @@ This Pro's context:
 
 def critic_prompt(org_context: str, ideas_json: str) -> str:
     return f"""You are auditing action ideas proposed for ONE specific Pro. The ONLY data
-we have about this Pro is the context below. Classify the PRIMARY grounding
-problem for each idea into exactly one block_kind:
+we have about this Pro is the context below. Classify the PRIMARY problem
+for each idea into exactly one block_kind:
 
   - "ungrounded" (HARD BLOCK): the message or execution depends on a specific
     value about this Pro that is NOT in the context — an exact AR balance, job
     count, revenue figure, date, or a definite claim about an unknown factor.
+  - "consent_ask" (HARD BLOCK): the idea's touch opens by (or consists of)
+    asking the Pro for SMS/messaging consent, opt-in, or permission to contact
+    them. Consent is handled upstream; a consent request is not a retention idea.
   - "generic" (NOT a hard block): grounded but broad boilerplate that could be
     sent to any Pro. Record as a note; do NOT bench it.
   - "none": individualized AND grounded.

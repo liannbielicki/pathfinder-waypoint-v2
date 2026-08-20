@@ -20,7 +20,7 @@ RECOMMENDATION_FIXTURE = {
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "waypoint_v2"
+    assert PROMPT_VERSION == "waypoint_v4"
 
 
 def test_fenced_context_wraps_untrusted_input() -> None:
@@ -53,10 +53,24 @@ def test_channel_directive_gates_sms_only_with_brevity() -> None:
     assert "160" not in both
 
 
+def test_channel_directive_forbids_sms_consent_asks() -> None:
+    from waypoint.prompts import channel_directive
+
+    # Any run that can deliver over SMS carries the no-consent-ask rule.
+    assert "consent" in channel_directive(["sms"])
+    assert "consent" in channel_directive(["sms", "email"])
+    assert "consent" not in channel_directive(["email"])
+
+
 def test_critic_prompt_fences_untrusted_ideas() -> None:
     prompt = critic_prompt(org_context="{}", ideas_json="[]")
     assert UNTRUSTED_START in prompt
     assert "ungrounded" in prompt
+
+
+def test_critic_prompt_hard_blocks_consent_asks() -> None:
+    prompt = critic_prompt(org_context="{}", ideas_json="[]")
+    assert "consent_ask" in prompt
 
 
 def test_recommendation_is_structured_not_preformatted_prose() -> None:

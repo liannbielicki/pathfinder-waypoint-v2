@@ -13,6 +13,7 @@ is no canned fallback anywhere: a model failure is a failed job.
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
@@ -469,6 +470,17 @@ async def _valid_json_call(
 
 # --- stage handlers --------------------------------------------------------
 
+_CONSENT_ASK = re.compile(
+    r"\b(opt[ -]?in|consent|permission to (text|message|contact))\b", re.IGNORECASE
+)
+
+
+def _is_consent_ask(idea: Recommendation) -> bool:
+    """Deterministic consent-ask gate on the pro-facing surfaces of an idea.
+    manager_rationale/risk are excluded: they may legitimately discuss the
+    Pro's consent STATE without the touch asking for consent."""
+    return bool(_CONSENT_ASK.search(" ".join([idea.title, idea.pro_facing_concept, *idea.actions])))
+
 
 async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     if state.brief is None:
@@ -485,11 +497,14 @@ async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, 
 # must never turn one round into an open-ended generation bill.
 MAX_BATCH_REFILLS = 2
 
-# Verdict kinds that bench a candidate before any persona spend.
+# Verdict kinds that bench a candidate before any persona spend. consent_ask is
+# also enforced deterministically (see _is_consent_ask) — both prompt layers
+# that ban it are probabilistic, so a batched idea gets the same hard backstop.
 SUPPRESSING_BLOCK_KINDS = (
     "ungrounded",
     "unreviewed",
     "per_pro_data",
+    "consent_ask",
     "infeasible_channel",
     "recently_failed",
 )
@@ -721,6 +736,20 @@ async def _verdicts_for_batch(
                 # missing the field.
                 verdict = {"block_kind": "unreviewed", "reason": "no usable verdict returned"}
             verdicts[index] = verdict
+    for index, idea in enumerate(ideas):
+        verdict = verdicts[index]
+        if (
+            verdict is not None
+            and verdict["block_kind"] not in SUPPRESSING_BLOCK_KINDS
+            and _is_consent_ask(idea)
+        ):
+            # Deterministic backstop: the prompt-level ban and the critic are
+            # both probabilistic, and the critic labels only the PRIMARY
+            # problem — a consent-ask idea must never reach the panel.
+            verdicts[index] = {
+                "block_kind": "consent_ask",
+                "reason": "deterministic gate: idea asks for messaging consent/opt-in",
+            }
     resolved = [v for v in verdicts if v is not None]
     # Callers index verdicts by batch position; a hole would silently misalign
     # every candidate's critic verdict.
@@ -1289,6 +1318,30 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     return {}
 
 
+def _degraded_panel_notes(persona_evidence: dict[str, Any] | None) -> dict[str, str]:
+    """Reviewer-facing notes per stage whose panel ran short-handed. Named
+    honestly: a missing counterweight and a final check that re-used the
+    screen's exact personas both void invariants the full panel guarantees."""
+    notes: dict[str, str] = {}
+    members: dict[str, set[str]] = {}
+    for stage, stage_evidence in (persona_evidence or {}).items():
+        panel = stage_evidence.get("panel", {})
+        if not panel.get("degraded"):
+            continue
+        items = panel.get("items", [])
+        qualified = [item for item in items if item.get("role") != "backfill"]
+        note = f"only {len(qualified)} of {panel.get('requested_size')} personas qualified"
+        if len(items) > len(qualified):
+            note += f", {len(items) - len(qualified)} below-threshold backfill seat(s)"
+        if not any(item.get("role") == "counterweight" for item in items):
+            note += ", no counterweight on the panel"
+        notes[stage] = note
+        members[stage] = {item.get("persona_id") for item in items}
+    if {"screen", "final"} <= members.keys() and members["screen"] == members["final"]:
+        notes["final"] += "; final check reused the screen panel (not held out)"
+    return notes
+
+
 async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     if await deps.store.winner_for(state.run.id, state.pro_id) is not None:
         return {}
@@ -1313,6 +1366,9 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         return {}
     outcome = select_winner({champion.id: CandidateScore.model_validate(final)})
     if isinstance(outcome, Winner):
+        # A stage that ran on a short-handed panel is flagged on the winner —
+        # the output still ships, with the disclaimer, instead of abstaining.
+        degraded_panels = _degraded_panel_notes(champion.persona_evidence)
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
@@ -1324,6 +1380,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     "final": final,
                     "screen": champion.score.get("screen", {}),
                     "org_id": state.brief.org_uuid if state.brief else "",
+                    **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
                 # Sanitized bands only, and never eligible here: eligibility is
                 # earned in outcomes.ingest from an observed 7d return.
@@ -1612,7 +1669,15 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
         if await store.requeue_job(job_id):
             await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
         else:
-            await store.set_run_status(run_id, "failed", f"context_unavailable: {error}")
+            # Attempts exhausted for THIS Pro only: its job fails (requeue_job
+            # already marked it) and finalize_run aggregates to failed/degraded
+            # once every sibling is terminal — one id's dead context flow must
+            # never take the whole run down.
+            await queue.checkpoint_job(
+                store.session, job_id, "failure",
+                {"reason": f"context_unavailable: {error}"},
+            )
+            await finalize_run(store.session, run_id)
         return
     state.brief = next(
         (brief for brief in batch.organizations if brief.pro_id == state.pro_id),

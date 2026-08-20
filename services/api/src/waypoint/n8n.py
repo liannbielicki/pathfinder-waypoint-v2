@@ -15,6 +15,7 @@ stamps CONTRACT_VERSION and emits only allowlisted band columns:
 Redirects are refused so the bearer token is never forwarded.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -187,23 +188,63 @@ def _canon(identifier: str) -> str:
     return identifier.strip().lower().removeprefix("pro_").replace("-", "")
 
 
+# Transient upstream trouble (gateway timeouts from a slow Snowflake query,
+# rate limiting anywhere in the flow) — retried with backoff before a job
+# attempt is burned. Anything else non-200 is treated as real.
+_RETRIABLE_STATUSES = (429, 502, 503, 504)
+
+
 class N8NContextClient:
     def __init__(
         self,
         url: str,
         token: str,
         batch_size: int = 5,
-        timeout: float = 120.0,
+        timeout: float = 900.0,
+        max_concurrent: int = 3,
+        attempts: int = 3,
+        backoff_seconds: float = 15.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         # ponytail: 5-id batches match the existing n8n validate-node cap.
         self.url = url
         self.batch_size = batch_size
+        self.attempts = attempts
+        self.backoff_seconds = backoff_seconds
+        # One shared client instance serves every worker loop, so this
+        # semaphore is the process-wide cap on concurrent n8n executions —
+        # the flow (Snowflake + Iterable behind it) degrades badly when all
+        # worker loops hit it at once.
+        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._client = client or httpx.AsyncClient(
-            timeout=timeout,
+            # The flow can legitimately run 10-15 minutes per id under load;
+            # only the connect phase stays on a short fuse.
+            timeout=httpx.Timeout(timeout, connect=15.0),
             follow_redirects=False,
             headers={"authorization": f"Bearer {token}"},
         )
+
+    async def _post_chunk(self, chunk: list[str]) -> httpx.Response:
+        failure = "no attempt made"
+        for attempt in range(self.attempts):
+            if attempt:
+                delay = self.backoff_seconds * 2 ** (attempt - 1)
+                log.warning("n8n context retry %d for %d ids in %.0fs: %s",
+                            attempt, len(chunk), delay, failure)
+                await asyncio.sleep(delay)
+            try:
+                async with self._semaphore:
+                    # Sent as generic "id"s: the flow owns classifying/routing
+                    # each identifier (org vs pro, mixed lists welcome).
+                    response = await self._client.post(self.url, json={"id": chunk})
+            except httpx.HTTPError as error:
+                failure = f"n8n context flow unreachable: {error}"
+                continue
+            if response.status_code in _RETRIABLE_STATUSES:
+                failure = f"n8n context flow returned {response.status_code}"
+                continue
+            return response
+        raise ContextUnavailable(f"{failure} (after {self.attempts} attempts)")
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
         # Identifiers may be org or pro ids, even mixed; the flow validates
@@ -212,12 +253,7 @@ class N8NContextClient:
         query_version: str | None = None
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
-            try:
-                # Sent as generic "id"s: the flow owns classifying/routing each
-                # identifier (org vs pro, mixed lists welcome).
-                response = await self._client.post(self.url, json={"id": chunk})
-            except httpx.HTTPError as error:
-                raise ContextUnavailable(f"n8n context flow unreachable: {error}") from error
+            response = await self._post_chunk(chunk)
             if response.status_code != 200:
                 raise ContextUnavailable(
                     f"n8n context flow returned {response.status_code} for {len(chunk)} ids"

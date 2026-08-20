@@ -9,7 +9,7 @@ const FLEET_SETTINGS = {
     KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
     CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
-  max_in_flight_llm_calls: 4,
+  max_in_flight_llm_calls: 7,
 };
 
 function stubFetch(overrides?: {
@@ -65,7 +65,8 @@ describe("RunStart", () => {
     const fleet = groups[2];
     expect(within(fleet).getByText(/max simultaneous model calls \(fleet\)/i))
       .toBeVisible();
-    expect(within(fleet).getByText("4")).toBeVisible();
+    // The cap comes from /fleet/settings, not a hardcoded value.
+    await waitFor(() => expect(within(fleet).getByText("7")).toBeVisible());
     expect(within(fleet).getByText(/MAX_IN_FLIGHT_LLM_CALLS/)).toBeVisible();
     expect(within(fleet).getByText(
       /shared across all workers; limits api pressure, not total run cost/i,

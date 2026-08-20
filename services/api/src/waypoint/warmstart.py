@@ -159,7 +159,7 @@ async def retrieve(
         if isinstance(error, SQLAlchemyError):
             try:
                 await session.rollback()
-            except Exception:  # noqa: BLE001 — a dead connection is still a cold start
+            except Exception:  # a dead connection is still a cold start
                 log.warning("warm_start rollback failed after a degraded retrieval", exc_info=True)
         match = None
         telemetry["outcome"] = "degraded"

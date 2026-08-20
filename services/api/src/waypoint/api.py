@@ -16,10 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
 from waypoint.db import make_engine, make_session_factory
-from waypoint.handoff import HandoffUnavailable, LCMClient
+from waypoint.handoff import (
+    AudienceLineageUnresolved,
+    HandoffUnavailable,
+    make_lcm_client,
+    ready_rows,
+)
 from waypoint.loop import LoopConfig
 from waypoint.models import (
-    PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
     HandoffReceipt,
     RunCreate,
@@ -330,62 +334,26 @@ def create_app(
         request: Request, run_id: str, session: SessionDep, _: AuthDep
     ) -> HandoffResponse:
         settings: Settings = request.app.state.settings
-        run = await _run_or_404(session, run_id)
-        winners = (
-            (
-                await session.execute(
-                    select(WinnerRow).where(WinnerRow.run_id == run_id, WinnerRow.kind == "winner")
-                )
-            )
-            .scalars()
-            .all()
-        )
-        ready: list[tuple[WinnerRow, MeasurementRow, CandidateRow]] = []
-        for winner in winners:
-            measurement = (
-                await session.execute(
-                    select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
-                )
-            ).scalar_one_or_none()
-            candidate = (
-                await session.get(CandidateRow, winner.candidate_id)
-                if winner.candidate_id
-                else None
-            )
-            if measurement is not None and candidate is not None:
-                ready.append((winner, measurement, candidate))
-        if not ready:
+        await _run_or_404(session, run_id)
+        try:
+            # The lineage guard lives in ready_rows so every handoff caller
+            # inherits it; refusing beats handing off a winner sourced from an
+            # unverified audience.
+            rows = await ready_rows(session, run_id)
+        except AudienceLineageUnresolved as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if not rows:
             raise HTTPException(
                 status_code=409, detail="No persisted winner with a measurement plan"
             )
-        client = LCMClient(
-            url=str(settings.HANDOFF_URL),
-            token=settings.HANDOFF_TOKEN.get_secret_value(),
-            bypass_token=settings.BYPASS_TOKEN.get_secret_value(),
-            session=session,
-        )
-        if run.audience_query == PENDING_AUDIENCE_QUERY:
-            # The n8n flow never reported its query version; refusing beats
-            # handing off a winner sourced from an unverified audience.
-            raise HTTPException(
-                status_code=409,
-                detail="audience lineage unresolved: the n8n flow never reported a query version",
-            )
+        client = make_lcm_client(settings, session)
         # Pathfinder Intake API: no PII, one POST per batch (never per row).
-        rows = [
-            {
-                "pro_uuid": winner.pro_id,
-                "theme": candidate.recommendation["title"],
-                "theme_category": candidate.recommendation["mechanism"],
-                "org_id": winner.evidence.get("org_id", ""),
-                "row_id": winner.id,
-            }
-            for winner, _measurement, candidate in ready
-        ]
         try:
             receipts = await client.handoff(run_id, rows)
         except HandoffUnavailable as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
+        finally:
+            await client.aclose()
         return HandoffResponse(receipts=receipts)
 
     return app

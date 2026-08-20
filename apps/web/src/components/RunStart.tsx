@@ -50,6 +50,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaults, setDefaults] = useState<Record<string, number> | null>(null);
+  const [fleetCap, setFleetCap] = useState<number | null>(null);
   const [defaultsError, setDefaultsError] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const [confirms, setConfirms] = useState<Record<string, string>>({});
@@ -61,6 +62,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       .then((settings) => {
         if (cancelled) return;
         setDefaults(settings.loop_defaults);
+        setFleetCap(settings.max_in_flight_llm_calls);
         // Only fields the server actually advertises get a value. A key the
         // API does not know (an older API than this UI) would otherwise render
         // as the string "undefined" — an empty number input that reads as
@@ -263,7 +265,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         <p>
           <strong>Max simultaneous model calls (fleet)</strong>{" "}
           <small className="technical">MAX_IN_FLIGHT_LLM_CALLS</small>{" "}
-          <span className="fleet-cap-value">4</span> (read-only)
+          <span className="fleet-cap-value">{fleetCap ?? "—"}</span> (read-only)
         </p>
         <p className="helper">
           Shared across all workers; limits API pressure, not total run cost.

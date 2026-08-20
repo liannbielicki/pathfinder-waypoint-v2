@@ -322,6 +322,35 @@ async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seede
     assert len(suppressed) == 1
 
 
+async def test_consent_ask_idea_is_suppressed_deterministically(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # The critic approves ("none") but the idea's pro-facing surface asks for
+    # SMS opt-in: the deterministic gate must bench it with no persona spend.
+    # Pinned to a single-idea round so the whole batch is the consent idea and
+    # the round's only outcome is its deterministic suppression.
+    await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1, CANDIDATE_COUNT=1)
+    consent_idea = json.loads(idea_json("invoice_delivery"))
+    consent_idea["pro_facing_concept"] = "Reply YES to opt in to text updates."
+    deps.gateway.responses["evolve"] = [json.dumps(consent_idea)]
+    deps.gateway.responses["critics"] = CRITIC_OK
+    await run_job(seeded_job.id, deps)
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "suppressed"
+    suppressed = (
+        (
+            await deps.db.execute(
+                select(CandidateRow).where(
+                    CandidateRow.run_id == seeded_job.run_id, CandidateRow.status == "suppressed"
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert suppressed.critics["block_kind"] == "consent_ask"
+
+
 async def test_generation_failure_fails_the_run_honestly(deps: FakeDeps, seeded_job) -> None:
     deps.gateway.fail_stage("evolve")
     await run_job(seeded_job.id, deps)
@@ -434,13 +463,39 @@ async def test_flat_reactions_resolve_to_no_action(deps: FakeDeps, seeded_job) -
     assert await run_status(deps.db, seeded_job.run_id) == "no_action"
 
 
-async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
+async def test_short_panel_degrades_with_flagged_output_instead_of_abstaining(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Only one family qualifies (2 personas, no counterweight): the Pro still
+    # gets an output, flagged as evaluated on a short-handed panel.
     solo = [p for p in PERSONAS if p.family == "solo_operators"]
 
     async def _solo(segment: str):
         return solo
 
     deps.get_personas = _solo
+    await run_job(seeded_job.id, deps)
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"
+    disclaimer = winner.evidence["panel_disclaimer"]
+    assert "only 2 of" in disclaimer["final"]
+    # The notes name what the short panel actually voids: no dissenting
+    # family, and a "held-out" final check that reused the screen's personas.
+    assert "no counterweight" in disclaimer["final"]
+    assert "reused the screen panel" in disclaimer["final"]
+
+
+async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
+    # Below the 2-persona floor there is no panel at all: still an abstention.
+    lone = [p for p in PERSONAS if p.family == "solo_operators"][:1]
+
+    async def _lone(segment: str):
+        return lone
+
+    deps.get_personas = _lone
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "abstained"
     winner = (
@@ -478,6 +533,43 @@ async def test_context_outage_waits_for_retry(deps: FakeDeps, seeded_job) -> Non
     deps.context.unavailable = True
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "waiting"
+
+
+async def test_context_outage_for_one_pro_never_fails_the_run(deps: FakeDeps) -> None:
+    # The 504-for-one-id incident: when one Pro's context flow stays dead
+    # through its last retry, that Pro's job fails — the run must NOT go
+    # terminal while sibling Pros are still working.
+    run = RunRow(
+        id="run-isolated",
+        pro_ids=["pro_1", "pro_2"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["sms"],
+        cost_limit=Decimal("100.00"),
+    )
+    deps.db.add(run)
+    deps.db.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await deps.db.flush()
+    doomed = await enqueue(deps.db, run.id, stage="pro", pro_id="pro_1")
+    healthy = await enqueue(deps.db, run.id, stage="pro", pro_id="pro_2")
+    doomed_job = await deps.db.get(JobRow, doomed)
+    doomed_job.attempts = doomed_job.max_attempts  # retries already spent
+    await deps.db.commit()
+
+    deps.context.unavailable = True
+    await run_job(doomed, deps)
+
+    await deps.db.refresh(doomed_job)
+    assert doomed_job.status == "failed"
+    assert "context_unavailable" in doomed_job.checkpoint["failure"]["reason"]
+    # The run stays live for the sibling; it only aggregates once ALL jobs
+    # are terminal — and then to degraded, not failed.
+    assert await run_status(deps.db, run.id) not in ("failed", "stopped")
+    healthy_job = await deps.db.get(JobRow, healthy)
+    assert healthy_job.status == "queued"
+    healthy_job.status = "done"
+    await deps.db.commit()
+    assert await finalize_run(deps.db, run.id) == "degraded"
 
 
 async def test_lost_lease_stops_paid_work_immediately(deps: FakeDeps, seeded_job) -> None:
