@@ -184,6 +184,16 @@ class RoundLike(Protocol):
     candidate_id: str | None
     score_pp: float | None
     outcome: str
+    ranking: dict[str, Any]
+
+
+def _round_also_tried(ranking: dict[str, Any]) -> list[str]:
+    """The round's non-challenger mechanisms, recovered from its audit trail.
+    Live execution feeds these to apply_round as `also_tried`; replay must too,
+    or a resumed SHIFT re-proposes and re-pays for mechanisms already generated,
+    critiqued and ranked. Suppressed ideas never reach `order`, but they are
+    re-gated for free on re-proposal, so omitting them costs no paid call."""
+    return [o["mechanism"] for o in ranking.get("order", ()) if o.get("mechanism")]
 
 
 def replay(rounds: Sequence[RoundLike], config: LoopConfig) -> LoopState:
@@ -197,5 +207,6 @@ def replay(rounds: Sequence[RoundLike], config: LoopConfig) -> LoopState:
             score_pp=row.score_pp,
             outcome=row.outcome,
             config=config,
+            also_tried=_round_also_tried(getattr(row, "ranking", None) or {}),
         )
     return state

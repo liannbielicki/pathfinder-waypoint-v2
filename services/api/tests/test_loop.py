@@ -276,11 +276,12 @@ def test_stop_on_round_cap() -> None:
 
 
 class Row:
-    def __init__(self, mechanism, candidate_id, score_pp, outcome):
+    def __init__(self, mechanism, candidate_id, score_pp, outcome, ranking=None):
         self.mechanism = mechanism
         self.candidate_id = candidate_id
         self.score_pp = score_pp
         self.outcome = outcome
+        self.ranking = ranking or {}
 
 
 def test_replay_reproduces_the_live_folded_state() -> None:
@@ -305,3 +306,13 @@ def test_replay_reproduces_the_live_folded_state() -> None:
     assert live.best_score == 3.5
     assert live.best_candidate_id == "c4"
     assert live.round == 4
+
+
+def test_replay_recovers_non_challenger_mechanisms_from_ranking() -> None:
+    """A resumed SHIFT must forbid the batch's other mechanisms, not just the
+    round's challenger — they cost paid critic/ranker calls to evaluate. They
+    live in the round's ranking audit trail (order[].mechanism)."""
+    config = cfg()
+    ranking = {"order": [{"mechanism": "a"}, {"mechanism": "sibling"}]}
+    state = replay([Row("a", "c1", 2.0, "win", ranking=ranking)], config)
+    assert set(state.tried_mechanisms) == {"a", "sibling"}

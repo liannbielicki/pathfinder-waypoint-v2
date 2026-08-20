@@ -527,13 +527,20 @@ def _parse_idea_batch(text: str) -> list[Recommendation]:
     return ideas
 
 
-def _dedupe_mechanisms(ideas: list[Recommendation], count: int) -> list[Recommendation]:
+def _dedupe_mechanisms(
+    ideas: list[Recommendation], count: int, *, keep: str | None = None
+) -> list[Recommendation]:
     """One idea per mechanism (first wins), truncated to the requested count —
-    a batch of near-identical mechanisms is one candidate, not N."""
+    a batch of near-identical mechanisms is one candidate, not N. `keep`, when
+    present in the batch, is guaranteed its slot: a warm-start mechanism must
+    not be truncated out by the ideas generated beside it."""
     held: dict[str, Recommendation] = {}
     for idea in ideas:
         held.setdefault(idea.mechanism, idea)
-    return list(held.values())[:count]
+    ordered = list(held.values())
+    if keep is not None and keep in held:
+        ordered = [held[keep], *(i for i in ordered if i.mechanism != keep)]
+    return ordered[:count]
 
 
 def _round_worst_case(deps: PipelineDeps, prompt: str, count: int) -> Decimal:
@@ -612,10 +619,16 @@ async def _generate_batch(
     prompt: str,
     build_prompt: Callable[..., str],
     tried: list[str],
+    warm: str | None = None,
 ) -> list[Recommendation]:
     """One batched generation call, then bounded refills for whatever the
     dedupe dropped. A refill that fails outright is tolerated — bounded means
-    bounded, and the round proceeds with the ideas it already holds."""
+    bounded, and the round proceeds with the ideas it already holds.
+
+    A `warm` mechanism is protected end to end: it is kept through dedupe and,
+    if the batch comes back without it, each refill re-requests it (the model
+    routinely ignores a single embedded instruction). Otherwise the proven
+    cross-pro mechanism would silently never enter the candidate set."""
 
     async def generate(base_key: str, ask: int, text: str) -> list[Recommendation]:
         batch: list[Recommendation] = await _valid_json_call(
@@ -632,19 +645,22 @@ async def _generate_batch(
         )
         return batch
 
-    ideas = _dedupe_mechanisms(await generate(f"{key}:generate", count, prompt), count)
+    ideas = _dedupe_mechanisms(await generate(f"{key}:generate", count, prompt), count, keep=warm)
     for refill in range(MAX_BATCH_REFILLS):
-        if len(ideas) >= count:
+        warm_missing = warm is not None and all(idea.mechanism != warm for idea in ideas)
+        if len(ideas) >= count and not warm_missing:
             break
-        missing = count - len(ideas)
+        missing = max(count - len(ideas), 1 if warm_missing else 0)
         forbidden = list(dict.fromkeys([*tried, *(idea.mechanism for idea in ideas)]))
         try:
             more = await generate(
-                f"{key}:refill{refill}", missing, build_prompt("shift", missing, forbidden)
+                f"{key}:refill{refill}",
+                missing,
+                build_prompt("shift", missing, forbidden, warm if warm_missing else None),
             )
         except PipelineFailure:
             break
-        ideas = _dedupe_mechanisms([*ideas, *more], count)
+        ideas = _dedupe_mechanisms([*ideas, *more], count, keep=warm)
     return ideas
 
 
@@ -941,11 +957,20 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             prompt=prompt,
             build_prompt=build_prompt,
             tried=tried,
+            warm=warm_mechanism,
         )
         if warm_mechanism is not None and warm_evidence is not None:
-            warm_evidence["mechanism_in_batch"] = any(
-                idea.mechanism == warm_mechanism for idea in ideas
-            )
+            in_batch = any(idea.mechanism == warm_mechanism for idea in ideas)
+            warm_evidence["mechanism_in_batch"] = in_batch
+            if not in_batch:
+                # The seeded mechanism did not land in the batch — attribute
+                # nothing to the retrieved winner, whose mechanism never
+                # actually competed this round. This also keeps the resume path
+                # honest: a re-run of an uncommitted round 1 retrieves live
+                # again and may surface a different winner than the frozen
+                # generation used, so the stored winner_id must not claim credit
+                # unless its mechanism is demonstrably in the (replayed) batch.
+                warm_evidence |= {"outcome": "cold", "skipped": "mechanism_absent_from_batch"}
         verdicts = await _verdicts_for_batch(
             state,
             deps,
