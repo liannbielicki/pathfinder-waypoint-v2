@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 import { HandoffReceipt } from "@/components/HandoffReceipt";
+import { RetryPanel } from "@/components/RetryPanel";
 import { RunStatus } from "@/components/RunStatus";
 import { WinnerReview } from "@/components/WinnerReview";
 import {
@@ -38,15 +39,21 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     }
   }, [id]);
 
+  // Gate on a primitive: with `run` in the deps, every poll's fresh object
+  // identity re-armed the effect and its setTimeout(0), so the page refetched
+  // at network speed instead of every POLL_MS.
+  const done =
+    run !== null && TERMINAL_STATES.has(run.status) && run.handoffs.length > 0;
+
   useEffect(() => {
-    if (run && TERMINAL_STATES.has(run.status) && run.handoffs.length > 0) return;
+    if (done) return;
     const kickoff = window.setTimeout(() => void refresh(), 0);
     const timer = window.setInterval(() => void refresh(), POLL_MS);
     return () => {
       window.clearTimeout(kickoff);
       window.clearInterval(timer);
     };
-  }, [run, refresh]);
+  }, [done, refresh]);
 
   async function onKill() {
     setActionError(null);
@@ -81,6 +88,7 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
       {run === null && !connectionError && <p role="status">Loading run…</p>}
       {run && (
         <>
+          <RetryPanel run={run} />
           <RunStatus run={run} onKill={onKill} />
           <WinnerReview run={run} onHandoff={onHandoff} handingOff={handingOff} />
           <HandoffReceipt handoffs={run.handoffs} />

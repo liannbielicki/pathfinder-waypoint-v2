@@ -84,6 +84,12 @@ export const TERMINAL_STATES = new Set([
 // in services/api/src/waypoint/models.py — keep the literals in sync.
 export const PENDING_AUDIENCE_QUERY = "pending_n8n";
 
+// "degraded" finishes its job server-side (pipeline _stage_ready) but is kept
+// out of TERMINAL_STATES so the page keeps polling it; both facts matter, so
+// "settled" (no more per-pro outcomes coming) gets its own single definition.
+export const isRunSettled = (status: string) =>
+  TERMINAL_STATES.has(status) || status === "degraded";
+
 export class ApiError extends Error {
   constructor(public status: number, detail: string) {
     super(detail);

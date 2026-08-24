@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { WinnerReview } from "./WinnerReview";
-import { RUN_FIXTURE } from "./RunStatus.test";
+import { RUN_FIXTURE } from "@/test/fixtures";
 import type { RunDetail } from "@/lib/api";
 
 const WINNER_RUN: RunDetail = {
