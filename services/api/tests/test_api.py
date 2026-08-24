@@ -200,7 +200,8 @@ async def test_handoff_creates_durable_receipt(
     candidate = CandidateRow(
         run_id=run_id,
         pro_id="pro_1",
-        recommendation={"title": "T", "mechanism": "invoice_delivery", "manager_rationale": "R"},
+        recommendation={"title": "T", "mechanism": "invoice_delivery",
+                        "pro_facing_concept": "C", "manager_rationale": "R"},
     )
     db_session.add(candidate)
     await db_session.flush()
@@ -245,7 +246,7 @@ async def test_handoff_creates_durable_receipt(
     ).scalar_one()
     # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
     assert row.payload == {
-        "pro_uuid": "pro_1", "theme": "T", "theme_category": "invoice_delivery",
+        "pro_uuid": "pro_1", "theme": "C", "theme_category": "invoice_delivery",
         "org_id": "org_1", "row_id": winner.id,
     }
 

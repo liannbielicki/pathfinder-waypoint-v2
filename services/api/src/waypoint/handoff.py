@@ -136,6 +136,9 @@ class LCMClient:
             for row in pending:
                 result = per_row[row["row_id"]]
                 handoff_row = existing[key(row)]
+                # The audit record must match the wire: a retry rebuilds rows
+                # fresh, so a payload stored on an earlier attempt can be stale.
+                handoff_row.payload = row
                 handoff_row.response = result
                 handoff_row.status = _receipt_status(result.get("status", "rejected"))
             await self.session.commit()
@@ -225,7 +228,10 @@ async def ready_rows(
             rows.append(
                 {
                     "pro_uuid": winner.pro_id,
-                    "theme": candidate.recommendation["title"],
+                    # The full customer-moment text, not the title: Allison's SMS
+                    # copywriter sees ONLY this field (her journeyStage), so a
+                    # title here collapses compound themes to their headline.
+                    "theme": candidate.recommendation["pro_facing_concept"],
                     "theme_category": candidate.recommendation["mechanism"],
                     "org_id": winner.evidence.get("org_id", ""),
                     "row_id": winner.id,

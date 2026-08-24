@@ -19,7 +19,7 @@ from pytest_httpx import HTTPXMock
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from waypoint.handoff import LCMClient
+from waypoint.handoff import LCMClient, ready_rows
 from waypoint.n8n import CONTRACT_VERSION, OrgBrief, OrgContextBatch
 from waypoint.pipeline import STAGES, run_job
 from waypoint.queue import claim_job, enqueue
@@ -158,17 +158,8 @@ async def test_two_hundred_pros_complete_without_integrity_failures(
     for winner in winners:
         winners_by_run.setdefault(winner.run_id, []).append(winner)
     for run_id, run_winners in winners_by_run.items():
-        rows = []
-        for winner in run_winners:
-            candidate = await db_session.get(CandidateRow, winner.candidate_id)
-            assert candidate is not None
-            rows.append({
-                "pro_uuid": winner.pro_id,
-                "theme": candidate.recommendation["title"],
-                "theme_category": candidate.recommendation["mechanism"],
-                "org_id": winner.evidence["org_id"],
-                "row_id": winner.id,
-            })
+        rows = await ready_rows(db_session, run_id)
+        assert len(rows) == len(run_winners)
         first = await client.handoff(run_id, rows)
         second = await client.handoff(run_id, rows)
         assert [r.idempotency_key for r in first] == [r.idempotency_key for r in second]

@@ -12,7 +12,7 @@ from pytest_httpx import HTTPXMock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.handoff import LCMClient
+from waypoint.handoff import LCMClient, ready_rows
 from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
 from waypoint.models import MeasurementPlan
 from waypoint.pipeline import run_job
@@ -103,13 +103,9 @@ class ProductionStack:
             "batch": run.id, "rows": [{"row_id": winner.id, "status": "accepted"}],
         })
         client = LCMClient(url=LCM_URL, token="t", bypass_token="b", session=self.session)
-        await client.handoff(run.id, [{
-            "pro_uuid": winner.pro_id,
-            "theme": candidate.recommendation["title"],
-            "theme_category": candidate.recommendation["mechanism"],
-            "org_id": winner.evidence["org_id"],
-            "row_id": winner.id,
-        }])
+        # The production row shape, not a hand-rolled copy: parity must fail
+        # when ready_rows changes.
+        await client.handoff(run.id, await ready_rows(self.session, run.id))
         request = self.httpx_mock.get_requests(url=LCM_URL)[-1]
         payload = json.loads(request.content)["rows"][0]
         return ParityResult(

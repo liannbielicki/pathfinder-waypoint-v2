@@ -207,7 +207,8 @@ async def seed_ready_winner(
     await db_session.flush()  # runs row lands before FK-dependent rows below
     db_session.add(CandidateRow(
         id="cand-1", run_id="run-t", pro_id="pro_1", status="champion",
-        recommendation={"title": "AR nudge", "mechanism": "invoice_delivery"},
+        recommendation={"title": "AR nudge", "mechanism": "invoice_delivery",
+                        "pro_facing_concept": "A gentle check-in about overdue invoices"},
     ))
     db_session.add(WinnerRow(
         id="win-t", run_id="run-t", pro_id="pro_1", kind="winner",
