@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # ceiling.
     MAX_LLM_IN_FLIGHT: int = Field(default=4, ge=1)
     KILL_SWITCH: bool = False
+    # Feature-catalog CTA feasibility hints in idea context. Default OFF: today's
+    # world is SMS-only and we do not yet trust channel<->works_on filtering.
+    # Flip ON once multi-channel is live so ideas avoid web-only/broken links.
+    CTA_FEASIBILITY_HINTS: bool = False
     MODEL_FAST: str
     MODEL_DEEP: str
     # The candidate ranker's model. Empty means "use MODEL_FAST". Every model

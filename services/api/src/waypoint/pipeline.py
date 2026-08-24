@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
+from waypoint.catalog import feature_context
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.llm import LLMResult, Pricing, RateLimitExhausted, extract_json, worst_case_cost
@@ -223,6 +224,9 @@ class PipelineDeps:
     calibration: Calibration
     create_plan: Any  # async (winner, llm, catalog) -> MeasurementPlan
     metric_catalog: dict[str, Any] = field(default_factory=dict)
+    # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
+    # keeps the idea context to description+state; on adds works_on hints.
+    cta_feasibility_hints: bool = False
     worker_id: str | None = None  # set by the worker; None disables heartbeats
     lease_seconds: int = 600
     # Independent (MeteredLLM, cache session) stacks for concurrent paid calls —
@@ -938,6 +942,12 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             best = await session.get(CandidateRow, lstate.best_candidate_id)
             best_json = json.dumps(best.recommendation) if best is not None else None
         org_context = brief.model_dump_json()
+        # Resolve the features this brief references to their catalog meaning,
+        # so generation/critic/ranker (all reading this one string) know what
+        # each feature is and whether this Pro uses it. Additive + deterministic.
+        block = feature_context(brief, feasibility=deps.cta_feasibility_hints)
+        if block:
+            org_context = f"{org_context}\n{block}"
         build_prompt = _prompt_builder(
             org_context=org_context,
             best_json=best_json,

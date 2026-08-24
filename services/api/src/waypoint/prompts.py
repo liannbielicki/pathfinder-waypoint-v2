@@ -60,6 +60,9 @@ def channel_directive(channels: list[str]) -> str:
     return "\n".join(lines)
 
 
+# NOTE: currently unused — the pipeline generates via evolve_prompt only. If you
+# revive a cold-start generator, augment its org_context with catalog.feature_context
+# the same way the evolve stage does, or its ideas run blind to feature meaning.
 def generator_prompt(org_context: str, count: int, channels: list[str]) -> str:
     return f"""Generate exactly {count} grounded retention action ideas for ONE specific Pro
 (a single HCP customer organization).

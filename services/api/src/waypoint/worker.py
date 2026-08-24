@@ -251,6 +251,7 @@ async def _worker_loop(
                     calibration=calibration,
                     create_plan=create_plan,
                     metric_catalog=metric_catalog,
+                    cta_feasibility_hints=settings.CTA_FEASIBILITY_HINTS,
                     worker_id=worker_id,
                     lease_seconds=LEASE_SECONDS,
                     llm_stacks=llm_stacks,

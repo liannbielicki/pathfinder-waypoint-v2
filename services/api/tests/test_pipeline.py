@@ -1,6 +1,7 @@
 import json
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,7 @@ from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import PENDING_AUDIENCE_QUERY
 from waypoint.personas import PanelItem, PanelSelection
 from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
+from waypoint.prompts import UNTRUSTED_END
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
     CandidateRow,
@@ -1000,3 +1002,36 @@ async def test_war_game_prompt_omits_channels_this_pro_opted_out_of(
     prompts = deps.gateway.prompts_for("wargame")
     assert prompts  # the war game did run (winner exists, gate wasn't blocked)
     assert '"sms"' not in prompts[0]
+
+
+FEATURE_SUBSTR = "without calling the office"  # from online_booking's trimmed description
+FEATURE_BLOCK_HEADER = "HCP features referenced in this Pro's context (reference data):"
+
+
+@pytest.mark.asyncio
+async def test_feature_block_shared_by_generate_critic_rank(deps: FakeDeps, seeded_job) -> None:
+    """The resolved feature block must reach generation, critic, AND ranker
+    identically — a critic that can't see it wrongly blocks grounded ideas.
+    Byte-identical, not just "contains the same substring": a stage that
+    wrapped or altered the block would still pass a substring check."""
+    await run_job(seeded_job.id, deps)
+    blocks: dict[str, str] = {}
+    for stage in ("evolve", "critics", "rank"):
+        prompts = deps.gateway.prompts_for(stage)
+        assert prompts, f"no {stage} prompt captured"
+        assert all(FEATURE_SUBSTR in p for p in prompts), f"{stage} missing feature block"
+        first = prompts[0]
+        start = first.index(FEATURE_BLOCK_HEADER)
+        # Bounded at the closing fence tag, not "to end of string": critic_prompt
+        # embeds the fenced context mid-prompt (followed by "Ideas:"), so
+        # slicing to end-of-string would capture stage-specific trailing text
+        # and never compare equal even when the injected block itself matches.
+        end = first.index(UNTRUSTED_END, start)
+        blocks[stage] = first[start:end]
+    assert blocks["evolve"] == blocks["critics"] == blocks["rank"]
+
+
+@pytest.mark.asyncio
+async def test_feasibility_hints_off_by_default_in_context(deps: FakeDeps, seeded_job) -> None:
+    await run_job(seeded_job.id, deps)
+    assert all("reachable on" not in p for p in deps.gateway.prompts_for("evolve"))
