@@ -71,7 +71,9 @@ test("mixed production run keeps every outcome distinct and evidence attached", 
   await expect(page.getByText("Invoice reminder for pro_a")).toBeVisible();
   await expect(page.getByText(/no action for pro_b/i)).toBeVisible();
   await expect(page.getByText(/abstained for pro_c/i)).toBeVisible();
-  await expect(page.getByText(/low panel fit/)).toBeVisible();
+  // The abstain rationale renders twice (outcome list item + detail); assert
+  // the reason is shown without tripping strict-mode on the duplicate match.
+  await expect(page.getByText(/low panel fit/).first()).toBeVisible();
 
   // Evidence stays attached: panel roles, reactions, calibration provenance.
   await expect(page.getByText("Growing crew lead")).toBeVisible();
