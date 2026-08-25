@@ -1,14 +1,12 @@
-from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import httpx
-import pytest
 from pytest_httpx import HTTPXMock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import TEST_SETTINGS
 from waypoint.api import create_app
-from waypoint.settings import Settings
 from waypoint.tables import (
     CandidateRow,
     HandoffRow,
@@ -26,40 +24,6 @@ RUN_REQUEST = {
     "channels": ["sms"],
 }
 
-TEST_SETTINGS = Settings(
-    _env_file=None,
-    DATABASE_URL="postgresql+asyncpg://localhost:5432/waypoint_test",
-    LLM_API_KEY="test",
-    N8N_CONTEXT_URL="https://n8n.example/webhook/context",
-    N8N_TOKEN="test",
-    PERSONA_URL="https://personas.example/personas",
-    PERSONA_TOKEN="test",
-    HANDOFF_URL="https://lcm.example/handoff",
-    HANDOFF_TOKEN="lcm-token",
-    BYPASS_TOKEN="bypass-secret",
-    RUN_COST_USD="25.00",
-    DAY_COST_USD="500.00",
-    WORKER_COUNT=1,
-    MODEL_FAST="claude-haiku-4-5",
-    MODEL_DEEP="claude-sonnet-5",
-    APP_PASSWORD="operator-password",
-    SESSION_KEY="0123456789abcdef0123456789abcdef",
-)
-
-
-@pytest.fixture
-async def client(db_session_factory) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(settings=TEST_SETTINGS, session_factory=db_session_factory)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as c:
-        yield c
-
-
-@pytest.fixture
-async def auth_client(client: httpx.AsyncClient) -> httpx.AsyncClient:
-    response = await client.post("/api/auth/login", json={"password": "operator-password"})
-    assert response.status_code == 200
-    return client
 
 
 async def test_run_api_requires_session(client: httpx.AsyncClient) -> None:
@@ -460,6 +424,8 @@ async def test_unknown_journey_window_is_rejected(auth_client: httpx.AsyncClient
 OUTCOME = {
     "recommendation_id": "nonexistent-winner",
     "source": "iterable_n8n",
+    # A real-Pro send; a guardrailed one is labelled instead (see outcomes.py).
+    "routing": "route-to-pro",
     "pro_id": "pro_1",
     "channel": "sms",
     "returned_7d": True,
@@ -633,3 +599,45 @@ async def test_resubmission_re_attributes_once_the_winner_exists(
     assert row.evidence_limitation is None
     assert row.mechanism == "invoice_delivery"
     assert row.run_id == run.id
+
+
+# --- scoped outcomes token --------------------------------------------------
+# n8n writes outcomes and nothing else, so it gets a token that can do exactly
+# that. APP_PASSWORD is full operator access and n8n persists secrets in
+# plaintext execution history — the two must not be the same credential.
+
+BEARER = {"authorization": "Bearer tok-good"}
+
+
+async def test_outcomes_accepts_the_scoped_token(token_client: httpx.AsyncClient) -> None:
+    assert (await token_client.post("/api/outcomes", json=[OUTCOME], headers=BEARER)).status_code == 202
+
+
+async def test_a_wrong_token_is_401_and_never_falls_back_to_the_cookie(
+    token_client: httpx.AsyncClient,
+) -> None:
+    await token_client.post("/api/auth/login", json={"password": "operator-password"})
+    # This client HAS a valid session cookie. Presenting a bad token must still
+    # fail: silently downgrading would turn a leaked-token alarm into a success.
+    response = await token_client.post(
+        "/api/outcomes", json=[OUTCOME], headers={"authorization": "Bearer tok-wrong"}
+    )
+    assert response.status_code == 401
+
+
+async def test_the_token_unlocks_nothing_but_outcomes(token_client: httpx.AsyncClient) -> None:
+    assert (await token_client.get("/api/fleet/settings", headers=BEARER)).status_code == 401
+    assert (await token_client.post("/api/runs", json={}, headers=BEARER)).status_code == 401
+
+
+async def test_outcomes_still_works_on_the_cookie(auth_client: httpx.AsyncClient) -> None:
+    assert (await auth_client.post("/api/outcomes", json=[OUTCOME])).status_code == 202
+
+
+async def test_a_bearer_header_with_no_token_configured_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/outcomes", json=[OUTCOME], headers={"authorization": "Bearer anything"}
+    )
+    assert response.status_code == 401

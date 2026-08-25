@@ -87,7 +87,12 @@ async def _winner(session: AsyncSession, winner_id: str = "win-ws") -> WinnerRow
 
 
 def outcome(**kwargs) -> TouchOutcomeIn:
-    return TouchOutcomeIn(recommendation_id="win-ws", source="iterable_n8n", **kwargs)
+    # routing defaults to a real send: these tests are about promotion
+    # mechanics, and only a real send can promote at all (see outcomes.py).
+    return TouchOutcomeIn(
+        recommendation_id="win-ws", source="iterable_n8n",
+        routing=kwargs.pop("routing", "route-to-pro"), **kwargs,
+    )
 
 
 # --- sanitization -----------------------------------------------------------

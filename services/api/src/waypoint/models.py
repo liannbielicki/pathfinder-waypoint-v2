@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 RunStatus = Literal[
     "queued",
@@ -129,18 +129,34 @@ class MeasurementPlan(BaseModel):
 
 class TouchOutcomeIn(BaseModel):
     """One observed-outcome record from an outcome source (n8n Iterable/Amplitude
-    flow, or manual backfill). recommendation_id is the Waypoint winner_id carried
-    through LCM -> Iterable as the intake row's row_id; outcome sources may echo
-    either spelling back (TODOS: stable recommendation attribution)."""
+    flow, or manual backfill).
+
+    TWO ways to name the touch, either is enough:
+
+    * `recommendation_id` — the Waypoint winner_id, echoed back under either
+      spelling (`recommendation_id` or `row_id`).
+    * `run_id` + `pro_id` — the NATURAL key, and the one that needs nothing
+      stamped into a message: `uq_winners_run_pro` makes one run plus one pro
+      exactly one winner. Both halves already cross the boundary on their own
+      (the LCM intake batch IS the run id, and the Iterable recipient IS the
+      pro_uuid), so an outcome is attributable without Waypoint ids ever
+      entering Iterable.
+
+    `routing` is how a REAL send is told apart from a guardrailed test send that
+    merely carries a real Pro's context. It must be `route-to-pro` for the
+    record to count as evidence — see waypoint.outcomes.
+    """
 
     recommendation_id: str = Field(
-        min_length=1,
+        default="",
         validation_alias=AliasChoices("recommendation_id", "row_id"),
     )
     source: str = Field(min_length=1)
+    run_id: str = ""
     pro_id: str = ""
     org_id: str = ""
     channel: str = ""
+    routing: str = ""
     sent_at: datetime | None = None
     delivered: bool | None = None
     clicked: bool | None = None
@@ -150,6 +166,24 @@ class TouchOutcomeIn(BaseModel):
     returned_14d: bool | None = None
     returned_30d: bool | None = None
     returned_90d: bool | None = None
+
+    @model_validator(mode="after")
+    def _names_a_touch(self) -> TouchOutcomeIn:
+        # Refuse at the boundary rather than storing a row keyed on "": every
+        # such row would collide with every other on (recommendation_id, source).
+        if self.recommendation_id:
+            return self
+        if not (self.run_id.strip() and self.pro_id.strip()):
+            raise ValueError(
+                "name the touch: recommendation_id/row_id, or both run_id and pro_id"
+            )
+        # The natural key is rendered into "unresolved:<run_id>:<pro_id>" when it
+        # resolves to no winner, so a ":" inside either half would let two
+        # different pairs render the same key and silently overwrite each other.
+        # Real ids are uuid4().hex; reject anything that could alias.
+        if ":" in self.run_id or ":" in self.pro_id:
+            raise ValueError("run_id and pro_id must not contain ':'")
+        return self
 
 
 class FollowUpBranch(BaseModel):

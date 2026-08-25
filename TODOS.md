@@ -69,3 +69,37 @@
     already exist. No outcome source posts to that endpoint yet, so the
     evidence store stays empty and generation runs with the honest "no
     evidence" block until the event contract lands.
+
+- [ ] **V3: fit the loop's own parameters from observed outcomes**
+  - **Why:** Today the loop *reads* history and never *fits* to it. Evidence
+    enters as prompt text (`evidence.evidence_block`) and as a seeded mechanism
+    (`warmstart.retrieve`), so a model decides what to do with the numbers. The
+    machinery's own tuning surface stays whatever a human typed:
+    `WARM_START_THRESHOLD` (0.75), `DEFAULT_SIMILARITY_WEIGHTS` (segment /
+    lifecycle_stage / churn_risk_state at 2.0, every other field 1.0),
+    `TIE_MARGIN`, and the ranker rubric. These are operating defaults, not
+    proven values, and no observed outcome can currently move any of them.
+  - **What fitting means here:** measure, then move the knob. Compare return
+    rates of warm starts bucketed by similarity score to find where the
+    threshold actually earns its keep; compare per-field match against return
+    rates to reweight `DEFAULT_SIMILARITY_WEIGHTS` (a shared `vertical` may
+    transfer better than `lifecycle_stage` — the current weights are a guess);
+    compare cold-start versus warm-start outcomes to confirm warm starts help
+    at all. Semi-automatic first: the system proposes new values with the
+    supporting counts and a human approves. Keep the scorer behind
+    `warmstart.retrieve`'s interface so a fitted version replaces its body
+    without touching the pipeline.
+  - **Pros:** Turns real 7/14/30/90-day return behavior into better selection
+    quality and lower evaluation spend, instead of leaving the whole tuning
+    surface frozen at launch guesses.
+  - **Cons:** Needs meaningful attributable volume before any fit is honest — a
+    fit on thin data is worse than the default it replaces. It also gives up a
+    real V2 property: today bad evidence degrades output gracefully (worse
+    ideas), whereas a wrongly fitted threshold mistunes selection silently.
+  - **Context:** Deliberately out of V2 scope. V2 compounds through prompts and
+    mechanism seeding only, and that is the honest claim to make about it.
+    Before changing any default, record cold-start versus warm-start outcomes,
+    ranker choices, persona calls, cost, and downstream return-to-app behavior.
+  - **Depends on / blocked by:** Canonical Amplitude active-use contract, a
+    settled outcome-attribution anchor (see above), and enough attributable
+    volume for those comparisons to mean anything.

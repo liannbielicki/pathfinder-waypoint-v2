@@ -38,3 +38,29 @@ def require_session(request: Request) -> None:
         _signer(settings).loads(token, max_age=SESSION_MAX_AGE_SECONDS)
     except (BadSignature, SignatureExpired) as error:
         raise HTTPException(status_code=401, detail="Session invalid or expired") from error
+
+
+def require_session_or_outcomes_token(request: Request) -> None:
+    """Session cookie OR the outcomes machine token.
+
+    Scoped deliberately to the outcome automation — POST /api/outcomes and
+    GET /api/funnel/worklist, which is the shipped (run_id, pro_id) pairs and
+    nothing more. It must not carry APP_PASSWORD, which
+    is full operator access (kill switch, run creation, every run's detail) and
+    which n8n stores in plaintext execution history.
+
+    A malformed or wrong Bearer header is rejected outright rather than falling
+    through to the cookie check — a caller that presented a token meant to
+    authenticate with it, and silently downgrading would turn a leaked-token
+    alarm into a confusing 401 from a different code path.
+    """
+    settings: Settings = request.app.state.settings
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = settings.OUTCOMES_TOKEN
+        if token is None:
+            raise HTTPException(status_code=401, detail="Token auth is not configured")
+        if not secrets.compare_digest(header[7:].strip(), token.get_secret_value()):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return
+    require_session(request)

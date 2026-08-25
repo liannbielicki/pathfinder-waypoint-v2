@@ -24,7 +24,6 @@ from waypoint.n8n import CONTRACT_VERSION, OrgBrief, OrgContextBatch
 from waypoint.pipeline import STAGES, run_job
 from waypoint.queue import claim_job, enqueue
 from waypoint.tables import (
-    CandidateRow,
     FleetControlRow,
     HandoffRow,
     JobRow,

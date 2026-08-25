@@ -230,7 +230,9 @@ class UsageRow(Base):
 class TouchOutcomeRow(Base):
     """One observed outcome record per (recommendation, source). Horizon fields
     are tri-state: True/False are measured facts, None means not yet measurable.
-    evidence_limitation labels records that cannot honestly claim attribution."""
+    evidence_limitation labels records that cannot honestly claim attribution,
+    and is DERIVED on every write from (winner resolved?, routing) — never
+    left at whatever the first submission computed."""
 
     __tablename__ = "touch_outcomes"
     __table_args__ = (
@@ -258,6 +260,9 @@ class TouchOutcomeRow(Base):
     journey_window: Mapped[str] = mapped_column(default="churn_risk")
     channel: Mapped[str] = mapped_column(default="")
     mechanism: Mapped[str] = mapped_column(default="")
+    # How the message was routed, merged across submissions (outcomes.py).
+    # "" = no source has claimed a routing yet, which fails closed.
+    routing: Mapped[str] = mapped_column(default="")
     churn_risk_state: Mapped[str | None] = mapped_column(default=None)
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
     delivered: Mapped[bool | None] = mapped_column(Boolean, default=None)

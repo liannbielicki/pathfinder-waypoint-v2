@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
+from waypoint import funnel as funnel_report
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import (
     AudienceLineageUnresolved,
@@ -111,6 +112,10 @@ async def _get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 SessionDep = Annotated[AsyncSession, Depends(_get_session)]
 AuthDep = Annotated[None, Depends(auth.require_session)]
+# The outcome automation's two endpoints: write outcomes, and read the bare
+# work list. Both accept the scoped OUTCOMES_TOKEN as well as an operator
+# cookie. Every other endpoint is operator-only.
+OutcomeAuthDep = Annotated[None, Depends(auth.require_session_or_outcomes_token)]
 
 
 async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
@@ -321,9 +326,37 @@ def create_app(
         await session.commit()
         return _view(run, spent=await _spent(session, run))
 
+    def _window(days: int) -> int:
+        if not 1 <= days <= 180:
+            raise HTTPException(status_code=422, detail="days must be 1-180")
+        return days
+
+    @app.get("/api/funnel")
+    async def funnel(
+        session: SessionDep, _: AuthDep, days: int = 7, detail: bool = False
+    ) -> dict[str, Any]:
+        """Audience -> verdict -> LCM intake -> sent -> returned, from our own
+        tables. OPERATOR auth: `detail=true` returns themes, mechanisms and
+        org_ids, which the automation token has no business exporting — the
+        machine gets /api/funnel/worklist instead."""
+        _window(days)
+        if detail:
+            return {"days": days, "pros": await funnel_report.detail(session, days)}
+        return await funnel_report.summary(session, days)
+
+    @app.get("/api/funnel/worklist")
+    async def funnel_worklist(
+        session: SessionDep, _: OutcomeAuthDep, days: int = 7
+    ) -> dict[str, Any]:
+        """The shipped touches as bare (run_id, pro_id) pairs — the n8n flow's
+        work list. Shares the outcomes token because it is the same automation,
+        and carries no theme/mechanism/org_id for the reason in funnel.worklist."""
+        _window(days)
+        return {"days": days, "pros": await funnel_report.worklist(session, days)}
+
     @app.post("/api/outcomes", status_code=202)
     async def ingest_outcomes(
-        body: list[TouchOutcomeIn], session: SessionDep, _: AuthDep
+        body: list[TouchOutcomeIn], session: SessionDep, _: OutcomeAuthDep
     ) -> dict[str, int]:
         """Observed messaging/app-usage outcomes, keyed by recommendation_id.
         See waypoint.outcomes for the attribution/backfill/idempotency logic."""
