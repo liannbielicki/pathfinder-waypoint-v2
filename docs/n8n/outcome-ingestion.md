@@ -92,6 +92,11 @@ than failing loudly. Each is asserted in `check-code-nodes.js`.
    a single pre-selected control message sent to everyone. The filter is a
    positive `!== 'A'` check, so a missing, lowercase, whitespace-padded, or
    future arm name fails closed.
+2b. **An inbound SMS is a reply, not an opt-out.** Iterable exposes inbound SMS
+   as `smsReceived`, and a Pro can text back anything. It is recorded as
+   `replied`; inferring an unsubscribe from arbitrary text would write a false
+   `unsubscribed: true`. Consequence: **SMS opt-outs are not observable through
+   the export API** — if that matters, it needs a different source.
 3. **No send event means never sent.** A row that failed human QA produces no
    outcome row at all, and above all never a `returned_*: false`. A touch that
    was never delivered is not a touch that failed.
@@ -190,6 +195,51 @@ The horizon sweep cannot be event-driven — "did they come back within 7 days" 
 unanswerable until day 7. Half 1 could become an Iterable webhook; keep the cron
 as a backstop, since a dropped webhook is otherwise invisible.
 
+## Iterable rate limits
+
+Iterable's **export** API allows only **4 requests per minute per project** —
+their general API limit is 100/s, but export is the strict one, and a burst
+earns a 429. Each half fires one export call per (campaign x event type): 3 in
+the hourly half (send/click/received on the SMS campaign), and 4 in the sweep
+(4 horizons x 1 send type, on non-contiguous days that cannot be merged).
+
+Both export nodes run at **1 request per 20 seconds** — 3/min, under the limit
+with room for a retry — and wait 30 seconds between retries so a 429 waits the
+window out rather than retrying inside it. That is ~1 minute for the hourly half
+and ~1.5 for the sweep.
+
+## Scope the export by campaign — this is not an optimization
+
+Iterable's export is **project-wide**, and this project is not just us. Measured
+2026-08-25 over a 7-day window:
+
+| request | rows | bytes |
+| --- | --- | --- |
+| `emailSend`, unfiltered | 822,178 | — |
+| `smsSend`, unfiltered | 11,321 | 15.96 MB |
+| `smsSend`, `&campaignId=19156972` | **504** | **0.66 MB** |
+| `smsSend`, `&onlyFields=...` (no campaign) | 11,321 | 9.06 MB |
+
+Not one of those 822,178 emails carried an `lcm*` stamp — they are Housecall
+Pro's other marketing. An unscoped hourly run pulled **~117,000 rows / ~100 MB**
+into a Code node to find at most ~50 of ours, and the flow did nothing at all as
+a result: no error, no rows, an execution history that looked idle.
+
+`campaignId` filters **server-side** and is the only parameter that cuts the row
+count. `onlyFields` trims width, not rows, so it is a complement and never a
+substitute. Both are built in `Send window` / `Horizon windows` rather than in
+the URL field, because `onlyFields` is a repeated parameter an n8n query field
+cannot express — and because the space in `YYYY-MM-DD HH:mm:ss` must encode as
+`%20`. `URLSearchParams` would write `+`, which is a space only under the
+form-encoding convention; `%20` is what was verified against the live API.
+
+The campaigns live in one `SOURCES` list per window node. **An unlisted campaign
+is invisible to the loop and fails silently** — there is nothing to see, just
+outcomes that never arrive. Email is listed but commented out because no
+`emailSend` in this project carries stamps today; fill in the id from the LCM
+app's `iterableConfig.emailCampaignId` to turn the channel back on (`TYPE_ROLE`
+in `Build outcomes` already handles the email types).
+
 ## Amplitude rate limits
 
 The Dashboard REST API (`usersearch`, `useractivity`) allows **10 concurrent
@@ -214,7 +264,7 @@ touch (halves the calls), or replace per-user lookups with one bulk
 |---|---|
 | Work list unreachable | Node retries 3×, then the execution aborts. Nothing is posted. Fail-closed but **silent** |
 | Work list returns empty | The half is a no-op. Also silent — this is the one to watch |
-| Iterable export 5xx | Node retries 3×, then the execution fails. The next run's 25h window re-covers the gap |
+| Iterable export 5xx / 429 | Node retries 3× with a 30s wait, then the execution fails. The next run's 25h window re-covers the gap |
 | n8n down > 25h (half 1) | Events in the gap are lost. Recover by raising `LOOKBACK_MIN` in `Send window` and running once manually |
 | Amplitude `usersearch` no match | The IF node drops the item. No row — never `returned_*: false` |
 | Amplitude `useractivity` 5xx | Retries 3×, then `onError: continueRegularOutput` lets the run continue; the item arrives carrying `error` instead of `events` and is **skipped**, not scored. `unmeasured_lookup_failures` is logged |
@@ -241,9 +291,18 @@ order of how much damage a wrong one does.
    one-line change is requested from the LCM app; until it lands, the
    domain heuristic in rule 1 *is* the evidence gate.
 3. **`lcmRun` is the Waypoint `run_id`** and `userId` is the `pro_uuid`.
+   CONFIRMED against live data 2026-08-25: 101 of the 105 shipped pairs matched
+   real `smsSend` events on campaign 19156972. The other 4 were one run that was
+   handed off but never sent — a real QA drop, which is what `qa_dropped`
+   counts.
 4. Iterable's export API is `GET /api/export/data.json` with `dataTypeName`,
-   `startDateTime`, `endDateTime`, returning NDJSON, authenticated by an
-   `Api-Key` header.
+   `startDateTime`, `endDateTime`, plus `campaignId` and repeated `onlyFields`,
+   returning NDJSON, authenticated by an `Api-Key` header. VERIFIED against the
+   live API 2026-08-25, including that `campaignId` filters server-side. The `dataTypeName` values are
+   exact `ClientDataType` names and the API 400s on anything else — note
+   `emailUnSubscribe` has a capital S, and **`smsUnsubscribe` does not exist**:
+   Iterable has no SMS-unsubscribe export type. `check-code-nodes.js` pins the
+   full valid list.
 5. Iterable event timestamps are `createdAt`, formatted
    `YYYY-MM-DD HH:mm:ss [+00:00]`, and the project's timezone is UTC.
 6. Iterable message events carry `transactionalData` as a JSON string, `userId`,

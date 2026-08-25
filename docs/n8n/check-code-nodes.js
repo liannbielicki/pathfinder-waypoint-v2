@@ -26,8 +26,11 @@ const worklist$ = (touch) => (name) => name && name.startsWith('Waypoint work li
 const run = (name, items, env, $) =>
   new Function('items', '$env', '$', code(name))(items, env || {}, $ || worklist$());
 
-const line = (userId, email, dims, createdAt) =>
-  JSON.stringify({ userId, email, createdAt, ...(dims ? { transactionalData: JSON.stringify(dims) } : {}) });
+// Every fixture rides on the Pathfinder campaign, because the Code nodes now refuse
+// anything else — the export filters by campaign server-side and the guard re-checks it.
+const CAMPAIGN = '19156972';
+const line = (userId, email, dims, createdAt, campaignId = CAMPAIGN) =>
+  JSON.stringify({ userId, email, createdAt, campaignId, ...(dims ? { transactionalData: JSON.stringify(dims) } : {}) });
 
 const sends = [
   line('pro-1', 'owner@realco.com', { lcmRun: RUN, lcmVariant: 'A' }, '2026-08-20 10:00:00 +00:00'),
@@ -134,7 +137,7 @@ for (const variant of ['b', 'B ', undefined, 2, 'control']) {
 // dropped the entire SMS channel out of every horizon.
 {
   const smsLine = JSON.stringify({
-    userId: 'pro-sms', phoneNumber: '+15555550123', createdAt: '2026-08-20 10:00:00 +00:00',
+    userId: 'pro-sms', phoneNumber: '+15555550123', createdAt: '2026-08-20 10:00:00 +00:00', campaignId: CAMPAIGN,
     transactionalData: JSON.stringify({ lcmRun: RUN, lcmVariant: 'A', lcmRouting: 'route-to-pro' }),
   });
   const smsRow = run('Build outcomes', [{ json: { dataTypeName: 'smsSend', data: smsLine } }])[0].json.batch[0];
@@ -147,7 +150,7 @@ for (const variant of ['b', 'B ', undefined, 2, 'control']) {
   // Without the stamp it is unprovable, so it is skipped — fail-closed and correct,
   // but it means SMS horizons need lcmRouting. Pinned so the trade-off stays visible.
   const unstamped = JSON.stringify({
-    userId: 'pro-sms2', phoneNumber: '+15555550124', createdAt: '2026-08-20 10:00:00 +00:00',
+    userId: 'pro-sms2', phoneNumber: '+15555550124', createdAt: '2026-08-20 10:00:00 +00:00', campaignId: CAMPAIGN,
     transactionalData: JSON.stringify({ lcmRun: RUN, lcmVariant: 'A' }),
   });
   assert.ok(!('routing' in run('Build outcomes', [{ json: { dataTypeName: 'smsSend', data: unstamped } }])[0].json.batch[0]),
@@ -177,7 +180,8 @@ for (const variant of ['b', 'B ', undefined, 2, 'control']) {
 // --- the window nodes (pure Date math, no fixtures to feed them) ------------
 {
   const wins = run('Horizon windows', []);
-  assert.strictEqual(wins.length, 8, '4 horizons x 2 channels');
+  assert.strictEqual(wins.length, 4,
+    '4 horizons x 1 send type — SMS is the only campaign carrying lcm* stamps today');
   for (const { json: w } of wins) {
     const start = Date.parse(w.startDateTime.replace(' ', 'T') + 'Z');
     const end = Date.parse(w.endDateTime.replace(' ', 'T') + 'Z');
@@ -196,7 +200,64 @@ for (const variant of ['b', 'B ', undefined, 2, 'control']) {
   // window has to span the ~18h overnight gap or events in it are lost.
   assert.strictEqual(e2 - s2, 25 * 60 * 60000, 'send window must span the overnight gap');
   assert.ok(e2 - s2 > 18 * 60 * 60000, 'longest gap between fires is 15:00 -> 09:00 next day');
-  assert.strictEqual(run('Send window', []).length, 7, 'one item per Iterable event type');
+  // 3, not 7: emailOpen is not fetched (nothing reads it), and the email types are
+  // not fetched because no emailSend in this project carries lcm* stamps — every
+  // type is another call against a 4-requests/minute export budget.
+  const types = run('Send window', []).map((i) => i.json.dataTypeName);
+  assert.strictEqual(types.length, 3, 'one export call per (campaign x event type) we actually use');
+  assert.ok(!types.includes('emailOpen'), 'emailOpen is fetched by nobody');
+  assert.ok(types.every((t) => t.startsWith('sms')), 'SMS is the only channel carrying stamps today');
+}
+
+// --- campaign scoping: the difference between ~100 rows and ~117,000 ---------
+// Iterable's export is project-wide. Measured 2026-08-25 over 7 days, emailSend
+// alone was 822,178 rows and NONE of them carried an lcm* stamp; smsSend went
+// 11,321 rows / 15.96MB -> 504 rows / 0.66MB once scoped by campaign. Pulling the
+// unscoped set is ~100MB of unrelated marketing traffic through a Code node, which
+// is exactly why this flow silently did nothing.
+{
+  for (const nodeName of ['Send window', 'Horizon windows']) {
+    const items = run(nodeName, []);
+    assert.ok(items.length, `${nodeName} must emit at least one export call`);
+    for (const { json: w } of items) {
+      const q = new URLSearchParams(w.query);
+      assert.strictEqual(q.get('campaignId'), '19156972',
+        `${nodeName}: every export call MUST be campaign-scoped — unscoped is ~117k rows a run`);
+      assert.strictEqual(q.get('dataTypeName'), w.dataTypeName);
+      assert.strictEqual(q.get('startDateTime'), w.startDateTime, 'the query is the single source of truth for the window');
+      assert.strictEqual(q.get('endDateTime'), w.endDateTime);
+      // ⚑ %20, not '+'. URLSearchParams would encode the space in
+      // "YYYY-MM-DD HH:MM:SS" as '+', which is a space only under the
+      // x-www-form-urlencoded convention, not the URI spec. The live export was
+      // verified with %20; a '+' here risks a malformed datetime and a wrong window.
+      assert.ok(!w.query.includes('+'),
+        `${nodeName}: the query must encode spaces as %20, never '+'`);
+      assert.ok(w.query.includes('%20'), `${nodeName}: datetimes carry an encoded space`);
+      const fields = q.getAll('onlyFields');
+      // `email` is the one that fails SILENTLY if dropped: classify() proves
+      // route-to-pro from its domain, so without it every touch is 'unprovable' —
+      // fail-closed, nothing corrupted, but nothing ever measured either.
+      for (const f of ['transactionalData', 'userId', 'email', 'createdAt', 'campaignId']) {
+        assert.ok(fields.includes(f), `${nodeName}: onlyFields must keep '${f}'`);
+      }
+    }
+  }
+  // onlyFields is a COMPLEMENT to the campaign filter, not a substitute: measured,
+  // it trims width but not rows (11,321 -> 11,321, 15.96MB -> 9.06MB). Asserting
+  // both keeps a later "simplification" from dropping the one that matters.
+  const foreign = line('pro-1', 'owner@realco.com', { lcmRun: RUN, lcmVariant: 'A' },
+    '2026-08-20 10:00:00 +00:00', '19515605'); // a real HCP marketing campaign
+  assert.strictEqual(run('Build outcomes', [{ json: { dataTypeName: 'smsSend', data: foreign } }]).length,
+    0, 'an event outside our campaigns must never be POSTed, even if it somehow carries stamps');
+  assert.strictEqual(
+    run('Eligible touches', [{ json: { horizon: 7, dataTypeName: 'smsSend', data: foreign } }]).length,
+    0, 'and must never be measured against Amplitude');
+  // A row with NO campaignId (onlyFields misconfigured) is refused, not trusted.
+  const noCampaign = JSON.stringify({ userId: 'pro-1', email: 'owner@realco.com',
+    createdAt: '2026-08-20 10:00:00 +00:00',
+    transactionalData: JSON.stringify({ lcmRun: RUN, lcmVariant: 'A' }) });
+  assert.strictEqual(run('Build outcomes', [{ json: { dataTypeName: 'smsSend', data: noCampaign } }]).length,
+    0, 'a row with no campaignId is refused rather than assumed to be ours');
 }
 
 // Option C: an event from another LCM workstream (or a Pro we never shipped)
@@ -227,6 +288,46 @@ for (const variant of ['b', 'B ', undefined, 2, 'control']) {
   const covered = run('Returns to outcomes', [{ json: { events: many(1000, '2026-08-01 09:00:00') } }], env, $);
   assert.strictEqual(covered[0].json.batch[0].returned_7d, false,
     'a truncated page that still reaches back before the send does cover the window');
+}
+
+// Iterable's export API 400s on an unknown ClientDataType ("No existing
+// ClientDataType by name smsUnsubscribe!"), so the names are pinned here. This
+// is the full valid list from Iterable's export docs.
+{
+  const VALID = new Set([
+    'customEvent', 'emailBounce', 'emailClick', 'emailComplaint', 'emailOpen',
+    'emailSend', 'emailSendSkip', 'emailSubscribe', 'emailUnSubscribe',
+    'hostedUnsubscribeClick', 'purchase', 'pushBounce', 'pushOpen', 'pushSend',
+    'pushSendSkip', 'pushUninstall', 'smsBounce', 'smsClick', 'smsReceived',
+    'smsSend', 'smsSendSkip', 'smsUsageInfo', 'user',
+  ]);
+  for (const { json: w } of run('Send window', [])) {
+    assert.ok(VALID.has(w.dataTypeName), `'${w.dataTypeName}' is not an Iterable ClientDataType`);
+  }
+  for (const { json: w } of run('Horizon windows', [])) {
+    assert.ok(VALID.has(w.dataTypeName), `'${w.dataTypeName}' is not an Iterable ClientDataType`);
+  }
+}
+
+// The role map must survive Iterable's casing. 'emailUnSubscribe' ends with
+// 'Subscribe', so the old endsWith('Unsubscribe') check would have silently
+// stopped recording unsubscribes the moment the name was corrected.
+{
+  const at = (type, dims) => run('Build outcomes', [{ json: { dataTypeName: type,
+    data: line('pro-1', 'owner@realco.com', dims || { lcmRun: RUN, lcmVariant: 'A' }, '2026-08-20 10:00:00 +00:00') } }]);
+  const unsub = at('emailUnSubscribe')[0].json.batch[0];
+  assert.strictEqual(unsub.unsubscribed, true, 'emailUnSubscribe must record an unsubscribe');
+
+  // Inbound SMS is a REPLY, not an opt-out. A Pro can text back anything, and
+  // inferring intent from arbitrary text would write a false unsubscribed=true.
+  const inbound = at('smsReceived')[0].json.batch[0];
+  assert.strictEqual(inbound.replied, true, 'smsReceived is a reply');
+  assert.ok(!('unsubscribed' in inbound), 'smsReceived must NOT be read as an unsubscribe');
+
+  // An unmapped type contributes no signal rather than guessing from its name.
+  const skipped = at('emailBounce')[0].json.batch[0];
+  assert.ok(!('clicked' in skipped) && !('unsubscribed' in skipped) && !('replied' in skipped),
+    'an unmapped type contributes nothing');
 }
 
 console.log('docs/n8n/check-code-nodes.js: OK');
