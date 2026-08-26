@@ -1,7 +1,7 @@
-"""Idempotent LCM boundary. Pathfinder performs zero sends.
+"""Idempotent LCM Personalization boundary. Pathfinder performs zero sends.
 
-Allison's LCM tool (the Pathfinder Intake API) owns copy, human review, and
-delivery via Iterable. Its contract requires one POST per batch of theme rows
+LCM Personalization receives themes, turns them into Housecall Pro SMS,
+performs QA/edit/approval, and queues delivery. Its contract requires one POST per batch of theme rows
 (never one row per request) and sits behind Vercel deployment protection, so
 every request needs both the bearer token and the separate
 `x-vercel-protection-bypass` secret. Rows are keyed by `pro_uuid`, never

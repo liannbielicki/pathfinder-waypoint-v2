@@ -21,6 +21,7 @@ pattern as PersonaEvalRow in pipeline.py) rather than 500ing and losing every
 sibling item in the batch.
 """
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -34,6 +35,29 @@ _OUTCOME_FLAGS = (
     "delivered", "clicked", "replied", "unsubscribed",
     "returned_7d", "returned_14d", "returned_30d", "returned_90d",
 )
+
+
+def derive_checkpoint_flags(
+    *, sent_at: datetime | None, first_return_at: datetime | None,
+    returned_7d: bool | None = None,
+) -> dict[str, bool | None]:
+    """Derive V3 return horizons from the first qualifying return event.
+
+    A missing event is unresolved here. The checkpoint worker may later turn
+    that state into a measured false only after it proves the source window is
+    complete. ``returned_7d`` is accepted only to reject an unsupported
+    caller-supplied positive; legacy ingestion remains handled separately.
+    """
+    if returned_7d is True and first_return_at is None:
+        raise ValueError("returned_7d requires first_return_at")
+    if sent_at is None or first_return_at is None:
+        return {"returned_1d": None, "returned_7d": None, "returned_30d": None}
+    elapsed = first_return_at - sent_at
+    return {
+        "returned_1d": elapsed.total_seconds() <= 24 * 60 * 60,
+        "returned_7d": elapsed.total_seconds() <= 7 * 24 * 60 * 60,
+        "returned_30d": elapsed.total_seconds() <= 30 * 24 * 60 * 60,
+    }
 
 
 async def _prefetch_winners(
@@ -90,6 +114,9 @@ def _attribution_fill(
         # item-supplied non-empty values win; backfill only fills blanks.
         "channel": item.channel or recommendation.get("channel", ""),
         "org_id": item.org_id or winner.evidence.get("org_id", ""),
+        "item_id": item.item_id or winner.item_id,
+        "item_version": item.item_version or winner.item_version,
+        "arm": item.arm,
     }
     return fill, None
 
@@ -103,6 +130,22 @@ def _apply_flags(row: TouchOutcomeRow, item: TouchOutcomeIn) -> None:
             setattr(row, key, value)
     if item.sent_at is not None:
         row.sent_at = item.sent_at
+    if item.first_return_at is not None and (
+        row.first_return_at is None or item.first_return_at < row.first_return_at
+    ):
+        row.first_return_at = item.first_return_at
+    if item.item_id is not None:
+        row.item_id = item.item_id
+    if item.item_version is not None:
+        row.item_version = item.item_version
+    if item.arm is not None:
+        row.arm = item.arm
+    if row.sent_at is not None and row.first_return_at is not None:
+        derived = derive_checkpoint_flags(
+            sent_at=row.sent_at, first_return_at=row.first_return_at
+        )
+        for key, value in derived.items():
+            setattr(row, key, value)
 
 
 def _promote_warm_start(
@@ -116,7 +159,15 @@ def _promote_warm_start(
     observed = [row for row in rows if row.returned_7d is not None]
     if winner is None or winner.kind != "winner" or not observed:
         return
-    positive = [row for row in observed if row.returned_7d]
+    explicit_arms = [row for row in observed if row.arm in {"A", "B"}]
+    if explicit_arms:
+        # A-only results are directional evidence, not global promotion proof.
+        if not any(row.arm == "B" for row in explicit_arms):
+            return
+        positive = [row for row in explicit_arms if row.arm == "A" and row.returned_7d]
+    else:
+        # Preserve legacy records while they migrate to the V3 arm contract.
+        positive = [row for row in observed if row.returned_7d]
     row = min(positive or observed, key=lambda r: r.source)
     recommendation = candidate.recommendation if candidate else {}
     winner.warm_start_eligible = bool(positive)
@@ -149,11 +200,16 @@ def _apply_item(
             "org_id": item.org_id,
             "channel": item.channel,
             "sent_at": item.sent_at,
+            "first_return_at": item.first_return_at,
             "evidence_limitation": limitation,
             "pro_id": item.pro_id,
             **{k: getattr(item, k) for k in _OUTCOME_FLAGS},
             **fill,
         }
+        if item.first_return_at is not None:
+            fields.update(derive_checkpoint_flags(
+                sent_at=item.sent_at, first_return_at=item.first_return_at
+            ))
         row = TouchOutcomeRow(**fields)
         session.add(row)
         existing_by_key[key] = row

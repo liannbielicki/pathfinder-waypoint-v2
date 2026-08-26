@@ -128,16 +128,21 @@ class MeasurementPlan(BaseModel):
 
 
 class TouchOutcomeIn(BaseModel):
-    """One observed-outcome record from an outcome source (n8n Iterable/Amplitude
-    flow, or manual backfill). recommendation_id is the Waypoint winner_id carried
-    through LCM -> Iterable as the intake row's row_id; outcome sources may echo
-    either spelling back (TODOS: stable recommendation attribution)."""
+    """One observed exposure/outcome record.
+
+    LCM Personalization turns Waypoint's theme into an approved Housecall Pro
+    SMS and sends it. It is not the measurement authority; outcome sources
+    report exposure and events back to Waypoint.
+    """
 
     recommendation_id: str = Field(
         min_length=1,
         validation_alias=AliasChoices("recommendation_id", "row_id"),
     )
     source: str = Field(min_length=1)
+    item_id: str | None = None
+    item_version: str | None = None
+    arm: Literal["A", "B"] | None = None
     pro_id: str = ""
     org_id: str = ""
     channel: str = ""
@@ -146,6 +151,8 @@ class TouchOutcomeIn(BaseModel):
     clicked: bool | None = None
     replied: bool | None = None
     unsubscribed: bool | None = None
+    first_return_at: datetime | None = None
+    returned_1d: bool | None = None
     returned_7d: bool | None = None
     returned_14d: bool | None = None
     returned_30d: bool | None = None

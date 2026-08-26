@@ -41,6 +41,9 @@ class PatternEvidence:
     sent: int
     returned: dict[str, tuple[int, int]]  # horizon -> (returned_true, measured)
     unsubscribed: int
+    item_id: str | None = None
+    item_version: str | None = None
+    arm_counts: dict[str, int] | None = None
 
 
 async def pattern_summaries(
@@ -60,9 +63,10 @@ async def pattern_summaries(
     ).scalars().all()
     grouped: dict[tuple[str, str], list[TouchOutcomeRow]] = {}
     for row in rows:
-        grouped.setdefault((row.channel, row.mechanism), []).append(row)
+        # V3 learns at canonical item level; legacy rows fall back to mechanism.
+        grouped.setdefault((row.channel, row.item_id or row.mechanism), []).append(row)
     patterns = []
-    for (channel, mechanism), group in sorted(grouped.items()):
+    for (channel, _item_key), group in sorted(grouped.items()):
         returned: dict[str, tuple[int, int]] = {}
         for horizon in _HORIZONS:
             values = [getattr(r, f"returned_{horizon}") for r in group]
@@ -71,10 +75,17 @@ async def pattern_summaries(
         patterns.append(
             PatternEvidence(
                 channel=channel,
-                mechanism=mechanism,
+                mechanism=group[0].mechanism,
                 sent=len(group),
                 returned=returned,
                 unsubscribed=sum(1 for r in group if r.unsubscribed),
+                item_id=group[0].item_id,
+                item_version=group[0].item_version,
+                arm_counts={
+                    arm: sum(1 for r in group if r.arm == arm)
+                    for arm in ("A", "B")
+                    if any(r.arm == arm for r in group)
+                } or None,
             )
         )
     return patterns

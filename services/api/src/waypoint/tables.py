@@ -164,6 +164,9 @@ class WinnerRow(Base):
     evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
     fingerprint: Mapped[dict[str, Any]] = mapped_column(default=dict)
     fingerprint_version: Mapped[str | None] = mapped_column(default=None)
+    # V3 reusable learning identity. Nullable while historical winners are migrated.
+    item_id: Mapped[str | None] = mapped_column(default=None)
+    item_version: Mapped[str | None] = mapped_column(default=None)
     warm_start_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
     warm_start_evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
     # None = pending | "validated" = observed 7d return | "validated_negative"
@@ -250,7 +253,10 @@ class TouchOutcomeRow(Base):
     )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
-    recommendation_id: Mapped[str]  # Waypoint winner_id carried through LCM → Iterable
+    recommendation_id: Mapped[str]  # Waypoint winner_id for this exposure
+    item_id: Mapped[str | None] = mapped_column(default=None)
+    item_version: Mapped[str | None] = mapped_column(default=None)
+    arm: Mapped[str | None] = mapped_column(default=None)  # A, B, or unknown
     source: Mapped[str]  # e.g. "iterable_n8n", "manual"
     run_id: Mapped[str | None] = mapped_column(default=None)
     pro_id: Mapped[str] = mapped_column(default="")
@@ -264,6 +270,8 @@ class TouchOutcomeRow(Base):
     clicked: Mapped[bool | None] = mapped_column(Boolean, default=None)
     replied: Mapped[bool | None] = mapped_column(Boolean, default=None)
     unsubscribed: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    first_return_at: Mapped[datetime | None] = mapped_column(default=None)
+    returned_1d: Mapped[bool | None] = mapped_column(Boolean, default=None)
     returned_7d: Mapped[bool | None] = mapped_column(Boolean, default=None)
     returned_14d: Mapped[bool | None] = mapped_column(Boolean, default=None)
     returned_30d: Mapped[bool | None] = mapped_column(Boolean, default=None)
