@@ -325,8 +325,9 @@ def create_app(
     async def ingest_outcomes(
         body: list[TouchOutcomeIn], session: SessionDep, _: AuthDep
     ) -> dict[str, int]:
-        """Observed messaging/app-usage outcomes, keyed by recommendation_id.
-        See waypoint.outcomes for the attribution/backfill/idempotency logic."""
+        """Observed outcomes keyed by a canonical winner or neutral exposure id.
+        LCM Personalization intake acknowledgement is not send confirmation;
+        see waypoint.outcomes for attribution and idempotency rules."""
         return await ingest_outcomes_batch(session, body)
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)

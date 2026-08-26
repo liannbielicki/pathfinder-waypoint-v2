@@ -29,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import TouchOutcomeIn
-from waypoint.tables import CandidateRow, RunRow, TouchOutcomeRow, WinnerRow
+from waypoint.tables import CandidateRow, ExposureRow, RunRow, TouchOutcomeRow, WinnerRow
 
 _OUTCOME_FLAGS = (
     "delivered", "clicked", "replied", "unsubscribed",
@@ -62,14 +62,26 @@ def derive_checkpoint_flags(
 
 async def _prefetch_winners(
     session: AsyncSession, body: list[TouchOutcomeIn]
-) -> tuple[dict[str, WinnerRow], dict[str, RunRow], dict[str, CandidateRow]]:
+) -> tuple[dict[str, WinnerRow], dict[str, ExposureRow], dict[str, RunRow], dict[str, CandidateRow]]:
     winner_ids = {item.recommendation_id for item in body}
     winners = (
         (await session.execute(select(WinnerRow).where(WinnerRow.id.in_(winner_ids))))
         .scalars().all()
     )
     winners_by_id = {w.id: w for w in winners}
+    exposure_ids = {
+        item.exposure_id or item.recommendation_id
+        for item in body
+        if item.recommendation_id not in winners_by_id
+    }
+    exposures = (
+        (await session.execute(select(ExposureRow).where(ExposureRow.id.in_(exposure_ids))))
+        .scalars().all()
+        if exposure_ids else []
+    )
+    exposures_by_id = {e.id: e for e in exposures}
     run_ids = {w.run_id for w in winners}
+    run_ids.update(e.run_id for e in exposures if e.run_id)
     candidate_ids = {w.candidate_id for w in winners if w.candidate_id}
     runs_by_id: dict[str, RunRow] = {}
     if run_ids:
@@ -81,7 +93,7 @@ async def _prefetch_winners(
             await session.execute(select(CandidateRow).where(CandidateRow.id.in_(candidate_ids)))
         ).scalars().all()
         candidates_by_id = {c.id: c for c in candidates}
-    return winners_by_id, runs_by_id, candidates_by_id
+    return winners_by_id, exposures_by_id, runs_by_id, candidates_by_id
 
 
 async def _existing_by_key(
@@ -100,23 +112,39 @@ async def _existing_by_key(
 def _attribution_fill(
     item: TouchOutcomeIn,
     winner: WinnerRow | None,
+    exposure: ExposureRow | None,
     run: RunRow | None,
     candidate: CandidateRow | None,
 ) -> tuple[dict[str, Any], str | None]:
-    if winner is None:
-        return {}, "unattributed: recommendation_id matches no winner"
+    if winner is None and exposure is None:
+        return {}, "unattributed: recommendation_id matches no winner or exposure"
+    if exposure is not None:
+        return {
+            "exposure_id": exposure.id,
+            "run_id": exposure.run_id,
+            "pro_id": exposure.pro_id,
+            "org_id": exposure.org_id,
+            "item_id": exposure.item_id,
+            "item_version": exposure.item_version,
+            "arm": exposure.arm,
+            "channel": exposure.channel,
+            "sent_at": exposure.sent_at,
+            "send_status": exposure.send_status,
+        }, None
     recommendation = candidate.recommendation if candidate else {}
     fill = {
         "run_id": winner.run_id,
-        "pro_id": item.pro_id or winner.pro_id,
+        # Winner/exposure records are the authority. Caller identity is
+        # observational input and must never rewrite attribution.
+        "pro_id": winner.pro_id,
         "journey_window": run.journey_window if run else "churn_risk",
         "mechanism": recommendation.get("mechanism", "") if candidate else "",
         # item-supplied non-empty values win; backfill only fills blanks.
         "channel": item.channel or recommendation.get("channel", ""),
-        "org_id": item.org_id or winner.evidence.get("org_id", ""),
-        "item_id": item.item_id or winner.item_id,
-        "item_version": item.item_version or winner.item_version,
-        "arm": item.arm,
+        "org_id": winner.evidence.get("org_id", ""),
+        "item_id": winner.item_id,
+        "item_version": winner.item_version,
+        "arm": item.arm if item.arm is not None else None,
     }
     return fill, None
 
@@ -130,17 +158,17 @@ def _apply_flags(row: TouchOutcomeRow, item: TouchOutcomeIn) -> None:
             setattr(row, key, value)
     if item.sent_at is not None:
         row.sent_at = item.sent_at
+    if item.send_status != "unknown":
+        row.send_status = item.send_status
+    if item.send_confirmed_at is not None:
+        row.send_confirmed_at = item.send_confirmed_at
     if item.first_return_at is not None and (
         row.first_return_at is None or item.first_return_at < row.first_return_at
     ):
         row.first_return_at = item.first_return_at
-    if item.item_id is not None:
-        row.item_id = item.item_id
-    if item.item_version is not None:
-        row.item_version = item.item_version
-    if item.arm is not None:
-        row.arm = item.arm
-    if row.sent_at is not None and row.first_return_at is not None:
+    # Intake/QA acknowledgement is not delivery. Checkpoint clocks start only
+    # once the source has confirmed the message was sent.
+    if row.send_status == "confirmed" and row.sent_at is not None and row.first_return_at is not None:
         derived = derive_checkpoint_flags(
             sent_at=row.sent_at, first_return_at=row.first_return_at
         )
@@ -185,32 +213,37 @@ def _apply_item(
     session: AsyncSession,
     item: TouchOutcomeIn,
     winner: WinnerRow | None,
+    exposure: ExposureRow | None,
     run: RunRow | None,
     candidate: CandidateRow | None,
     existing_by_key: dict[tuple[str, str], TouchOutcomeRow],
 ) -> bool:
     """Adds or updates one outcome row; returns True when it lacks attribution."""
-    fill, limitation = _attribution_fill(item, winner, run, candidate)
+    fill, limitation = _attribution_fill(item, winner, exposure, run, candidate)
     key = (item.recommendation_id, item.source)
     existing = existing_by_key.get(key)
     if existing is None:
         fields = {
             "recommendation_id": item.recommendation_id,
             "source": item.source,
-            "org_id": item.org_id,
+            "org_id": "",
             "channel": item.channel,
             "sent_at": item.sent_at,
             "first_return_at": item.first_return_at,
             "evidence_limitation": limitation,
-            "pro_id": item.pro_id,
+            "pro_id": "",
+            "exposure_id": item.exposure_id,
+            "send_status": item.send_status,
+            "send_confirmed_at": item.send_confirmed_at,
             **{k: getattr(item, k) for k in _OUTCOME_FLAGS},
             **fill,
         }
-        if item.first_return_at is not None:
-            fields.update(derive_checkpoint_flags(
-                sent_at=item.sent_at, first_return_at=item.first_return_at
-            ))
         row = TouchOutcomeRow(**fields)
+        if row.send_status == "confirmed" and row.first_return_at is not None:
+            for key, value in derive_checkpoint_flags(
+                sent_at=row.sent_at, first_return_at=row.first_return_at
+            ).items():
+                setattr(row, key, value)
         session.add(row)
         existing_by_key[key] = row
     else:
@@ -235,6 +268,7 @@ async def _apply_batch(
     session: AsyncSession,
     body: list[TouchOutcomeIn],
     winners: dict[str, WinnerRow],
+    exposures: dict[str, ExposureRow],
     runs: dict[str, RunRow],
     candidates: dict[str, CandidateRow],
 ) -> int:
@@ -243,18 +277,19 @@ async def _apply_batch(
     unattributed = 0
     for item in body:
         winner = winners.get(item.recommendation_id)
+        exposure = exposures.get(item.exposure_id or item.recommendation_id)
         run = runs.get(winner.run_id) if winner else None
         candidate = (
             candidates.get(winner.candidate_id) if winner and winner.candidate_id else None
         )
-        if _apply_item(session, item, winner, run, candidate, existing_by_key):
+        if _apply_item(session, item, winner, run, candidate, existing_by_key, exposure):
             unattributed += 1
     return unattributed
 
 
 async def ingest(session: AsyncSession, body: list[TouchOutcomeIn]) -> dict[str, int]:
-    winners, runs, candidates = await _prefetch_winners(session, body)
-    unattributed = await _apply_batch(session, body, winners, runs, candidates)
+    winners, exposures, runs, candidates = await _prefetch_winners(session, body)
+    unattributed = await _apply_batch(session, body, winners, exposures, runs, candidates)
     try:
         await session.commit()
     except IntegrityError:
@@ -262,7 +297,7 @@ async def ingest(session: AsyncSession, body: list[TouchOutcomeIn]) -> dict[str,
         # first: rebuild the batch against the now-current rows as updates
         # instead of 500ing and losing every sibling item in the batch.
         await session.rollback()
-        winners, runs, candidates = await _prefetch_winners(session, body)
-        unattributed = await _apply_batch(session, body, winners, runs, candidates)
+        winners, exposures, runs, candidates = await _prefetch_winners(session, body)
+        unattributed = await _apply_batch(session, body, winners, exposures, runs, candidates)
         await session.commit()
     return {"stored": len(body), "unattributed": unattributed}
