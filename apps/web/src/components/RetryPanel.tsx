@@ -6,6 +6,7 @@ import {
   PENDING_AUDIENCE_QUERY,
   createRun,
   isRunSettled,
+  type RunCreateInput,
   type RunDetail,
 } from "@/lib/api";
 
@@ -43,14 +44,15 @@ export function RetryPanel({ run }: { run: RunDetail }) {
     setError(null);
     try {
       // audience_query is always the sentinel at creation — the n8n flow
-      // stamps the real version during the run. journey_window is not exposed
-      // on RunDetail, so a rerun falls back to the server default for it.
+      // stamps the real version during the run.
       const view = await createRun({
         pro_ids: retries.map((r) => r.proId),
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: run.audience_run,
         channels: run.channels,
         loop_config: run.loop_config,
+        // RunDetail types the window as plain string; the server validates it.
+        journey_window: run.journey_window as RunCreateInput["journey_window"],
       });
       setRetryRun(view.id);
     } catch (e) {

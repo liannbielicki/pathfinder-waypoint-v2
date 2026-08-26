@@ -35,6 +35,7 @@ from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
 from waypoint.tables import (
     CandidateRow,
+    EvolveRoundRow,
     FleetControlRow,
     HandoffRow,
     JobRow,
@@ -50,6 +51,7 @@ class LoginRequest(BaseModel):
 
 class RunDetail(RunView):
     stages: dict[str, Any]
+    rounds: list[dict[str, Any]]  # per-Pro evolve ledger: loop progress for the console
     candidates: list[dict[str, Any]]
     winners: list[dict[str, Any]]
     measurements: list[dict[str, Any]]
@@ -246,6 +248,17 @@ def create_app(
             .scalars()
             .all()
         )
+        rounds = (
+            (
+                await session.execute(
+                    select(EvolveRoundRow)
+                    .where(EvolveRoundRow.run_id == run_id)
+                    .order_by(EvolveRoundRow.pro_id, EvolveRoundRow.round)
+                )
+            )
+            .scalars()
+            .all()
+        )
         winners = (
             (await session.execute(select(WinnerRow).where(WinnerRow.run_id == run_id)))
             .scalars()
@@ -264,6 +277,16 @@ def create_app(
         return RunDetail(
             **_view(run, spent=await _spent(session, run)).model_dump(),
             stages=stages,
+            rounds=[
+                {
+                    "pro_id": r.pro_id,
+                    "round": r.round,
+                    "mechanism": r.mechanism,
+                    "outcome": r.outcome,
+                    "score_pp": r.score_pp,
+                }
+                for r in rounds
+            ],
             candidates=[
                 {
                     "id": c.id,

@@ -14,6 +14,7 @@ const RUN_BASE = {
   stop_reason: null,
   created_at: "2026-08-06T18:00:00Z",
   stages: {},
+  rounds: [],
   candidates: [],
   winners: [],
   measurements: [],

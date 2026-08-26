@@ -9,6 +9,7 @@ from tests.conftest import TEST_SETTINGS
 from waypoint.api import create_app
 from waypoint.tables import (
     CandidateRow,
+    EvolveRoundRow,
     HandoffRow,
     JobRow,
     MeasurementRow,
@@ -85,6 +86,30 @@ async def test_run_detail_winner_shows_warm_start_eligibility(
     assert winner["warm_start_eligible"] is False
     assert winner["validation_status"] is None
     assert winner["fingerprint_version"] == "fp_v1"
+
+
+async def test_run_detail_exposes_per_pro_loop_rounds(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    db_session.add(
+        EvolveRoundRow(
+            run_id=created["id"], pro_id="pro_1", round=1,
+            mechanism="discount", outcome="win", score_pp=1.2,
+        )
+    )
+    await db_session.commit()
+    detail = (await auth_client.get(f"/api/runs/{created['id']}")).json()
+    assert detail["rounds"] == [
+        {
+            "pro_id": "pro_1",
+            "round": 1,
+            "mechanism": "discount",
+            "outcome": "win",
+            "score_pp": 1.2,
+        }
+    ]
 
 
 async def test_unknown_run_is_404(auth_client: httpx.AsyncClient) -> None:

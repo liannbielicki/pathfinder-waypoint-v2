@@ -27,7 +27,8 @@
           "status": {
             "enum": [
               "accepted",
-              "rejected"
+              "rejected",
+              "duplicate"
             ],
             "title": "Status",
             "type": "string"
@@ -90,6 +91,17 @@
             "title": "Channels",
             "type": "array"
           },
+          "journey_window": {
+            "default": "churn_risk",
+            "enum": [
+              "churn_risk",
+              "churn_risk_open",
+              "onboarding",
+              "upsell"
+            ],
+            "title": "Journey Window",
+            "type": "string"
+          },
           "loop_config": {
             "anyOf": [
               {
@@ -124,6 +136,10 @@
       },
       "RunDetail": {
         "properties": {
+          "agents_in_flight": {
+            "title": "Agents In Flight",
+            "type": "integer"
+          },
           "audience_query": {
             "title": "Audience Query",
             "type": "string"
@@ -183,6 +199,10 @@
             "title": "Id",
             "type": "string"
           },
+          "journey_window": {
+            "title": "Journey Window",
+            "type": "string"
+          },
           "killed": {
             "title": "Killed",
             "type": "boolean"
@@ -207,6 +227,14 @@
               "type": "string"
             },
             "title": "Pro Ids",
+            "type": "array"
+          },
+          "rounds": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rounds",
             "type": "array"
           },
           "stages": {
@@ -252,12 +280,15 @@
           "cost_spent_usd",
           "stop_reason",
           "created_at",
+          "journey_window",
           "stages",
+          "rounds",
           "candidates",
           "winners",
           "measurements",
           "handoffs",
-          "killed"
+          "killed",
+          "agents_in_flight"
         ],
         "title": "RunDetail",
         "type": "object"
@@ -307,6 +338,10 @@
             "title": "Id",
             "type": "string"
           },
+          "journey_window": {
+            "title": "Journey Window",
+            "type": "string"
+          },
           "loop_config": {
             "additionalProperties": {
               "type": "number"
@@ -350,9 +385,155 @@
           "cost_reserved_usd",
           "cost_spent_usd",
           "stop_reason",
-          "created_at"
+          "created_at",
+          "journey_window"
         ],
         "title": "RunView",
+        "type": "object"
+      },
+      "TouchOutcomeIn": {
+        "description": "One observed-outcome record from an outcome source (n8n Iterable/Amplitude\nflow, or manual backfill).\n\nTWO ways to name the touch, either is enough:\n\n* `recommendation_id` \u2014 the Waypoint winner_id, echoed back under either\n  spelling (`recommendation_id` or `row_id`).\n* `run_id` + `pro_id` \u2014 the NATURAL key, and the one that needs nothing\n  stamped into a message: `uq_winners_run_pro` makes one run plus one pro\n  exactly one winner. Both halves already cross the boundary on their own\n  (the LCM intake batch IS the run id, and the Iterable recipient IS the\n  pro_uuid), so an outcome is attributable without Waypoint ids ever\n  entering Iterable.\n\n`routing` is how a REAL send is told apart from a guardrailed test send that\nmerely carries a real Pro's context. It must be `route-to-pro` for the\nrecord to count as evidence \u2014 see waypoint.outcomes.",
+        "properties": {
+          "channel": {
+            "default": "",
+            "title": "Channel",
+            "type": "string"
+          },
+          "clicked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clicked"
+          },
+          "delivered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered"
+          },
+          "org_id": {
+            "default": "",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_id": {
+            "default": "",
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "recommendation_id": {
+            "default": "",
+            "title": "Recommendation Id",
+            "type": "string"
+          },
+          "replied": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replied"
+          },
+          "returned_14d": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returned 14D"
+          },
+          "returned_30d": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returned 30D"
+          },
+          "returned_7d": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returned 7D"
+          },
+          "returned_90d": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returned 90D"
+          },
+          "routing": {
+            "default": "",
+            "title": "Routing",
+            "type": "string"
+          },
+          "run_id": {
+            "default": "",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "source": {
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          },
+          "unsubscribed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unsubscribed"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "TouchOutcomeIn",
         "type": "object"
       },
       "ValidationError": {
@@ -463,6 +644,149 @@
           }
         },
         "summary": "Fleet Settings"
+      }
+    },
+    "/api/funnel": {
+      "get": {
+        "description": "Audience -> verdict -> LCM intake -> sent -> returned, from our own\ntables. OPERATOR auth: `detail=true` returns themes, mechanisms and\norg_ids, which the automation token has no business exporting \u2014 the\nmachine gets /api/funnel/worklist instead.",
+        "operationId": "funnel_api_funnel_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "detail",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Detail",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Funnel Api Funnel Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Funnel"
+      }
+    },
+    "/api/funnel/worklist": {
+      "get": {
+        "description": "The shipped touches as bare (run_id, pro_id) pairs \u2014 the n8n flow's\nwork list. Shares the outcomes token because it is the same automation,\nand carries no theme/mechanism/org_id for the reason in funnel.worklist.",
+        "operationId": "funnel_worklist_api_funnel_worklist_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Funnel Worklist Api Funnel Worklist Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Funnel Worklist"
+      }
+    },
+    "/api/outcomes": {
+      "post": {
+        "description": "Observed messaging/app-usage outcomes, keyed by recommendation_id.\nSee waypoint.outcomes for the attribution/backfill/idempotency logic.",
+        "operationId": "ingest_outcomes_api_outcomes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/TouchOutcomeIn"
+                },
+                "title": "Body",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Ingest Outcomes Api Outcomes Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Outcomes"
       }
     },
     "/api/runs": {

@@ -38,6 +38,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/funnel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Funnel
+         * @description Audience -> verdict -> LCM intake -> sent -> returned, from our own
+         *     tables. OPERATOR auth: `detail=true` returns themes, mechanisms and
+         *     org_ids, which the automation token has no business exporting — the
+         *     machine gets /api/funnel/worklist instead.
+         */
+        get: operations["funnel_api_funnel_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/funnel/worklist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Funnel Worklist
+         * @description The shipped touches as bare (run_id, pro_id) pairs — the n8n flow's
+         *     work list. Shares the outcomes token because it is the same automation,
+         *     and carries no theme/mechanism/org_id for the reason in funnel.worklist.
+         */
+        get: operations["funnel_worklist_api_funnel_worklist_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/outcomes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest Outcomes
+         * @description Observed messaging/app-usage outcomes, keyed by recommendation_id.
+         *     See waypoint.outcomes for the attribution/backfill/idempotency logic.
+         */
+        post: operations["ingest_outcomes_api_outcomes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs": {
         parameters: {
             query?: never;
@@ -162,6 +228,12 @@ export interface components {
             audience_run: string;
             /** Channels */
             channels: string[];
+            /**
+             * Journey Window
+             * @default churn_risk
+             * @enum {string}
+             */
+            journey_window: "churn_risk" | "churn_risk_open" | "onboarding" | "upsell";
             /** Loop Config */
             loop_config?: {
                 [key: string]: number;
@@ -171,6 +243,8 @@ export interface components {
         };
         /** RunDetail */
         RunDetail: {
+            /** Agents In Flight */
+            agents_in_flight: number;
             /** Audience Query */
             audience_query: string;
             /** Audience Run */
@@ -200,6 +274,8 @@ export interface components {
             }[];
             /** Id */
             id: string;
+            /** Journey Window */
+            journey_window: string;
             /** Killed */
             killed: boolean;
             /** Loop Config */
@@ -212,6 +288,10 @@ export interface components {
             }[];
             /** Pro Ids */
             pro_ids: string[];
+            /** Rounds */
+            rounds: {
+                [key: string]: unknown;
+            }[];
             /** Stages */
             stages: {
                 [key: string]: unknown;
@@ -248,6 +328,8 @@ export interface components {
             created_at: string;
             /** Id */
             id: string;
+            /** Journey Window */
+            journey_window: string;
             /** Loop Config */
             loop_config: {
                 [key: string]: number;
@@ -258,6 +340,78 @@ export interface components {
             status: string;
             /** Stop Reason */
             stop_reason: string | null;
+        };
+        /**
+         * TouchOutcomeIn
+         * @description One observed-outcome record from an outcome source (n8n Iterable/Amplitude
+         *     flow, or manual backfill).
+         *
+         *     TWO ways to name the touch, either is enough:
+         *
+         *     * `recommendation_id` — the Waypoint winner_id, echoed back under either
+         *       spelling (`recommendation_id` or `row_id`).
+         *     * `run_id` + `pro_id` — the NATURAL key, and the one that needs nothing
+         *       stamped into a message: `uq_winners_run_pro` makes one run plus one pro
+         *       exactly one winner. Both halves already cross the boundary on their own
+         *       (the LCM intake batch IS the run id, and the Iterable recipient IS the
+         *       pro_uuid), so an outcome is attributable without Waypoint ids ever
+         *       entering Iterable.
+         *
+         *     `routing` is how a REAL send is told apart from a guardrailed test send that
+         *     merely carries a real Pro's context. It must be `route-to-pro` for the
+         *     record to count as evidence — see waypoint.outcomes.
+         */
+        TouchOutcomeIn: {
+            /**
+             * Channel
+             * @default
+             */
+            channel: string;
+            /** Clicked */
+            clicked?: boolean | null;
+            /** Delivered */
+            delivered?: boolean | null;
+            /**
+             * Org Id
+             * @default
+             */
+            org_id: string;
+            /**
+             * Pro Id
+             * @default
+             */
+            pro_id: string;
+            /**
+             * Recommendation Id
+             * @default
+             */
+            recommendation_id: string;
+            /** Replied */
+            replied?: boolean | null;
+            /** Returned 14D */
+            returned_14d?: boolean | null;
+            /** Returned 30D */
+            returned_30d?: boolean | null;
+            /** Returned 7D */
+            returned_7d?: boolean | null;
+            /** Returned 90D */
+            returned_90d?: boolean | null;
+            /**
+             * Routing
+             * @default
+             */
+            routing: string;
+            /**
+             * Run Id
+             * @default
+             */
+            run_id: string;
+            /** Sent At */
+            sent_at?: string | null;
+            /** Source */
+            source: string;
+            /** Unsubscribed */
+            unsubscribed?: boolean | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -334,6 +488,108 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    funnel_api_funnel_get: {
+        parameters: {
+            query?: {
+                days?: number;
+                detail?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    funnel_worklist_api_funnel_worklist_get: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingest_outcomes_api_outcomes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TouchOutcomeIn"][];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

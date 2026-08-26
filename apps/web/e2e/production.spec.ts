@@ -42,6 +42,7 @@ const MIXED_RUN = {
   stop_reason: null,
   created_at: "2026-08-06T18:00:00Z",
   stages: { context: {}, generate: {}, critics: {}, screen: {}, search: {}, final: {}, score: {}, measure: {}, ready: {} },
+  rounds: [],
   candidates: [CANDIDATE("pro_a")],
   winners: [
     { id: "win-a", pro_id: "pro_a", kind: "winner", candidate_id: "cand-pro_a", rationale: "Open AR is the signal.", evidence: { org_id: "org_a" } },

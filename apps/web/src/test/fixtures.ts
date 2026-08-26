@@ -1,4 +1,9 @@
-import type { RunDetail } from "@/lib/api";
+import type { RunDetail, Winner } from "@/lib/api";
+
+export const WINNER_FIXTURE: Winner = {
+  id: "w1", pro_id: "pro_1", kind: "winner", candidate_id: "c1",
+  rationale: "", evidence: {},
+};
 
 export const RUN_FIXTURE: RunDetail = {
   id: "run-1",
@@ -18,7 +23,9 @@ export const RUN_FIXTURE: RunDetail = {
   cost_spent_usd: "0.12",
   stop_reason: null,
   created_at: "2026-08-06T18:00:00Z",
+  journey_window: "churn_risk",
   stages: {},
+  rounds: [],
   candidates: [],
   winners: [],
   measurements: [],

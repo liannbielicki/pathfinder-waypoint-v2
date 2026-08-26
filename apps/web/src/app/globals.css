@@ -186,6 +186,33 @@ legend {
   margin-block: 0.25rem;
 }
 
+/* Per-pro loop progress: ~15 rows visible, the rest scroll — a 60+ pro run
+   must never push the winner review below the fold. */
+.loop-progress > summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.loop-rows {
+  max-height: 24rem;
+  overflow-y: auto;
+  margin-top: 0.75rem;
+}
+
+.loop-rows details {
+  border-top: 1px solid var(--border);
+  padding-block: 0.4rem;
+}
+
+.loop-rows summary {
+  cursor: pointer;
+}
+
+.loop-rows ol {
+  margin: 0.25rem 0 0.25rem 1rem;
+  font-size: 0.85rem;
+}
+
 .run-settings {
   display: grid;
   grid-template-columns: 1fr auto;
