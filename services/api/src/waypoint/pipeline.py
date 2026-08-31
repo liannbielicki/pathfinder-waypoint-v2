@@ -13,6 +13,7 @@ is no canned fallback anywhere: a model failure is a failed job.
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -24,7 +25,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
@@ -32,7 +33,8 @@ from waypoint.calls import BudgetExhausted, MeteredLLM
 from waypoint.catalog import feature_context
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
-from waypoint.llm import LLMResult, Pricing, RateLimitExhausted, extract_json, worst_case_cost
+from waypoint.items import resolve_item
+from waypoint.llm import Pricing, RateLimitExhausted, extract_json, worst_case_cost
 from waypoint.loop import (
     MAX_CANDIDATE_COUNT,
     LoopConfig,
@@ -42,7 +44,6 @@ from waypoint.loop import (
     replay,
     stop_reason,
 )
-from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import (
     PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
@@ -91,6 +92,8 @@ from waypoint.tables import (
     WinnerRow,
 )
 from waypoint.warmstart import FINGERPRINT_VERSION, build_fingerprint, retrieve
+
+log = logging.getLogger("waypoint.pipeline")
 
 STAGES = ("context", "evolve", "final", "score", "measure", "ready")
 
@@ -222,7 +225,7 @@ class PipelineDeps:
     queue: QueueOps
     get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
-    create_plan: Any  # async (winner, llm, catalog) -> MeasurementPlan
+    create_plan: Any  # (mechanism: str, catalog) -> MeasurementPlan (deterministic)
     metric_catalog: dict[str, Any] = field(default_factory=dict)
     # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
     # keeps the idea context to description+state; on adds works_on hints.
@@ -1379,16 +1382,50 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         # A stage that ran on a short-handed panel is flagged on the winner —
         # the output still ships, with the disclaimer, instead of abstaining.
         degraded_panels = _degraded_panel_notes(champion.persona_evidence)
+        # Plain values survive the rescue rollback below — Session.rollback()
+        # expires loaded ORM objects, and an expired `champion` attribute read
+        # would raise MissingGreenlet (same trick as run_id in run_job).
+        champion_id = champion.id
+        recommendation = dict(champion.recommendation)
+        screen_score = champion.score.get("screen", {})
+        run_id = state.run.id  # state.run is ORM too — expired by a rollback
+        # V3 canonical learning identity. Resolution failure degrades to an
+        # audit-only winner (legacy_unresolved) — it never blocks the winner.
+        item_id = item_version = None
+        legacy_unresolved = False
+        try:
+            resolved = await resolve_item(deps.store.session, recommendation)
+            item_id, item_version = resolved.item_id, resolved.item_version
+        except Exception as error:
+            legacy_unresolved = True
+            # A DB-level failure leaves the session needing a rollback; without
+            # one the winner insert below dies at commit (same rule as
+            # warmstart.retrieve, guarded the same way — a dead connection must
+            # still degrade, not crash the run).
+            if isinstance(error, SQLAlchemyError):
+                try:
+                    await deps.store.session.rollback()
+                except Exception:
+                    log.warning(
+                        "rollback failed after a degraded item resolution", exc_info=True
+                    )
+            log.warning(
+                "item resolution failed for run %s pro %s; winner stays audit-only",
+                run_id, state.pro_id, exc_info=True,
+            )
         deps.store.session.add(
             WinnerRow(
-                run_id=state.run.id,
+                run_id=run_id,
                 pro_id=state.pro_id,
                 kind="winner",
-                candidate_id=champion.id,
-                rationale=champion.recommendation["manager_rationale"],
+                candidate_id=champion_id,
+                item_id=item_id,
+                item_version=item_version,
+                legacy_unresolved=legacy_unresolved,
+                rationale=recommendation["manager_rationale"],
                 evidence={
                     "final": final,
-                    "screen": champion.score.get("screen", {}),
+                    "screen": screen_score,
                     "org_id": state.brief.org_uuid if state.brief else "",
                     **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
@@ -1415,35 +1452,6 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         )
     await deps.store.session.commit()
     return {}
-
-
-class _KeyedMeasureLLM:
-    """Adapts the metered facade to measurement.py's legacy signature, pinning
-    the deterministic call key — measurement.py stays untouched."""
-
-    def __init__(self, llm: MeteredLLM, pro_id: str) -> None:
-        self.llm = llm
-        self.pro_id = pro_id
-
-    async def complete(
-        self,
-        tier: str,
-        prompt: str,
-        run_id: str,
-        stage: str,
-        system: str | None = None,
-        max_tokens: int = 1200,
-    ) -> LLMResult:
-        return await self.llm.complete(
-            call_key=f"{run_id}:{self.pro_id}:measure",
-            tier=tier,
-            prompt=prompt,
-            run_id=run_id,
-            pro_id=self.pro_id,
-            stage=stage,
-            system=system,
-            max_tokens=max_tokens,
-        )
 
 
 async def _attach_follow_up(
@@ -1498,34 +1506,15 @@ async def _stage_measure(state: PipelineState, deps: PipelineDeps) -> dict[str, 
         return {}
     if await deps.store.measurement_for(winner.id) is not None:
         return {}  # resume
-    await _resolve_abandoned_calls(state, deps)  # a crashed measure call may have paid
+    await _resolve_abandoned_calls(state, deps)  # a crashed wargame call may have paid
     candidate = await deps.store.session.get(CandidateRow, winner.candidate_id)
     assert candidate is not None
     await _guard(state, deps)
     if "follow_up" not in winner.evidence and "follow_up_unavailable" not in winner.evidence:
         await _attach_follow_up(state, deps, winner, candidate)
         await deps.store.session.commit()
-    context = WinnerContext(
-        run_id=state.run.id,
-        pro_id=winner.pro_id,
-        winner_id=winner.id,
-        mechanism=candidate.recommendation["mechanism"],
-        title=candidate.recommendation["title"],
-    )
-    try:
-        plan = await deps.create_plan(
-            context,
-            _KeyedMeasureLLM(deps.llm, state.pro_id),
-            deps.metric_catalog,
-        )
-    except UnmeasurableWinner as error:
-        # Never invent a measurement source: an unmeasurable winner abstains.
-        # Transient failures (429 storms, outages) propagate instead — a
-        # validated winner must survive retryable infrastructure trouble.
-        winner.kind = "abstained"
-        winner.rationale = f"unmeasurable: {error}"
-        await deps.store.session.commit()
-        return {}
+    # V3: deterministic selection — no paid measure call, nothing unmeasurable.
+    plan = deps.create_plan(candidate.recommendation["mechanism"], deps.metric_catalog)
     deps.store.session.add(
         MeasurementRow(
             run_id=state.run.id,
@@ -1631,15 +1620,6 @@ async def finalize_stalled_runs(session: AsyncSession) -> int:
     for run_id in run_ids:
         await finalize_run(session, run_id)
     return len(run_ids)
-
-
-@dataclass
-class WinnerContext:
-    run_id: str
-    pro_id: str
-    winner_id: str
-    mechanism: str
-    title: str
 
 
 STAGE_HANDLERS = {

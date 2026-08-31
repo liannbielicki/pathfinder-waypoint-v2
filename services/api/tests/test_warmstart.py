@@ -7,6 +7,7 @@ The load-bearing rule under test: ONLY outcome ingestion of a real observed
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -90,6 +91,26 @@ def outcome(**kwargs) -> TouchOutcomeIn:
     return TouchOutcomeIn(recommendation_id="win-ws", source="iterable_n8n", **kwargs)
 
 
+SENT_WS = datetime(2026, 8, 1, 12, tzinfo=UTC)
+
+
+def returned_within_7d(**kwargs) -> TouchOutcomeIn:
+    """V3: a 7d positive is derived from a confirmed send + real return event,
+    never asserted by the caller."""
+    return outcome(
+        send_status="confirmed", sent_at=SENT_WS,
+        first_return_at=SENT_WS + timedelta(days=3), **kwargs,
+    )
+
+
+def no_return_within_7d(**kwargs) -> TouchOutcomeIn:
+    """First return long after day 7: a derived, measured 7d negative."""
+    return outcome(
+        send_status="confirmed", sent_at=SENT_WS,
+        first_return_at=SENT_WS + timedelta(days=20), **kwargs,
+    )
+
+
 # --- sanitization -----------------------------------------------------------
 
 
@@ -132,7 +153,7 @@ async def test_stamped_winner_carries_fingerprint_and_version(
 async def test_observed_7d_return_promotes_the_winner(
     db_session: AsyncSession, seeded_winner: str
 ) -> None:
-    await ingest(db_session, [outcome(returned_7d=True, channel="sms")])
+    await ingest(db_session, [returned_within_7d(channel="sms")])
     winner = await _winner(db_session)
     assert winner.warm_start_eligible is True
     assert winner.validation_status == "validated"
@@ -147,7 +168,7 @@ async def test_observed_7d_return_promotes_the_winner(
 async def test_observed_no_return_records_a_negative_and_stays_ineligible(
     db_session: AsyncSession, seeded_winner: str
 ) -> None:
-    await ingest(db_session, [outcome(returned_7d=False, channel="sms")])
+    await ingest(db_session, [no_return_within_7d(channel="sms")])
     winner = await _winner(db_session)
     assert winner.warm_start_eligible is False
     assert winner.validation_status == "validated_negative"
@@ -168,7 +189,7 @@ async def test_persona_scored_winner_without_an_outcome_is_never_eligible(
 async def test_duplicate_ingestion_converges(
     db_session: AsyncSession, seeded_winner: str
 ) -> None:
-    item = outcome(returned_7d=True, channel="sms")
+    item = returned_within_7d(channel="sms")
     await ingest(db_session, [item])
     first = dict((await _winner(db_session)).warm_start_evidence)
     await ingest(db_session, [item])
@@ -183,10 +204,10 @@ async def test_late_7d_arrival_promotes_on_resubmission(
 ) -> None:
     await ingest(db_session, [outcome(delivered=True, channel="sms")])
     assert (await _winner(db_session)).validation_status is None
-    await ingest(db_session, [outcome(returned_7d=True, channel="sms")])
+    await ingest(db_session, [returned_within_7d(channel="sms")])
     assert (await _winner(db_session)).warm_start_eligible is True
     # A later flag-less record must not un-promote it.
-    await ingest(db_session, [outcome(returned_14d=True, channel="sms")])
+    await ingest(db_session, [outcome(delivered=True, channel="sms")])
     winner = await _winner(db_session)
     assert winner.warm_start_eligible is True
     assert winner.validation_status == "validated"
@@ -198,7 +219,7 @@ async def test_unattributed_outcome_promotes_nothing(
     result = await ingest(
         db_session,
         [TouchOutcomeIn(recommendation_id="no-such-winner", source="iterable_n8n",
-                        returned_7d=True)],
+                        delivered=True)],
     )
     assert result["unattributed"] == 1
     winner = await _winner(db_session)
@@ -218,7 +239,11 @@ async def test_no_action_winner_is_not_promoted(db_session: AsyncSession) -> Non
     await db_session.commit()
     await ingest(
         db_session,
-        [TouchOutcomeIn(recommendation_id="win-na", source="iterable_n8n", returned_7d=True)],
+        [TouchOutcomeIn(
+            recommendation_id="win-na", source="iterable_n8n",
+            send_status="confirmed", sent_at=SENT_WS,
+            first_return_at=SENT_WS + timedelta(days=3),
+        )],
     )
     winner = await _winner(db_session, "win-na")
     assert winner.warm_start_eligible is False
@@ -232,7 +257,7 @@ async def test_promotion_survives_the_duplicate_commit_race(
     # loser rebuilds its batch after IntegrityError and must still promote.
     async def _ingest() -> None:
         async with db_session_factory() as session:
-            await ingest(session, [outcome(returned_7d=True, channel="sms")])
+            await ingest(session, [returned_within_7d(channel="sms")])
 
     await asyncio.gather(_ingest(), _ingest())
     winner = await _winner(db_session)
@@ -727,7 +752,7 @@ async def test_a_recently_failed_warm_mechanism_is_skipped(deps: FakeDeps, seede
     deps.db.add(
         TouchOutcomeRow(
             recommendation_id="old-touch", source="iterable_n8n", pro_id="pro_1",
-            mechanism=WARM_MECHANISM, channel="sms", returned_30d=False,
+            mechanism=WARM_MECHANISM, channel="sms", returned_7d=False,
         )
     )
     await deps.db.commit()

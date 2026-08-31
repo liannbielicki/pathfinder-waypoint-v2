@@ -212,19 +212,38 @@ async def ready_rows(
     if pro_id is not None:
         query = query.where(WinnerRow.pro_id == pro_id)
     winners = (await session.execute(query)).scalars().all()
+    if not include_degraded:
+        winners = [w for w in winners if not w.evidence.get("panel_disclaimer")]
+    # Set-based loading: two IN() prefetches instead of two SELECTs per winner.
+    winner_ids = [w.id for w in winners]
+    candidate_ids = [w.candidate_id for w in winners if w.candidate_id]
+    measured_winner_ids: set[str] = set()
+    if winner_ids:
+        measured_winner_ids = {
+            winner_id
+            for winner_id in (
+                await session.execute(
+                    select(MeasurementRow.winner_id).where(
+                        MeasurementRow.winner_id.in_(winner_ids)
+                    )
+                )
+            ).scalars()
+            if winner_id is not None
+        }
+    candidates_by_id: dict[str, CandidateRow] = {}
+    if candidate_ids:
+        candidates_by_id = {
+            c.id: c
+            for c in (
+                await session.execute(
+                    select(CandidateRow).where(CandidateRow.id.in_(candidate_ids))
+                )
+            ).scalars()
+        }
     rows: list[dict[str, Any]] = []
     for winner in winners:
-        if not include_degraded and winner.evidence.get("panel_disclaimer"):
-            continue
-        measurement = (
-            await session.execute(
-                select(MeasurementRow).where(MeasurementRow.winner_id == winner.id)
-            )
-        ).scalar_one_or_none()
-        candidate = (
-            await session.get(CandidateRow, winner.candidate_id) if winner.candidate_id else None
-        )
-        if measurement is not None and candidate is not None:
+        candidate = candidates_by_id.get(winner.candidate_id) if winner.candidate_id else None
+        if winner.id in measured_winner_ids and candidate is not None:
             rows.append(
                 {
                     "pro_uuid": winner.pro_id,

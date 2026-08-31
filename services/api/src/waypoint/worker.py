@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from waypoint import queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
+from waypoint.checkpoints import sweep_if_enabled
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
@@ -46,18 +48,21 @@ CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibrat
 
 
 async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> None:
-    """KILL_SWITCH and DAY_COST_USD are env-owned; apply them on startup."""
+    """KILL_SWITCH, LEARNING_KILL_SWITCH, and DAY_COST_USD are env-owned;
+    apply them on startup. The two kill switches are independent."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is None:
         session.add(
             FleetControlRow(
                 id=1,
                 killed=settings.KILL_SWITCH,
+                learning_killed=settings.LEARNING_KILL_SWITCH,
                 day_cost_limit=settings.DAY_COST_USD,
             )
         )
     else:
         fleet.killed = settings.KILL_SWITCH
+        fleet.learning_killed = settings.LEARNING_KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
     await session.commit()
 
@@ -292,7 +297,7 @@ async def _worker_loop(
 
 
 async def main() -> None:
-    from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
+    from waypoint.measurement import METRIC_CATALOG, select_indicators
 
     logging.basicConfig(level="INFO")
     settings = Settings.load()
@@ -352,7 +357,7 @@ async def main() -> None:
                 pricing=pricing,
                 persona_source=persona_source,
                 calibration=calibration,
-                create_plan=create_measurement_plan,
+                create_plan=select_indicators,
                 metric_catalog=METRIC_CATALOG,
                 maintenance=(index == 0),
                 settings=settings,
@@ -361,8 +366,31 @@ async def main() -> None:
         finally:
             await slots_connection.close()
 
+    async def checkpoint_loop() -> None:
+        # Timed cadence, deliberately NOT tied to worker idleness: a saturated
+        # queue must not starve checkpoint resolution. Bounded per sweep;
+        # failures log and the next tick retries the same rows.
+        while True:
+            await asyncio.sleep(settings.CHECKPOINT_SECONDS)
+            try:
+                async with factory() as session:
+                    result = await sweep_if_enabled(
+                        session,
+                        now=datetime.now(UTC),
+                        limit=settings.CHECKPOINT_LIMIT,
+                    )
+                if result and (result["resolved"] or result["synthesized"]):
+                    log.info(
+                        "checkpoint sweep resolved=%d synthesized=%d",
+                        result["resolved"], result["synthesized"],
+                    )
+            except Exception:
+                log.warning("checkpoint sweep failed; next tick retries", exc_info=True)
+
     log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
-    await asyncio.gather(*(spawn(i) for i in range(settings.WORKER_COUNT)))
+    await asyncio.gather(
+        checkpoint_loop(), *(spawn(i) for i in range(settings.WORKER_COUNT))
+    )
 
 
 if __name__ == "__main__":

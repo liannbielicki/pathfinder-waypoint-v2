@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # ceiling.
     MAX_LLM_IN_FLIGHT: int = Field(default=4, ge=1)
     KILL_SWITCH: bool = False
+    # Independent V3 learning-loop kill switch: stops checkpoint resolution
+    # and outcome-driven learning without stopping run processing.
+    LEARNING_KILL_SWITCH: bool = False
+    # Cadence and per-sweep bound for checkpoint resolution.
+    CHECKPOINT_SECONDS: float = Field(default=300.0, gt=0)
+    CHECKPOINT_LIMIT: int = Field(default=500, ge=1)
     # Feature-catalog CTA feasibility hints in idea context. Default OFF: today's
     # world is SMS-only and we do not yet trust channel<->works_on filtering.
     # Flip ON once multi-channel is live so ideas avoid web-only/broken links.

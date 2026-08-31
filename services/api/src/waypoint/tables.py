@@ -216,6 +216,10 @@ class ExposureRow(Base):
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), default=None)
+    # The winner this exposure realizes or controls for (arm A or B). A
+    # standalone neutral exposure carries none. This link is how a silent
+    # control reaches its winner's causal comparison (outcomes.promote_winners).
+    winner_id: Mapped[str | None] = mapped_column(ForeignKey("winners.id"), default=None)
     pro_id: Mapped[str]
     org_id: Mapped[str] = mapped_column(default="")
     item_id: Mapped[str | None] = mapped_column(default=None)
@@ -224,7 +228,33 @@ class ExposureRow(Base):
     channel: Mapped[str] = mapped_column(default="")
     send_status: Mapped[str] = mapped_column(default="unknown")
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    learning_version: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ItemRow(Base):
+    """Canonical reusable theme item. The corpus is expandable and organic:
+    resolution (items.py) creates items and versions from winners'
+    recommendations — no fixed theme set exists anywhere. concept_hash backs
+    the unique constraint so concurrent resolvers cannot split identity."""
+
+    __tablename__ = "items"
+    __table_args__ = (
+        UniqueConstraint("mechanism", "channel", "concept_hash", name="uq_items_identity"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    mechanism: Mapped[str]
+    channel: Mapped[str] = mapped_column(default="")
+    concept: Mapped[str]  # canonical pro-facing concept text (current version)
+    concept_hash: Mapped[str]
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    # Organic, versioned metadata: prior concept versions and resolver notes.
+    item_metadata: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    status: Mapped[str] = mapped_column(default="active")
+    resolver_version: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
 class FleetControlRow(Base):
@@ -232,6 +262,10 @@ class FleetControlRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     killed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Independent V3 learning-loop kill switch: stops checkpoint resolution
+    # and outcome-driven learning without touching run processing (and vice
+    # versa — `killed` never implies this one).
+    learning_killed: Mapped[bool] = mapped_column(Boolean, default=False)
     loop_defaults: Mapped[dict[str, Any]] = mapped_column(default=dict)
     day: Mapped[str | None] = mapped_column(default=None)
     day_cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
@@ -304,6 +338,9 @@ class TouchOutcomeRow(Base):
     returned_30d: Mapped[bool | None] = mapped_column(Boolean, default=None)
     returned_90d: Mapped[bool | None] = mapped_column(Boolean, default=None)
     evidence_limitation: Mapped[str | None] = mapped_column(default=None)
+    # Stamped by the checkpoint sweep when it resolves a horizon (audit trail
+    # for which resolver version turned "unmeasured" into a measured negative).
+    checkpoint_version: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 

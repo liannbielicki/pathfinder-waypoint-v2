@@ -23,6 +23,8 @@ _TABLES = (
     "llm_calls",
     "candidates",
     "touch_outcomes",
+    "exposures",
+    "items",
     "persona_evals",
     "runs",
     "llm_usage",
@@ -78,8 +80,7 @@ from decimal import Decimal
 from waypoint import queue as queue_module
 from waypoint.calls import MeteredLLM, RecordedCalls
 from waypoint.llm import LLMResult, Pricing, RateLimitExhausted
-from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
-from waypoint.models import MeasurementIndicator, MeasurementPlan
+from waypoint.measurement import METRIC_CATALOG, select_indicators
 from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgContextBatch
 from waypoint.personas import Persona
 from waypoint.pipeline import PipelineDeps, PostgresStore, QueueOps
@@ -166,7 +167,6 @@ CRITIC_OK = json.dumps([{"idea_index": 0, "block_kind": "none", "reason": "groun
 CRITIC_BLOCK = json.dumps(
     [{"idea_index": 0, "block_kind": "ungrounded", "reason": "invented AR balance"}]
 )
-MEASURE_JSON = json.dumps({"indicators": [{"key": "invoices_sent"}]})
 WARGAME_JSON = json.dumps({
     "on_return": {"action": "Send a congratulations nudge toward the feature used",
                   "channel": "email"},
@@ -199,7 +199,6 @@ class FakeLLM:
             "rank": RANK_OK,
             "screen": [reactions_json(5.3)],
             "final": reactions_json(5.3),
-            "measure": MEASURE_JSON,
             "wargame": WARGAME_JSON,
         }
 
@@ -281,21 +280,6 @@ class CrashableStore(PostgresStore):
             raise InjectedCrash(f"crashed after {stage}")
 
 
-async def fake_create_plan(winner, llm, catalog) -> MeasurementPlan:
-    return MeasurementPlan(
-        indicators=[
-            MeasurementIndicator(
-                key="invoices_sent",
-                label="Invoices sent",
-                direction="increase",
-                source="billing",
-                window_days=30,
-                rationale="The proposal sends invoices.",
-            )
-        ]
-    )
-
-
 class NoFleetSlots:
     """No-op stand-in for the fleet limiter; tests don't exercise the cap."""
 
@@ -333,7 +317,7 @@ class FakeDeps(PipelineDeps):
             calibration=load_calibration(
                 Path(__file__).parents[1] / "data" / "reaction_churn_calibration_cards.json"
             ),
-            create_plan=create_measurement_plan,
+            create_plan=select_indicators,
             metric_catalog=METRIC_CATALOG,
         )
         self.db = session

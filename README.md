@@ -17,6 +17,44 @@ Start here:
 - `contracts/openapi.json` — committed API contract
 - `docs/knowledge/` — preserved legacy audit artifacts (reference only)
 
+## V3 learning loop (architecture)
+
+Waypoint stays recommendation-only; LCM Personalization receives themes and
+creates/QAs/queues/sends the Housecall Pro SMS. LCM intake acknowledgement is
+never proof of delivery — measurement starts at authoritative send
+confirmation (`POST /api/exposures` with `send_status="confirmed"`).
+
+- **Identity** — every winner resolves at creation to a canonical corpus item
+  (`items` table, `services/api/src/waypoint/items.py`): structured
+  (mechanism, channel) + stdlib fuzzy text match over the full corpus, behind
+  one replaceable function (no vector infra). The corpus is organic and
+  expandable — nothing hard-codes a theme set; concept drift bumps
+  `item_version` and preserves prior concepts in `item_metadata`.
+- **Exposures** — `POST /api/exposures` registers exposure-level identity.
+  Arm `A` = treated recommendation, arm `B` = control/neutral (no WinnerRow
+  required). Winner-linked exposures derive identity from the winner; callers
+  can never override attribution identity, and identity is immutable after
+  registration.
+- **Outcomes** — `POST /api/outcomes` (`waypoint/outcomes.py`) attributes
+  events to a winner or exposure. Caller identity fields never rewrite
+  attribution.
+- **Checkpoints** — 24-hour / 7-day / 30-day. Day 1 and Day 7 drive learning
+  (evidence + per-pro failed-mechanism gate); Day 30 is diagnostic only. A
+  bounded, idempotent sweep (`waypoint/checkpoints.py`, timed cadence in the
+  worker, `CHECKPOINT_SECONDS`/`CHECKPOINT_LIMIT`) resolves provably-closed
+  windows to measured negatives and synthesizes negative rows for confirmed
+  exposures that produced no events (the control side of causal evidence).
+- **Evidence** — A-only positives are directional
+  (`validation_status="directional"`, never warm-start eligible); an A
+  positive against a B/control comparison is causal and promotes.
+- **Measurement plans** — deterministic (`measurement.select_indicators`):
+  mechanism-mapped metric plus the primary objective; no LLM selection.
+- **Kill switch** — `LEARNING_KILL_SWITCH` / `fleet_control.learning_killed`
+  stops checkpoint resolution independently of the fleet `KILL_SWITCH`.
+- **Version markers** — `LEARNING_VERSION` (exposures),
+  `CHECKPOINT_VERSION` (sweep-resolved outcome rows), `RESOLVER_VERSION`
+  (item resolution).
+
 ## Local setup
 
 Toolchain: Python 3.14 + uv, Node.js 24 LTS, pnpm 11.4 (see `docs/environment.md`).

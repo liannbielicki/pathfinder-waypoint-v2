@@ -1,4 +1,9 @@
-from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
+from waypoint.evidence import (
+    PatternEvidence,
+    evidence_block,
+    failed_mechanisms,
+    pattern_summaries,
+)
 from waypoint.tables import TouchOutcomeRow
 
 
@@ -54,15 +59,41 @@ async def test_unattributed_outcomes_are_excluded_from_evidence(db_session) -> N
     assert await pattern_summaries(db_session, "churn_risk", ["sms"]) == []
 
 
-async def test_failed_mechanisms_for_pro(db_session) -> None:
+async def test_failed_mechanisms_use_the_day7_learning_checkpoint(db_session) -> None:
+    """V3: Day 1 and Day 7 drive learning; the obsolete 30-day suppression is
+    gone. A measured 7-day no-return fails a mechanism; a measured 30-day
+    no-return alone (diagnostic only) does not."""
     db_session.add(outcome(recommendation_id="w1", unsubscribed=True))
-    db_session.add(outcome(recommendation_id="w2", mechanism="review_boost", returned_30d=False))
-    db_session.add(outcome(recommendation_id="w3", mechanism="ok_one", returned_30d=True))
+    db_session.add(outcome(recommendation_id="w2", mechanism="review_boost", returned_7d=False))
+    db_session.add(outcome(recommendation_id="w3", mechanism="ok_one", returned_7d=True))
+    db_session.add(outcome(recommendation_id="w5", mechanism="slow_burn", returned_30d=False))
     db_session.add(outcome(recommendation_id="w4", pro_id="other", mechanism="not_mine",
                            unsubscribed=True))
     await db_session.commit()
     failed = await failed_mechanisms(db_session, "pro_1")
     assert set(failed) == {"invoice_delivery", "review_boost"}
+
+
+async def test_pattern_summaries_track_the_day1_learning_checkpoint(db_session) -> None:
+    db_session.add(outcome(recommendation_id="w1", returned_1d=True, returned_7d=True))
+    db_session.add(outcome(recommendation_id="w2", returned_1d=False))
+    await db_session.commit()
+    patterns = await pattern_summaries(db_session, "churn_risk", ["sms"])
+    assert patterns[0].returned["1d"] == (1, 2)
+
+
+async def test_evidence_block_labels_day30_as_diagnostic() -> None:
+    patterns = [
+        PatternEvidence(
+            channel="sms", mechanism="invoice_delivery", sent=3,
+            returned={"1d": (1, 2), "7d": (2, 3), "30d": (2, 2)},
+            unsubscribed=0,
+        )
+    ]
+    text = evidence_block(patterns)
+    assert "1d return 1/2" in text
+    assert "7d return 2/3" in text
+    assert "30d return 2/2 (diagnostic)" in text
 
 
 async def test_evidence_block_is_honest_when_empty() -> None:

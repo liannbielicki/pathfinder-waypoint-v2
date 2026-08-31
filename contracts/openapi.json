@@ -1,6 +1,107 @@
 {
   "components": {
     "schemas": {
+      "ExposureIn": {
+        "description": "One exposure registration. Arm \"A\" is the treated recommendation; arm\n\"B\" is the control/neutral exposure (no WinnerRow required). A\nwinner-linked item derives identity from the winner \u2014 caller identity\nfields are ignored there.",
+        "properties": {
+          "arm": {
+            "anyOf": [
+              {
+                "enum": [
+                  "A",
+                  "B"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm"
+          },
+          "channel": {
+            "default": "",
+            "title": "Channel",
+            "type": "string"
+          },
+          "exposure_id": {
+            "minLength": 1,
+            "title": "Exposure Id",
+            "type": "string"
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "item_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Version"
+          },
+          "org_id": {
+            "default": "",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_id": {
+            "default": "",
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "recommendation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation Id"
+          },
+          "send_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "title": "Send Status",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          }
+        },
+        "required": [
+          "exposure_id"
+        ],
+        "title": "ExposureIn",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -27,7 +128,8 @@
           "status": {
             "enum": [
               "accepted",
-              "rejected"
+              "rejected",
+              "duplicate"
             ],
             "title": "Status",
             "type": "string"
@@ -90,6 +192,17 @@
             "title": "Channels",
             "type": "array"
           },
+          "journey_window": {
+            "default": "churn_risk",
+            "enum": [
+              "churn_risk",
+              "churn_risk_open",
+              "onboarding",
+              "upsell"
+            ],
+            "title": "Journey Window",
+            "type": "string"
+          },
           "loop_config": {
             "anyOf": [
               {
@@ -124,6 +237,10 @@
       },
       "RunDetail": {
         "properties": {
+          "agents_in_flight": {
+            "title": "Agents In Flight",
+            "type": "integer"
+          },
           "audience_query": {
             "title": "Audience Query",
             "type": "string"
@@ -181,6 +298,10 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "journey_window": {
+            "title": "Journey Window",
             "type": "string"
           },
           "killed": {
@@ -252,12 +373,14 @@
           "cost_spent_usd",
           "stop_reason",
           "created_at",
+          "journey_window",
           "stages",
           "candidates",
           "winners",
           "measurements",
           "handoffs",
-          "killed"
+          "killed",
+          "agents_in_flight"
         ],
         "title": "RunDetail",
         "type": "object"
@@ -307,6 +430,10 @@
             "title": "Id",
             "type": "string"
           },
+          "journey_window": {
+            "title": "Journey Window",
+            "type": "string"
+          },
           "loop_config": {
             "additionalProperties": {
               "type": "number"
@@ -350,9 +477,148 @@
           "cost_reserved_usd",
           "cost_spent_usd",
           "stop_reason",
-          "created_at"
+          "created_at",
+          "journey_window"
         ],
         "title": "RunView",
+        "type": "object"
+      },
+      "TouchOutcomeIn": {
+        "description": "One observed exposure/outcome record.\n\nLCM Personalization turns Waypoint's theme into an approved Housecall Pro\nSMS and sends it. It is not the measurement authority; outcome sources\nreport exposure and events back to Waypoint.\n\nV3 authority rules: attribution identity (pro, org, item, arm) comes ONLY\nfrom the winner/exposure records \u2014 callers cannot supply it, and any\ncaller-sent identity or returned_* horizon field is dropped at the wire.\nReturn horizons are derived from first_return_at against a confirmed send,\nor resolved by the checkpoint sweep \u2014 never asserted by a caller.",
+        "properties": {
+          "channel": {
+            "default": "",
+            "title": "Channel",
+            "type": "string"
+          },
+          "clicked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clicked"
+          },
+          "delivered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered"
+          },
+          "exposure_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exposure Id"
+          },
+          "first_return_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Return At"
+          },
+          "org_id": {
+            "default": "",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_id": {
+            "default": "",
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "recommendation_id": {
+            "minLength": 1,
+            "title": "Recommendation Id",
+            "type": "string"
+          },
+          "replied": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replied"
+          },
+          "send_confirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Confirmed At"
+          },
+          "send_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "title": "Send Status",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "source": {
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          },
+          "unsubscribed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unsubscribed"
+          }
+        },
+        "required": [
+          "recommendation_id",
+          "source"
+        ],
+        "title": "TouchOutcomeIn",
         "type": "object"
       },
       "ValidationError": {
@@ -445,6 +711,53 @@
         "summary": "Login"
       }
     },
+    "/api/exposures": {
+      "post": {
+        "description": "Canonical exposure registration, including neutral/control (arm B)\nexposures with no WinnerRow. Winner-linked identity is derived from\nthe winner; identity is immutable after registration.",
+        "operationId": "ingest_exposures_api_exposures_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/ExposureIn"
+                },
+                "title": "Body",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Ingest Exposures Api Exposures Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Exposures"
+      }
+    },
     "/api/fleet/settings": {
       "get": {
         "operationId": "fleet_settings_api_fleet_settings_get",
@@ -463,6 +776,53 @@
           }
         },
         "summary": "Fleet Settings"
+      }
+    },
+    "/api/outcomes": {
+      "post": {
+        "description": "Observed outcomes keyed by a canonical winner or neutral exposure id.\nLCM Personalization intake acknowledgement is not send confirmation;\nsee waypoint.outcomes for attribution and idempotency rules.",
+        "operationId": "ingest_outcomes_api_outcomes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/TouchOutcomeIn"
+                },
+                "title": "Body",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Ingest Outcomes Api Outcomes Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Outcomes"
       }
     },
     "/api/runs": {

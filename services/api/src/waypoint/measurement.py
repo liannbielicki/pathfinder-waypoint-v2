@@ -1,16 +1,13 @@
 """Typed proposal-specific measurement plans.
 
-The loop picks one or two leading indicators from a finite, human-owned metric
-catalog. The catalog defines direction, source, and window — the model only
-selects keys. An unknown key abstains; a source is never invented. Iterable
-outcome readback is deliberately out of launch scope.
+V3: selection is deterministic — no model in the loop. The catalog is a
+finite, human-owned metric set defining direction, source, and window. Every
+winner measures the primary objective (app_return) plus at most one
+mechanism-mapped metric; an unmapped mechanism measures the primary objective
+alone, so a winner is never "unmeasurable". Iterable outcome readback is
+deliberately out of launch scope.
 """
 
-from typing import Protocol
-
-from pydantic import BaseModel
-
-from waypoint.llm import LLMResult, extract_json
 from waypoint.models import MeasurementIndicator, MeasurementPlan
 
 METRIC_CATALOG: dict[str, MeasurementIndicator] = {
@@ -54,64 +51,30 @@ METRIC_CATALOG: dict[str, MeasurementIndicator] = {
 }
 
 
-class UnmeasurableWinner(Exception):
-    pass
+# Mechanism substring → mechanism-specific catalog key. First match wins;
+# expanding the catalog means adding a row here, never touching the pipeline.
+_MECHANISM_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("invoice", "invoices_sent"),
+    ("estimate", "estimates_sent"),
+    ("quote", "estimates_sent"),
+    ("review", "reviews_requested"),
+    ("booking", "online_booking_usage"),
+    ("feature", "feature_activations"),
+    ("adoption", "feature_activations"),
+    ("activation", "feature_activations"),
+)
 
 
-class WinnerLike(Protocol):
-    run_id: str
-    mechanism: str
-    title: str
-
-
-class LLMLike(Protocol):
-    async def complete(self, tier: str, prompt: str, run_id: str, stage: str,
-                       system: str | None = None, max_tokens: int = 1200) -> LLMResult: ...
-
-
-class _Selected(BaseModel):
-    key: str
-
-
-class MeasurementSelection(BaseModel):
-    indicators: list[_Selected]
-
-
-def measurement_prompt(winner: WinnerLike, keys: list[str]) -> str:
-    return f"""A retention proposal was selected for one Pro:
-
-Title: {winner.title}
-Mechanism: {winner.mechanism}
-
-Pick the ONE or TWO leading indicators that best express this proposal's
-mechanism. app_return / app_continued_use directly express the primary
-objective (the pro returns to and uses the app) — prefer including one of them
-alongside at most one mechanism-specific metric.
-
-Available metric keys (choose ONLY from this list):
-{", ".join(keys)}
-
-Return JSON of the form {{"indicators": [{{"key": "<metric_key>"}}]}} and
-nothing else.
-"""
-
-
-async def create_measurement_plan(
-    winner: WinnerLike, llm: LLMLike,
-    catalog: dict[str, MeasurementIndicator],
+def select_indicators(
+    mechanism: str, catalog: dict[str, MeasurementIndicator] = METRIC_CATALOG
 ) -> MeasurementPlan:
-    proposal = await llm.complete(
-        "fast", measurement_prompt(winner, list(catalog)), winner.run_id, "measure",
-    )
-    try:
-        # extract_json tolerates markdown fences and surrounding prose — raw
-        # model_validate_json here turned real winners into "unmeasurable".
-        selected = MeasurementSelection.model_validate(extract_json(proposal.text))
-    except ValueError as error:
-        raise UnmeasurableWinner(f"unparseable indicator selection: {error}") from error
-    if not 1 <= len(selected.indicators) <= 2:
-        raise UnmeasurableWinner("the loop must select one or two indicators")
-    try:
-        return MeasurementPlan(indicators=[catalog[item.key] for item in selected.indicators])
-    except KeyError as error:
-        raise UnmeasurableWinner(f"unknown metric: {error.args[0]}") from error
+    """Mechanism-mapped metric first (when one maps), then the primary
+    objective. Bounded to two indicators (ck_measurement_count)."""
+    indicators: list[MeasurementIndicator] = []
+    lowered = mechanism.lower()
+    for keyword, key in _MECHANISM_KEYWORDS:
+        if keyword in lowered and key in catalog:
+            indicators.append(catalog[key])
+            break
+    indicators.append(catalog["app_return"])
+    return MeasurementPlan(indicators=indicators)

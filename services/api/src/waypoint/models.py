@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, AwareDatetime, BaseModel, Field
 
 RunStatus = Literal[
     "queued",
@@ -133,6 +133,12 @@ class TouchOutcomeIn(BaseModel):
     LCM Personalization turns Waypoint's theme into an approved Housecall Pro
     SMS and sends it. It is not the measurement authority; outcome sources
     report exposure and events back to Waypoint.
+
+    V3 authority rules: attribution identity (pro, org, item, arm) comes ONLY
+    from the winner/exposure records — callers cannot supply it, and any
+    caller-sent identity or returned_* horizon field is dropped at the wire.
+    Return horizons are derived from first_return_at against a confirmed send,
+    or resolved by the checkpoint sweep — never asserted by a caller.
     """
 
     recommendation_id: str = Field(
@@ -141,25 +147,35 @@ class TouchOutcomeIn(BaseModel):
     )
     exposure_id: str | None = None
     source: str = Field(min_length=1)
-    item_id: str | None = None
-    item_version: str | None = None
-    arm: Literal["A", "B"] | None = None
     pro_id: str = ""
     org_id: str = ""
     channel: str = ""
-    sent_at: datetime | None = None
+    sent_at: AwareDatetime | None = None
     send_status: Literal["unknown", "pending", "confirmed", "failed"] = "unknown"
-    send_confirmed_at: datetime | None = None
+    send_confirmed_at: AwareDatetime | None = None
     delivered: bool | None = None
     clicked: bool | None = None
     replied: bool | None = None
     unsubscribed: bool | None = None
-    first_return_at: datetime | None = None
-    returned_1d: bool | None = None
-    returned_7d: bool | None = None
-    returned_14d: bool | None = None
-    returned_30d: bool | None = None
-    returned_90d: bool | None = None
+    first_return_at: AwareDatetime | None = None
+
+
+class ExposureIn(BaseModel):
+    """One exposure registration. Arm "A" is the treated recommendation; arm
+    "B" is the control/neutral exposure (no WinnerRow required). A
+    winner-linked item derives identity from the winner — caller identity
+    fields are ignored there."""
+
+    exposure_id: str = Field(min_length=1)  # caller idempotency id: retries never fork
+    recommendation_id: str | None = None
+    pro_id: str = ""
+    org_id: str = ""
+    item_id: str | None = None
+    item_version: str | None = None
+    arm: Literal["A", "B"] | None = None
+    channel: str = ""
+    send_status: Literal["unknown", "pending", "confirmed", "failed"] = "unknown"
+    sent_at: AwareDatetime | None = None
 
 
 class FollowUpBranch(BaseModel):

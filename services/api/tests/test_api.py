@@ -462,7 +462,11 @@ OUTCOME = {
     "source": "iterable_n8n",
     "pro_id": "pro_1",
     "channel": "sms",
-    "returned_7d": True,
+    # V3: horizons are derived from a confirmed send + return event, never
+    # asserted by the caller.
+    "send_status": "confirmed",
+    "sent_at": "2026-08-01T12:00:00Z",
+    "first_return_at": "2026-08-04T12:00:00Z",
 }
 
 
@@ -479,6 +483,17 @@ async def test_unattributed_outcome_is_stored_with_limitation(
     row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
     assert row.evidence_limitation is not None
     assert "matches no winner" in row.evidence_limitation
+
+
+async def test_control_exposure_endpoint_registers_without_a_winner(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    response = await auth_client.post("/api/exposures", json=[{
+        "exposure_id": "exp-api-ctl", "pro_id": "pro-1", "org_id": "org-1",
+        "item_id": "item-1", "item_version": "v1", "arm": "B", "channel": "sms",
+    }])
+    assert response.status_code == 202
+    assert response.json() == {"stored": 1, "unknown_recommendation": 0}
 
 
 async def test_attributed_outcome_backfills_from_winner(
@@ -550,12 +565,27 @@ async def test_attributed_outcome_via_row_id_alias_backfills_from_winner(
 
 async def test_outcome_resubmission_updates_in_place(auth_client: httpx.AsyncClient,
                                                      db_session: AsyncSession) -> None:
+    await auth_client.post("/api/outcomes", json=[{**OUTCOME, "send_status": "pending"}])
     await auth_client.post("/api/outcomes", json=[OUTCOME])
-    await auth_client.post("/api/outcomes", json=[{**OUTCOME, "returned_30d": False}])
     rows = (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
     assert len(rows) == 1
+    assert rows[0].returned_1d is False  # derived once the send was confirmed
     assert rows[0].returned_7d is True
-    assert rows[0].returned_30d is False
+    assert rows[0].returned_30d is True
+
+
+async def test_caller_asserted_horizons_are_dropped_at_the_wire(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """A caller cannot POST returned_7d=True into the evidence store."""
+    payload = {
+        "recommendation_id": "x", "source": "hostile", "returned_7d": True, "arm": "A",
+    }
+    response = await auth_client.post("/api/outcomes", json=[payload])
+    assert response.status_code == 202
+    row = (await db_session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.returned_7d is None
+    assert row.arm is None
 
 
 async def test_attributed_outcome_without_channel_backfills_and_counts_as_evidence(
