@@ -30,3 +30,7 @@ jobs:
         with: { node-version: 24, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
       - run: cd apps/web && pnpm install --frozen-lockfile && pnpm test --run && pnpm lint && pnpm build
       - run: cd apps/web && pnpm exec playwright install --with-deps chromium && CI=1 pnpm exec playwright test
+      # The ONLY guard on the n8n workflow's JS. It extracts the real code out
+      # of the workflow JSON and asserts the rules that, if broken, silently
+      # poison the learning loop. It already encodes three rounds of found bugs.
+      - run: node docs/n8n/check-code-nodes.js

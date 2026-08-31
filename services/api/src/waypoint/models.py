@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import AliasChoices, AwareDatetime, BaseModel, Field
+from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, model_validator
 
 RunStatus = Literal[
     "queued",
@@ -128,28 +128,44 @@ class MeasurementPlan(BaseModel):
 
 
 class TouchOutcomeIn(BaseModel):
-    """One observed exposure/outcome record.
+    """One observed-outcome record from an outcome source (n8n Iterable/Amplitude
+    flow, or manual backfill).
 
-    LCM Personalization turns Waypoint's theme into an approved Housecall Pro
-    SMS and sends it. It is not the measurement authority; outcome sources
-    report exposure and events back to Waypoint.
+    THREE ways to name the touch, any one is enough:
+
+    * `recommendation_id` — the Waypoint winner_id (or an exposure id), echoed
+      back under either spelling (`recommendation_id` or `row_id`).
+    * `exposure_id` — the exposure-level unit; alone it also keys the record.
+    * `run_id` + `pro_id` — the NATURAL key, and the one that needs nothing
+      stamped into a message: `uq_winners_run_pro` makes one run plus one pro
+      exactly one winner. Both halves already cross the boundary on their own
+      (the LCM intake batch IS the run id, and the Iterable recipient IS the
+      pro_uuid), so an outcome is attributable without Waypoint ids ever
+      entering Iterable.
+
+    `routing` is how a REAL send is told apart from a guardrailed test send that
+    merely carries a real Pro's context. It must be `route-to-pro` for the
+    record to count as evidence — see waypoint.outcomes. Where an exposure
+    exists, ITS routing is authoritative and the caller claim is ignored.
 
     V3 authority rules: attribution identity (pro, org, item, arm) comes ONLY
-    from the winner/exposure records — callers cannot supply it, and any
-    caller-sent identity or returned_* horizon field is dropped at the wire.
-    Return horizons are derived from first_return_at against a confirmed send,
-    or resolved by the checkpoint sweep — never asserted by a caller.
+    from the winner/exposure records — caller identity is observational, and
+    returned_* horizon fields are not part of the wire contract at all. Return
+    horizons are derived from first_return_at against a confirmed send, or
+    resolved by the checkpoint sweep — never asserted by a caller.
     """
 
     recommendation_id: str = Field(
-        min_length=1,
+        default="",
         validation_alias=AliasChoices("recommendation_id", "row_id"),
     )
     exposure_id: str | None = None
     source: str = Field(min_length=1)
+    run_id: str = ""
     pro_id: str = ""
     org_id: str = ""
     channel: str = ""
+    routing: str = ""
     sent_at: AwareDatetime | None = None
     send_status: Literal["unknown", "pending", "confirmed", "failed"] = "unknown"
     send_confirmed_at: AwareDatetime | None = None
@@ -158,6 +174,29 @@ class TouchOutcomeIn(BaseModel):
     replied: bool | None = None
     unsubscribed: bool | None = None
     first_return_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _names_a_touch(self) -> TouchOutcomeIn:
+        # Refuse at the boundary rather than storing a row keyed on "": every
+        # such row would collide with every other on (recommendation_id, source).
+        if self.recommendation_id:
+            return self
+        if self.exposure_id:
+            # An exposure-only report keys on the exposure itself.
+            self.recommendation_id = self.exposure_id
+            return self
+        if not (self.run_id.strip() and self.pro_id.strip()):
+            raise ValueError(
+                "name the touch: recommendation_id/row_id, exposure_id, "
+                "or both run_id and pro_id"
+            )
+        # The natural key is rendered into "unresolved:<run_id>:<pro_id>" when it
+        # resolves to no winner, so a ":" inside either half would let two
+        # different pairs render the same key and silently overwrite each other.
+        # Real ids are uuid4().hex; reject anything that could alias.
+        if ":" in self.run_id or ":" in self.pro_id:
+            raise ValueError("run_id and pro_id must not contain ':'")
+        return self
 
 
 class ExposureIn(BaseModel):
@@ -174,6 +213,9 @@ class ExposureIn(BaseModel):
     item_version: str | None = None
     arm: Literal["A", "B"] | None = None
     channel: str = ""
+    # How the send is routed (see waypoint.outcomes.REAL_SEND_ROUTING). The
+    # exposure's claim is authoritative for every outcome attributed to it.
+    routing: str = ""
     send_status: Literal["unknown", "pending", "confirmed", "failed"] = "unknown"
     sent_at: AwareDatetime | None = None
 

@@ -42,6 +42,7 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
         "RUN_COST_USD", "DAY_COST_USD", "WORKER_COUNT", "MAX_LLM_IN_FLIGHT",
         "KILL_SWITCH", "LEARNING_KILL_SWITCH", "CHECKPOINT_SECONDS", "CHECKPOINT_LIMIT",
         "CTA_FEASIBILITY_HINTS", "MODEL_FAST", "MODEL_DEEP", "MODEL_RANKER", "APP_PASSWORD",
+        "OUTCOMES_TOKEN",
         "SESSION_KEY", "LOG_LEVEL",
     }
 

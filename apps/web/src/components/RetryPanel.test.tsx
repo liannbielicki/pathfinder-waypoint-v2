@@ -70,6 +70,7 @@ describe("RetryPanel", () => {
           status: "failed",
           pro_ids: ["pro_1", "pro_2"],
           winners: [winner("pro_1", "winner")],
+          journey_window: "onboarding",
         }}
       />,
     );
@@ -80,6 +81,8 @@ describe("RetryPanel", () => {
       audience_run: RUN_FIXTURE.audience_run,
       channels: RUN_FIXTURE.channels,
       loop_config: RUN_FIXTURE.loop_config,
+      // A rerun keeps the original window — never silently churn_risk.
+      journey_window: "onboarding",
     });
     const link = await screen.findByRole("link", { name: /run-2/ });
     expect(link).toHaveAttribute("href", "/runs/run-2");

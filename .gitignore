@@ -12,3 +12,8 @@ dist/
 playwright-report/
 test-results/
 .vercel
+
+# audience batch outputs (customer data, never commit) — any root-level CSV
+# is an ad-hoc export; committed reference CSVs live under services/api/data/.
+/*.csv
+.iterable_key

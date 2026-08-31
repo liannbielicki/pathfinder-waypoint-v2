@@ -2,13 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { RunStatus } from "./RunStatus";
-import type { Winner } from "@/lib/api";
-import { RUN_FIXTURE } from "@/test/fixtures";
-
-const WINNER: Winner = {
-  id: "w1", pro_id: "pro_1", kind: "winner", candidate_id: "c1",
-  rationale: "", evidence: {},
-};
+import { RUN_FIXTURE, WINNER_FIXTURE as WINNER } from "@/test/fixtures";
 
 describe("RunStatus", () => {
   it.each([

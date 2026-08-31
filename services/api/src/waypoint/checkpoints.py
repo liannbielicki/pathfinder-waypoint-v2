@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.outcomes import derive_checkpoint_flags, promote_winners
+from waypoint.outcomes import derive_checkpoint_flags, evidence_limitation, promote_winners
 from waypoint.tables import (
     CandidateRow,
     ExposureRow,
@@ -110,6 +110,11 @@ async def _synthesize_exposure_rows(
                 item_version=exposure.item_version,
                 arm=exposure.arm,
                 channel=exposure.channel,
+                # The exposure's routing claim rides along, and the evidence
+                # gate applies to synthesized rows exactly as to ingested ones:
+                # a guardrailed send's silence is not evidence either.
+                routing=exposure.routing,
+                evidence_limitation=evidence_limitation(None, exposure, exposure.routing),
                 send_status=exposure.send_status,
                 sent_at=exposure.sent_at,
             )

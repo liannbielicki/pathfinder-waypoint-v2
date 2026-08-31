@@ -1,12 +1,19 @@
 """Outcome ingestion (spec: `/api/outcomes`).
 
 Observed messaging/app-usage outcomes, keyed by recommendation_id (a Waypoint
-winner id or an exposure id). Attributable records backfill
-run/pro/journey_window/mechanism/channel/org and the canonical item identity
-from the winner or exposure; unattributable ones are stored with an explicit
-evidence_limitation label (spec: label the limitation, never pretend). A
-resubmission that arrives after the winner now exists clears a stale
-evidence_limitation instead of carrying it forever.
+winner id or an exposure id), by exposure_id, or by the natural (run_id,
+pro_id) pair — see TouchOutcomeIn and `_resolve_run_pro`. Attributable records
+backfill run/pro/journey_window/mechanism/channel/org and the canonical item
+identity from the winner or exposure; everything else is stored with an
+explicit evidence_limitation label (spec: label the limitation, never
+pretend), stays queryable for audit, and never reaches the evidence readers or
+warm-start promotion.
+
+Two things disqualify a record as evidence, and both label rather than drop it:
+no resolvable winner or exposure, and a send that did not provably reach the
+real Pro (REAL_SEND_ROUTING). Where an exposure exists, ITS routing claim is
+authoritative; otherwise routing is merged across the source's submissions
+(merge_routing) and two disagreeing claims fail closed.
 
 V3 authority rules enforced here:
 - Attribution identity (pro, org, item, arm) comes ONLY from winner/exposure
@@ -19,10 +26,13 @@ V3 authority rules enforced here:
   send_status == "confirmed".
 
 This is also the ONLY path (with checkpoints.py, which reuses it) that grants
-warm-start eligibility: an attributable winner with a measured 7-day return —
-A+B (causal) when arm-tagged rows exist, legacy otherwise. A-only positives
-are directional: recorded, never eligible. Nothing on the scoring/persona side
-may set eligibility.
+warm-start eligibility: an attributable, routing-proven winner with a measured
+7-day return — A+B (causal) when arm-tagged rows exist, legacy otherwise.
+A-only positives are directional: recorded, never eligible. Eligibility is
+RECOMPUTED from scratch on every write, never only granted — a later
+disqualification (routing merging to conflict, say) must DEMOTE, or the
+mechanism escapes through the cross-org warm-start channel and stays escaped.
+Nothing on the scoring/persona side may set eligibility.
 
 Batched: winners/exposures/runs/candidates/existing rows are prefetched with
 IN() queries keyed on the batch's distinct ids, not one SELECT per item. A
@@ -46,6 +56,63 @@ from waypoint.tables import CandidateRow, ExposureRow, RunRow, TouchOutcomeRow, 
 
 _OUTCOME_FLAGS = ("delivered", "clicked", "replied", "unsubscribed")
 
+# The ONLY routing mode whose outcomes are evidence. A guardrailed send carries a
+# real Pro's context but is delivered to an internal inbox, so the Pro never got
+# it — while Amplitude will still happily report that Pro's organic app activity.
+# Joining the two would manufacture returns for touches nobody received, and
+# `_promote_warm_start` would then seed future runs off them. Positive proof is
+# required: anything that is not exactly this is labelled, never counted.
+REAL_SEND_ROUTING = "route-to-pro"
+
+CONFLICTING_ROUTING = "conflict"
+
+
+async def _resolve_run_pro(
+    session: AsyncSession, body: list[TouchOutcomeIn]
+) -> list[TouchOutcomeIn]:
+    """Fill in `recommendation_id` for items keyed on the natural (run_id, pro_id)
+    pair, in one query for the whole batch.
+
+    `uq_winners_run_pro` is what makes this exact rather than heuristic: one run
+    plus one pro is at most one winner, so the pair names a touch as precisely as
+    the winner id does — with no Waypoint identifier stamped into the message.
+    An unresolvable pair keeps a stable, namespaced key so it still stores as one
+    honest unattributed row instead of colliding with every other unresolved one.
+
+    ponytail: an outcome that arrives BEFORE its winner exists is keyed
+    "unresolved:<run>:<pro>", and a later resubmission — now resolvable — writes a
+    SECOND row under the real winner id rather than re-keying the first. The
+    orphan stays labelled, so it never reaches the evidence readers or warm-start
+    promotion; it only double-counts in a raw count(*) over touch_outcomes. Left
+    alone because the ordering barely happens: a send event cannot precede its own
+    winner, and human QA puts days between the two. Re-key the orphan (or merge it
+    under the unique constraint) if the unattributed count ever shows it does.
+    """
+    needs = [item for item in body if not item.recommendation_id]
+    if not needs:
+        return body
+    rows = (
+        await session.execute(
+            select(WinnerRow.id, WinnerRow.run_id, WinnerRow.pro_id).where(
+                WinnerRow.run_id.in_({item.run_id for item in needs}),
+                WinnerRow.pro_id.in_({item.pro_id for item in needs}),
+                WinnerRow.kind == "winner",
+            )
+        )
+    ).all()
+    by_pair = {(row.run_id, row.pro_id): row.id for row in rows}
+    return [
+        item
+        if item.recommendation_id
+        else item.model_copy(
+            update={
+                "recommendation_id": by_pair.get((item.run_id, item.pro_id))
+                or f"unresolved:{item.run_id}:{item.pro_id}"
+            }
+        )
+        for item in body
+    ]
+
 
 def derive_checkpoint_flags(
     *, sent_at: datetime | None, first_return_at: datetime | None
@@ -68,6 +135,54 @@ def derive_checkpoint_flags(
     }
 
 
+def merge_routing(stored: str, submitted: str) -> str:
+    """Routing is a property of the touch as seen BY ONE SOURCE — the merge is
+    per (recommendation_id, source), because that is the grain of the row. One
+    source writes a touch several times (the send event, then each return
+    horizon) and does not know the routing on every one of those writes.
+
+    CONSEQUENCE, and it is sharp: a SECOND source must re-assert routing on its
+    own submissions. It does not inherit the first source's proof, so a manual
+    backfill or a second flow that omits `routing` produces rows that are
+    permanently non-evidence — silently. Registering the send as an EXPOSURE
+    (whose routing is authoritative for every outcome attributed to it) removes
+    the per-source re-assertion burden entirely.
+
+    So: an empty claim defers to what is already known (the horizon sweep must
+    not demote a proven real send), a first claim is taken, and two sources that
+    DISAGREE fail closed to `conflict`, which is not REAL_SEND_ROUTING and so
+    never counts as evidence. Failing closed matters more than picking a winner:
+    if we cannot tell whether the Pro received the message, we do not get to
+    treat their app activity as a response to it.
+
+    Recovery from `conflict` is deliberately manual — it is terminal, so a
+    later correct claim cannot quietly rehabilitate a touch a bad run poisoned:
+        UPDATE touch_outcomes SET routing = '' WHERE recommendation_id = ...;
+    then resubmit.
+    """
+    if not submitted:
+        return stored
+    if not stored:
+        return submitted
+    return stored if stored == submitted else CONFLICTING_ROUTING
+
+
+def evidence_limitation(
+    winner: WinnerRow | None, exposure: ExposureRow | None, routing: str
+) -> str | None:
+    """Why this record cannot be evidence, or None when it can.
+
+    DERIVED, and recomputed on every write. Computing it only on the first
+    submission let a later guardrailed return land on a row already marked
+    clean — the exact laundering the routing gate exists to prevent.
+    """
+    if winner is None and exposure is None:
+        return "unattributed: recommendation_id matches no winner or exposure"
+    if routing != REAL_SEND_ROUTING:
+        return f"not a real-Pro send: routing={routing or 'unknown'!r}"
+    return None
+
+
 class _Prefetched:
     def __init__(
         self,
@@ -85,7 +200,16 @@ class _Prefetched:
 async def _prefetch(session: AsyncSession, body: list[TouchOutcomeIn]) -> _Prefetched:
     winner_ids = {item.recommendation_id for item in body}
     winners = (
-        (await session.execute(select(WinnerRow).where(WinnerRow.id.in_(winner_ids))))
+        (
+            await session.execute(
+                # kind == "winner" matches _resolve_run_pro: a no_action /
+                # abstained row is not a touch, so neither key path may
+                # attribute an outcome to one.
+                select(WinnerRow).where(
+                    WinnerRow.id.in_(winner_ids), WinnerRow.kind == "winner"
+                )
+            )
+        )
         .scalars().all()
     )
     winners_by_id = {w.id: w for w in winners}
@@ -108,7 +232,11 @@ async def _prefetch(session: AsyncSession, body: list[TouchOutcomeIn]) -> _Prefe
     }
     if linked_winner_ids:
         linked = (
-            await session.execute(select(WinnerRow).where(WinnerRow.id.in_(linked_winner_ids)))
+            await session.execute(
+                select(WinnerRow).where(
+                    WinnerRow.id.in_(linked_winner_ids), WinnerRow.kind == "winner"
+                )
+            )
         ).scalars().all()
         winners_by_id.update({w.id: w for w in linked})
     run_ids = {w.run_id for w in winners_by_id.values()}
@@ -146,13 +274,13 @@ def _attribution_fill(
     exposure: ExposureRow | None,
     run: RunRow | None,
     candidate: CandidateRow | None,
-) -> tuple[dict[str, Any], str | None]:
+) -> dict[str, Any]:
     if winner is None and exposure is None:
-        return {}, "unattributed: recommendation_id matches no winner or exposure"
+        return {}
     recommendation = candidate.recommendation if candidate else {}
     if exposure is not None:
-        # The exposure IS the identity authority — arm, send state, and item
-        # identity come from it, never from the caller or even the winner.
+        # The exposure IS the identity authority — arm, routing, send state,
+        # and item identity come from it, never from the caller or the winner.
         return {
             "exposure_id": exposure.id,
             "run_id": exposure.run_id,
@@ -164,26 +292,28 @@ def _attribution_fill(
             "item_id": exposure.item_id,
             "item_version": exposure.item_version,
             "arm": exposure.arm,
+            "routing": exposure.routing,
             "channel": exposure.channel,
             "sent_at": exposure.sent_at,
             "send_status": exposure.send_status,
             "mechanism": recommendation.get("mechanism", "") if candidate else "",
-        }, None
+        }
     assert winner is not None  # no exposure and the first guard passed
-    fill = {
+    return {
         "run_id": winner.run_id,
-        # Winner/exposure records are the authority. Caller identity is
-        # observational input and must never rewrite attribution.
+        # NOT item.pro_id: a submission that named a different Pro would pin a
+        # measured outcome (and, via evidence.failed_mechanisms, a mechanism
+        # block) on someone who was never touched. The winner knows who it was
+        # for; the submitter is at best guessing.
         "pro_id": winner.pro_id,
         "journey_window": run.journey_window if run else "churn_risk",
         "mechanism": recommendation.get("mechanism", "") if candidate else "",
         # item-supplied non-empty channel wins; backfill only fills blanks.
         "channel": item.channel or recommendation.get("channel", ""),
-        "org_id": winner.evidence.get("org_id", ""),
+        "org_id": winner.evidence.get("org_id", "") or item.org_id,
         "item_id": winner.item_id,
         "item_version": winner.item_version,
     }
-    return fill, None
 
 
 def _apply_flags(row: TouchOutcomeRow, item: TouchOutcomeIn) -> None:
@@ -224,15 +354,36 @@ def _promote_warm_start(
     rows: list[TouchOutcomeRow], winner: WinnerRow | None, candidate: CandidateRow | None
 ) -> None:
     """The ONLY path that grants warm-start eligibility: a real observed 7-day
-    return on an attributable winner. Derived from EVERY row attributable to
-    this winner — direct outcome rows plus its exposures' rows (any observed
-    return wins, ties broken by source name), so duplicates, late arrivals,
-    and a lagging second source converge on the same values whatever order
-    they land in."""
-    observed = [row for row in rows if row.returned_7d is not None]
-    if winner is None or winner.kind != "winner" or not observed:
+    return on an attributable, routing-proven winner. Derived from EVERY row
+    attributable to this winner — direct outcome rows plus its exposures' rows
+    (any observed return wins, ties broken by source name), so duplicates,
+    late arrivals, and a lagging second source converge on the same values
+    whatever order they land in.
+
+    Rows carrying an evidence_limitation are excluded, which is the
+    load-bearing line: eligibility propagates a mechanism to OTHER Pros, so a
+    guardrailed or unattributed row promoted here would seed every future
+    similar run off a touch nobody received. The evidence readers filter the
+    same way in SQL.
+
+    Eligibility is RECOMPUTED from scratch, never only granted. An earlier
+    submission can be disqualified by a later one (routing merging to
+    `conflict`, say), and an empty `observed` then means "no surviving
+    evidence" — which has to DEMOTE, not leave a stale grant standing."""
+    if winner is None or winner.kind != "winner":
         return
+    observed = [
+        row
+        for row in rows
+        if row.returned_7d is not None and row.evidence_limitation is None
+    ]
     recommendation = candidate.recommendation if candidate else {}
+    if not observed:
+        # Nothing measured survives: strip the claim rather than leave a stale one.
+        winner.warm_start_eligible = False
+        winner.validation_status = None
+        winner.warm_start_evidence = {}
+        return
 
     def evidence_from(row: TouchOutcomeRow, kind: str | None) -> dict[str, Any]:
         # Mechanism/channel ride along so retrieval never joins org-scoped rows.
@@ -306,43 +457,53 @@ def _apply_item(
     candidate: CandidateRow | None,
     existing_by_key: dict[tuple[str, str], TouchOutcomeRow],
 ) -> bool:
-    """Adds or updates one outcome row; returns True when it lacks attribution."""
-    fill, limitation = _attribution_fill(item, winner, exposure, run, candidate)
+    """Adds or updates one outcome row; returns True when the STORED row lacks
+    attribution — the row's own state, not the submission's, so the count an
+    operator watches can never disagree with what is in the table."""
+    fill = _attribution_fill(item, winner, exposure, run, candidate)
     key = (item.recommendation_id, item.source)
     existing = existing_by_key.get(key)
     if existing is None:
+        routing = exposure.routing if exposure is not None else item.routing
         fields = {
             "recommendation_id": item.recommendation_id,
             "source": item.source,
-            "org_id": "",
+            "org_id": item.org_id,
             "channel": item.channel,
             "sent_at": item.sent_at,
             "first_return_at": item.first_return_at,
-            "evidence_limitation": limitation,
-            "pro_id": "",
+            "routing": routing,
+            "evidence_limitation": evidence_limitation(winner, exposure, routing),
+            "pro_id": item.pro_id,
             "exposure_id": item.exposure_id,
             "send_status": item.send_status,
             "send_confirmed_at": item.send_confirmed_at,
             **{k: getattr(item, k) for k in _OUTCOME_FLAGS},
             **fill,
         }
-        row = TouchOutcomeRow(**fields)
-        if row.send_status == "confirmed" and row.first_return_at is not None:
+        stored = TouchOutcomeRow(**fields)
+        if stored.send_status == "confirmed" and stored.first_return_at is not None:
             for flag, value in derive_checkpoint_flags(
-                sent_at=row.sent_at, first_return_at=row.first_return_at
+                sent_at=stored.sent_at, first_return_at=stored.first_return_at
             ).items():
-                setattr(row, flag, value)
-        session.add(row)
-        existing_by_key[key] = row
+                setattr(stored, flag, value)
+        session.add(stored)
+        existing_by_key[key] = stored
     else:
-        # A row stored unattributed must not keep evidence_limitation forever
-        # once the winner exists — re-attribute on resubmission.
-        if existing.evidence_limitation is not None and limitation is None:
+        # Re-attribution is a RECOMPUTE, never an unconditional clear: the
+        # routing half of the verdict still has to hold, and a row attributed
+        # on arrival still refreshes identity from the authority records.
+        if exposure is not None:
+            existing.routing = exposure.routing  # the exposure's claim is authoritative
+        else:
+            existing.routing = merge_routing(existing.routing, item.routing)
+        if winner is not None or exposure is not None:
             for field_name, value in fill.items():
                 setattr(existing, field_name, value)
-            existing.evidence_limitation = None
+        existing.evidence_limitation = evidence_limitation(winner, exposure, existing.routing)
         _apply_flags(existing, item)
-    return limitation is not None
+        stored = existing
+    return stored.evidence_limitation is not None
 
 
 def _winner_for_item(item: TouchOutcomeIn, prefetched: _Prefetched) -> WinnerRow | None:
@@ -393,6 +554,7 @@ async def _apply_batch(
 
 
 async def ingest(session: AsyncSession, body: list[TouchOutcomeIn]) -> dict[str, int]:
+    body = await _resolve_run_pro(session, body)
     try:
         prefetched = await _prefetch(session, body)
         unattributed = await _apply_batch(session, body, prefetched)

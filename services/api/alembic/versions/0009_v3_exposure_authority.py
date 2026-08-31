@@ -7,8 +7,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0008"
-down_revision: str | None = "0007"
+revision: str = "0009"
+down_revision: str | None = "0008"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -24,6 +24,7 @@ def upgrade() -> None:
         sa.Column("item_version", sa.Text(), nullable=True),
         sa.Column("arm", sa.Text(), nullable=True),
         sa.Column("channel", sa.Text(), nullable=False, server_default=""),
+        sa.Column("routing", sa.Text(), nullable=False, server_default=""),
         sa.Column("send_status", sa.Text(), nullable=False, server_default="unknown"),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),

@@ -1,0 +1,559 @@
+{
+  "name": "Pathfinder Waypoint \u2014 outcome ingestion",
+  "nodes": [
+    {
+      "id": "trg-engagement",
+      "name": "Hourly 09:00-15:00 MT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        -140
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9-15 * * *"
+            }
+          ]
+        },
+        "timezone": "America/Denver"
+      },
+      "notes": "Fires 7x/day, 09:00-15:00 America/Denver \u2014 the window sends actually go out in. The lookback in 'Send window' is 25h, NOT the cron interval: the gap from the last fire to the next morning is ~18h. Re-reading is free (ingestion is idempotent per (recommendation_id, source)). Upgrade path: Iterable webhooks -> n8n Webhook trigger for near-real-time sends; the horizon sweep stays a cron either way, since '7-day return' is unanswerable until day 7."
+    },
+    {
+      "id": "win-a",
+      "name": "Send window",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "// One item per Iterable message-event type; the HTTP node runs once per item.\n// 25h, NOT the cron interval. The trigger only fires 09:00-15:00 MT, so the\n// gap between the last fire of one day and the first of the next is ~18h \u2014 a\n// 90m lookback would have silently dropped every event in it. Re-reading the\n// same events every run is free: /api/outcomes is idempotent per\n// (recommendation_id, source) and _apply_flags never lets a null erase a\n// measured value, so the 7th run of the day just rewrites the same rows.\n// ponytail: fixed 25h window rather than tracking the last successful run.\n// Ceiling: one day of events per export call, trivial at ~50 sends/day.\n// Upgrade path: track a watermark if the export ever gets slow.\nconst LOOKBACK_MIN = 25 * 60;\nconst end = new Date();\nconst start = new Date(end.getTime() - LOOKBACK_MIN * 60000);\nconst fmt = (d) => d.toISOString().slice(0, 19).replace('T', ' '); // ASSUMPTION: Iterable project timezone is UTC.\nreturn [\n  'emailSend', 'emailOpen', 'emailClick', 'emailUnsubscribe',\n  'smsSend', 'smsClick', 'smsUnsubscribe',\n].map((dataTypeName) => ({ json: { dataTypeName, startDateTime: fmt(start), endDateTime: fmt(end) } }));\n"
+      }
+    },
+    {
+      "id": "export-a",
+      "name": "Iterable export",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        -140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.iterable.com/api/export/data.json?dataTypeName={{ $json.dataTypeName }}&startDateTime={{ encodeURIComponent($json.startDateTime) }}&endDateTime={{ encodeURIComponent($json.endDateTime) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "LOfEoFKfZ89078UI",
+          "name": "waypoint-iterable-api"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Header-auth credential must be name=Api-Key. NEVER inline the key here. Response is NDJSON (one event per line), so responseFormat=text. ponytail: no paging \u2014 a 25h window at ~50 sends/day is far inside one response. Upgrade path: follow Iterable's export paging if volume grows."
+    },
+    {
+      "id": "build-a",
+      "name": "Build outcomes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "// Merge every message event in the window into ONE outcome row per (lcmRun, userId).\n// That pair is (run_id, pro_id) \u2014 uq_winners_run_pro makes it exactly one Waypoint winner.\n// Option C: start from what WE shipped, not from everything Iterable did.\n// The work list is Waypoint's own funnel detail \u2014 every Pro that reached a\n// verdict in the window. Only winners that were actually handed off could\n// possibly have been sent, so anything else in the Iterable window is not ours\n// and is dropped here instead of being POSTed as an unattributable row.\nconst WORKLIST = 'Waypoint work list';\nconst shipped = new Set(\n  $(WORKLIST).all()\n    .flatMap((i) => (i.json && i.json.pros) || [])\n    .filter((p) => p.verdict === 'winner' && p.handed_off)\n    .map((p) => p.run_id + '|' + p.pro_id)\n);\nif (!shipped.size) return [];  // nothing shipped in the window => nothing to match\n\nconst INTERNAL = ['allison.torres', 'jake.fassora', 'liann.bielicki']; // WAYPOINT_TEST_RECIPIENTS in the LCM app\nconst CHUNK = 500; // ponytail: fixed batch cap. Ceiling: one POST body per 500 rows. Upgrade path: lower it if Railway rejects the body size.\n\n// Normalise to a real ISO instant. TWO traps here:\n//   * `new Date(\"2026-08-20 10:00:00\")` is VALID in V8 and is read in the\n//     PROCESS-LOCAL zone, so a parse-then-fallback never reaches the 'Z' branch\n//     for exactly the format we expect. settings.timezone governs cron\n//     expressions, not `new Date()` inside a Code node. Offset FIRST.\n//   * Iterable writes the offset after a SPACE (\"... 10:00:00 +00:00\"), and\n//     replace(' ', 'T') only replaces the FIRST space \u2014 leaving an unparseable\n//     \"10:00:00 +00:00\". Both spaces have to go.\nconst toIso = (v) => {\n  const s = String(v == null ? '' : v).trim();\n  if (!s) return null;\n  let t = s.replace(' ', 'T').replace(/\\s+(?=[+-]\\d\\d:?\\d\\d$)/, '');\n  if (!/(Z|[+-]\\d\\d:?\\d\\d)$/.test(t)) t += 'Z'; // ASSUMPTION: no offset means UTC\n  const d = new Date(t);\n  return isNaN(d) ? null : d.toISOString();\n};\nconst iso = toIso;\n// Whole address, not the local part. Matching only the local part is wrong in\n// BOTH directions: jake.fassora.qa@ scores as a real Pro, and a genuine Pro at\n// allison.torres@some-other-domain.com is falsely called internal \u2014 which merges\n// to 'conflict' against the proven send and permanently disqualifies a real touch.\n// EDIT HERE if internal testers are on another domain.\nlet _dom = 'housecallpro.com';\ntry { _dom = $env.WAYPOINT_INTERNAL_DOMAIN || _dom; } catch (e) { /* $env blocked */ }\nconst INTERNAL_DOMAIN = _dom.toLowerCase();\nconst addr = (email) => {\n  const [local, domain] = String(email || '').toLowerCase().split('@');\n  return { local: String(local || '').split('+')[0], domain: domain || '' };\n};\n// 'internal' | 'external' | 'unprovable' \u2014 never guess between the last two.\n// The DOMAIN decides, not the roster. Roster-first was a live hole: any\n// unrostered address on the internal domain (jake.fassora.qa@, a new tester,\n// a shared alias) fell through to 'external' => 'route-to-pro', so a guardrailed\n// send became a proven one, that Pro's organic Amplitude activity was scored as\n// a return, and _promote_warm_start propagated the mechanism CROSS-ORG off a\n// touch nobody received. A real Pro is never on the internal domain, so keying\n// on the domain cannot produce a false guardrail either.\nconst classify = (email) => {\n  const { local, domain } = addr(email);\n  if (!local || !domain) return 'unprovable';\n  if (domain === INTERNAL_DOMAIN) return 'internal';\n  // A Pro who merely shares a roster local part on their own domain is not\n  // provably either way \u2014 claim nothing rather than conflict away a real touch.\n  return INTERNAL.includes(local) ? 'unprovable' : 'external';\n};\n\nconst touches = new Map();\nfor (const item of items) {\n  const type = item.json.dataTypeName;\n  for (const line of String(item.json.data || '').split('\\n')) {\n    if (!line.trim()) continue;\n    let ev; try { ev = JSON.parse(line); } catch { continue; }\n    // Rule 4: no parseable transactionalData => no dimensions at all (sends predating\n    // the LCM stamps). Skip. Never fall back to timestamp guessing.\n    if (typeof ev.transactionalData !== 'string') continue;\n    let d; try { d = JSON.parse(ev.transactionalData); } catch { continue; }\n    // Rule 2: arm B is a single pre-selected CONTROL message, not our\n    // recommendation. Require a POSITIVE 'A': ==='B' failed OPEN on 'b', 'B ',\n    // a missing stamp, or any future arm name \u2014 crediting the control's\n    // results to our idea, which is the one thing this filter exists to stop.\n    if (d.lcmVariant !== 'A') continue;\n    const runId = d.lcmRun, proId = ev.userId;\n    // TouchOutcomeIn rejects a blank or ':'-bearing natural key, and it 422s the\n    // WHOLE batch \u2014 so drop the one bad event here rather than lose 500 good rows.\n    if (!runId || !proId || runId.includes(':') || proId.includes(':')) continue;\n    // Not one of ours (another LCM workstream, or a Pro we never shipped).\n    const key = runId + '|' + proId;\n    if (!shipped.has(key)) continue;\n    const t = touches.get(key) || {\n      run_id: runId, pro_id: proId,\n      channel: type.startsWith('sms') ? 'sms' : 'email',\n      stamped: null, internal: false, external: false, unproven: false,\n      sent_at: null, clicked: false, unsubscribed: false,\n    };\n    // Rule 1: prove route-to-pro or say guardrail. Prefer the stamp if the LCM app sends it.\n    if (d.lcmRouting) t.stamped = d.lcmRouting;\n    else {\n      const who = classify(ev.email);   // sms events carry phoneNumber, not email => 'unprovable'\n      if (who === 'internal') t.internal = true;\n      else if (who === 'external') t.external = true;\n      else t.unproven = true;           // no claim either way \u2014 see the routing merge below\n    }\n    if (type.endsWith('Send')) {\n      const at = iso(ev.createdAt);\n      if (at && (!t.sent_at || at < t.sent_at)) t.sent_at = at;\n    }\n    if (type.endsWith('Click')) t.clicked = true;\n    if (type.endsWith('Unsubscribe')) t.unsubscribed = true;\n    touches.set(key, t);\n  }\n}\n\nconst rows = [...touches.values()].map((t) => {\n  // Three-way, NOT two-way. outcomes.merge_routing treats '' as \"no claim\" (defers\n  // to what is stored) but two DIFFERENT claims fail closed to 'conflict'. So an\n  // event we cannot prove either way must claim NOTHING \u2014 emitting 'guardrail'\n  // there would conflict with an earlier proven send and disqualify a real touch.\n  const routing = t.stamped\n    ? (t.stamped === 'route-to-pro' ? 'route-to-pro' : 'guardrail')\n    : t.internal ? 'guardrail'          // proven internal inbox\n    : t.external ? 'route-to-pro'       // some event proved a real external recipient\n    : '';                               // unprovable (no email on any event): omit and defer\n  const row = {\n    run_id: t.run_id, pro_id: t.pro_id, source: 'iterable_n8n',\n    channel: t.channel, delivered: true,\n  };\n  if (routing) row.routing = routing;\n  if (t.sent_at) row.sent_at = t.sent_at;\n  // Assert TRUE only. A later window recomputes from a narrower slice, and a\n  // false here would overwrite an already-observed click/unsubscribe. Omitted\n  // fields arrive as null, and _apply_flags never lets null erase a value.\n  if (t.clicked) row.clicked = true;\n  if (t.unsubscribed) row.unsubscribed = true;\n  return row;\n});\n\nconst out = [];\nfor (let i = 0; i < rows.length; i += CHUNK) out.push({ json: { batch: rows.slice(i, i + CHUNK) } });\nreturn out; // zero rows => zero items => the POST node simply does not run\n"
+      }
+    },
+    {
+      "id": "post-a",
+      "name": "Post outcomes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        -140
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://pathfinder-waypoint-v2-staging.up.railway.app/api/outcomes",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.batch) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Waypoint STAGING. Swap the host here (and in the sibling POST node) when you move to production. Auth is the waypoint-authorization credential.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rc9NEudzxaEZkLPE",
+          "name": "waypoint-authorization"
+        }
+      },
+      "notesInFlow": true
+    },
+    {
+      "id": "trg-sweep",
+      "name": "Nightly 03:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        240
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Set the n8n instance timezone to UTC, or change this expression \u2014 every window in this workflow is computed in UTC."
+    },
+    {
+      "id": "win-b",
+      "name": "Horizon windows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// For each horizon, re-read the Iterable SEND events from the single UTC day that\n// aged past that horizon yesterday. Sends are the only source of truth for the\n// anchor timestamp, and re-reading them means no Waypoint read endpoint is needed.\nconst HORIZONS = [7, 14, 30, 90];\nconst DAY = 86400000;\nconst fmt = (d) => d.toISOString().slice(0, 19).replace('T', ' '); // ASSUMPTION: Iterable project timezone is UTC\nconst out = [];\nfor (const horizon of HORIZONS) {\n  // horizon + 1: measure a day AFTER the window closes, so no touch is scored\n  // on a window that is still open when the cron fires.\n  const start = new Date(Date.now() - (horizon + 1) * DAY);\n  start.setUTCHours(0, 0, 0, 0);\n  const end = new Date(start.getTime() + DAY);\n  for (const dataTypeName of ['emailSend', 'smsSend']) {\n    out.push({ json: { horizon, dataTypeName, startDateTime: fmt(start), endDateTime: fmt(end) } });\n  }\n}\nreturn out;\n"
+      }
+    },
+    {
+      "id": "export-b",
+      "name": "Iterable sends (horizon)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        240
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.iterable.com/api/export/data.json?dataTypeName={{ $json.dataTypeName }}&startDateTime={{ encodeURIComponent($json.startDateTime) }}&endDateTime={{ encodeURIComponent($json.endDateTime) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "LOfEoFKfZ89078UI",
+          "name": "waypoint-iterable-api"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "elig-b",
+      "name": "Eligible touches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// One item per (touch, horizon) that is worth an Amplitude lookup.\n// Deliberately duplicates the parse/routing logic in \"Build outcomes\": n8n Code\n// nodes cannot share a module, and two copies of 25 lines beats a shared-code\n// sub-workflow nobody can debug. Change both together.\n// Option C: start from what WE shipped, not from everything Iterable did.\n// The work list is Waypoint's own funnel detail \u2014 every Pro that reached a\n// verdict in the window. Only winners that were actually handed off could\n// possibly have been sent, so anything else in the Iterable window is not ours\n// and is dropped here instead of being POSTed as an unattributable row.\nconst WORKLIST = 'Waypoint work list (sweep)';\nconst shipped = new Set(\n  $(WORKLIST).all()\n    .flatMap((i) => (i.json && i.json.pros) || [])\n    .filter((p) => p.verdict === 'winner' && p.handed_off)\n    .map((p) => p.run_id + '|' + p.pro_id)\n);\nif (!shipped.size) return [];  // nothing shipped in the window => nothing to match\n\nconst INTERNAL = ['allison.torres', 'jake.fassora', 'liann.bielicki'];\n\n// Normalise to a real ISO instant. TWO traps here:\n//   * `new Date(\"2026-08-20 10:00:00\")` is VALID in V8 and is read in the\n//     PROCESS-LOCAL zone, so a parse-then-fallback never reaches the 'Z' branch\n//     for exactly the format we expect. settings.timezone governs cron\n//     expressions, not `new Date()` inside a Code node. Offset FIRST.\n//   * Iterable writes the offset after a SPACE (\"... 10:00:00 +00:00\"), and\n//     replace(' ', 'T') only replaces the FIRST space \u2014 leaving an unparseable\n//     \"10:00:00 +00:00\". Both spaces have to go.\nconst toIso = (v) => {\n  const s = String(v == null ? '' : v).trim();\n  if (!s) return null;\n  let t = s.replace(' ', 'T').replace(/\\s+(?=[+-]\\d\\d:?\\d\\d$)/, '');\n  if (!/(Z|[+-]\\d\\d:?\\d\\d)$/.test(t)) t += 'Z'; // ASSUMPTION: no offset means UTC\n  const d = new Date(t);\n  return isNaN(d) ? null : d.toISOString();\n};\nconst iso = toIso;\n// Whole address, not the local part. Matching only the local part is wrong in\n// BOTH directions: jake.fassora.qa@ scores as a real Pro, and a genuine Pro at\n// allison.torres@some-other-domain.com is falsely called internal \u2014 which merges\n// to 'conflict' against the proven send and permanently disqualifies a real touch.\n// EDIT HERE if internal testers are on another domain.\nlet _dom = 'housecallpro.com';\ntry { _dom = $env.WAYPOINT_INTERNAL_DOMAIN || _dom; } catch (e) { /* $env blocked */ }\nconst INTERNAL_DOMAIN = _dom.toLowerCase();\nconst addr = (email) => {\n  const [local, domain] = String(email || '').toLowerCase().split('@');\n  return { local: String(local || '').split('+')[0], domain: domain || '' };\n};\n// 'internal' | 'external' | 'unprovable' \u2014 never guess between the last two.\n// The DOMAIN decides, not the roster. Roster-first was a live hole: any\n// unrostered address on the internal domain (jake.fassora.qa@, a new tester,\n// a shared alias) fell through to 'external' => 'route-to-pro', so a guardrailed\n// send became a proven one, that Pro's organic Amplitude activity was scored as\n// a return, and _promote_warm_start propagated the mechanism CROSS-ORG off a\n// touch nobody received. A real Pro is never on the internal domain, so keying\n// on the domain cannot produce a false guardrail either.\nconst classify = (email) => {\n  const { local, domain } = addr(email);\n  if (!local || !domain) return 'unprovable';\n  if (domain === INTERNAL_DOMAIN) return 'internal';\n  // A Pro who merely shares a roster local part on their own domain is not\n  // provably either way \u2014 claim nothing rather than conflict away a real touch.\n  return INTERNAL.includes(local) ? 'unprovable' : 'external';\n};\n\nconst seen = new Set();\nconst out = [];\n// Skips are silent by nature \u2014 count them so a channel quietly measuring\n// nothing (e.g. SMS with no lcmRouting stamp) is visible in the run log.\nconst skipped = { guardrail: 0, unprovable: 0 };\nfor (const item of items) {\n  const horizon = item.json.horizon;\n  const channel = item.json.dataTypeName.startsWith('sms') ? 'sms' : 'email';\n  for (const line of String(item.json.data || '').split('\\n')) {\n    if (!line.trim()) continue;\n    let ev; try { ev = JSON.parse(line); } catch { continue; }\n    if (typeof ev.transactionalData !== 'string') continue; // rule 4\n    let d; try { d = JSON.parse(ev.transactionalData); } catch { continue; }\n    if (d.lcmVariant !== 'A') continue;                     // rule 2 (positive check: fails CLOSED)\n    const run_id = d.lcmRun, pro_id = ev.userId;\n    if (!run_id || !pro_id || run_id.includes(':') || pro_id.includes(':')) continue; // 422s the whole batch otherwise\n    const sent_at = iso(ev.createdAt);\n    if (!sent_at) continue;                                 // rule 5: no true anchor, no measurement\n    // Rule 1: only a PROVEN real-Pro send may be scored. A guardrailed send is\n    // delivered to an internal inbox, but Amplitude would still report that\n    // Pro's organic activity \u2014 that is a manufactured return. Skip entirely.\n    // Same three-way classification as \"Build outcomes\". An SMS event carries\n    // phoneNumber, not email, so absence of an address is UNPROVABLE, not proof\n    // of a guardrail \u2014 reading it as guardrail silently dropped every SMS touch\n    // from every horizon, with no error and no log line.\n    const routing = d.lcmRouting\n      ? (d.lcmRouting === 'route-to-pro' ? 'route-to-pro' : 'guardrail')\n      : ({ internal: 'guardrail', external: 'route-to-pro', unprovable: '' })[classify(ev.email)];\n    if (routing !== 'route-to-pro') { skipped[routing || 'unprovable']++; continue; }\n    if (!shipped.has(run_id + '|' + pro_id)) continue;  // not one of ours\n    const key = horizon + '|' + run_id + '|' + pro_id;\n    if (seen.has(key)) continue;\n    seen.add(key);\n    out.push({ json: { horizon, run_id, pro_id, channel, sent_at } });\n  }\n}\nconsole.log(`eligible=${out.length} skipped_guardrail=${skipped.guardrail} skipped_unprovable=${skipped.unprovable}`);\nreturn out;\n"
+      }
+    },
+    {
+      "id": "usersearch",
+      "name": "Amplitude user lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        240
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://amplitude.com/api/2/usersearch?user={{ encodeURIComponent($json.pro_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 10000
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "Iiisyhv6U10uHZ0D",
+          "name": "waypoint-amplitude-api"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "ASSUMPTION: Amplitude user_id == pro_uuid. On no match the IF below drops the item \u2014 an unresolvable Pro produces NO row, never returned_*: false.",
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "if-match",
+      "name": "Has Amplitude user?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1060,
+        240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-amp-id",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              },
+              "leftValue": "={{ ($json.matches || []).filter(m => String(m.user_id) === String($('Eligible touches').itemMatching($itemIndex).json.pro_id)).length === 1 ? ($json.matches || []).filter(m => String(m.user_id) === String($('Eligible touches').itemMatching($itemIndex).json.pro_id))[0].amplitude_id : '' }}",
+              "rightValue": ""
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "useractivity",
+      "name": "Amplitude user activity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        200
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://amplitude.com/api/2/useractivity?user={{ ($json.matches || []).filter(m => String(m.user_id) === String($('Eligible touches').itemMatching($itemIndex).json.pro_id))[0].amplitude_id }}&limit=1000",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": false
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 10000
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "Iiisyhv6U10uHZ0D",
+          "name": "waypoint-amplitude-api"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "ponytail: 1000 most-recent events per Pro. Sound for this predicate because every horizon window ENDS ~now, so any truncation only drops events older than the window. Upgrade path: Amplitude Export API if windows ever stop ending at now.",
+      "onError": "continueRegularOutput",
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "build-b",
+      "name": "Returns to outcomes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// The qualifying active-use predicate is a NAMED PLACEHOLDER, not a guess.\n// The canonical Amplitude active-use event contract is still open (TODOS.md),\n// so this refuses to run rather than inventing a proxy metric.\n// EDIT HERE. Comma-separated Amplitude event names that count as \"the Pro came\n// back and used the app\". No default on purpose: the canonical active-use event\n// contract is still open (TODOS.md), and a guessed proxy metric would quietly\n// teach the loop the wrong thing. An n8n env var of the same name overrides this\n// if you'd rather keep it off the canvas.\nconst ACTIVE_USE_EVENTS = '';\nlet configured = ACTIVE_USE_EVENTS;\ntry { configured = $env.AMPLITUDE_ACTIVE_USE_EVENTS || ACTIVE_USE_EVENTS; } catch (e) { /* $env blocked */ }\nconst EVENTS = String(configured).split(',').map((s) => s.trim()).filter(Boolean);\nif (!EVENTS.length) {\n  throw new Error('Set ACTIVE_USE_EVENTS at the top of this node (or the AMPLITUDE_ACTIVE_USE_EVENTS env var). The canonical active-use event contract is undefined (TODOS.md) \u2014 refusing to guess a qualifying event.');\n}\nconst CHUNK = 500;\nconst DAY = 86400000;\n// Must match &limit= on the 'Amplitude user activity' node.\nconst ACTIVITY_LIMIT = 1000;\n\n// Normalise to a real ISO instant. TWO traps here:\n//   * `new Date(\"2026-08-20 10:00:00\")` is VALID in V8 and is read in the\n//     PROCESS-LOCAL zone, so a parse-then-fallback never reaches the 'Z' branch\n//     for exactly the format we expect. settings.timezone governs cron\n//     expressions, not `new Date()` inside a Code node. Offset FIRST.\n//   * Iterable writes the offset after a SPACE (\"... 10:00:00 +00:00\"), and\n//     replace(' ', 'T') only replaces the FIRST space \u2014 leaving an unparseable\n//     \"10:00:00 +00:00\". Both spaces have to go.\nconst toIso = (v) => {\n  const s = String(v == null ? '' : v).trim();\n  if (!s) return null;\n  let t = s.replace(' ', 'T').replace(/\\s+(?=[+-]\\d\\d:?\\d\\d$)/, '');\n  if (!/(Z|[+-]\\d\\d:?\\d\\d)$/.test(t)) t += 'Z'; // ASSUMPTION: no offset means UTC\n  const d = new Date(t);\n  return isNaN(d) ? null : d.toISOString();\n};\nconst evTime = (v) => { const i = toIso(v); return i ? Date.parse(i) : NaN; };\n\nconst rows = [];\nlet unmeasured = 0;\nfor (let i = 0; i < items.length; i++) {\n  const touch = $('Eligible touches').itemMatching(i).json;\n  const sent = Date.parse(touch.sent_at);              // rule 5: the TRUE Iterable send time\n  const until = sent + touch.horizon * DAY;\n  // A FAILED lookup is not a measured negative. With onError=continueRegular\n  // Output the node emits the item carrying an `error` instead of `events`,\n  // and `|| []` would have scored that as returned:false \u2014 writing a fabricated\n  // measured fact for a Pro we never actually looked up. Skip it; the row keeps\n  // its NULL and a later night can still fill it.\n  const payload = items[i].json;\n  if (payload.error || !Array.isArray(payload.events)) { unmeasured++; continue; }\n  const events = payload.events;\n  // useractivity returns the most-recent LIMIT events with no time filter. If\n  // it truncated AND the oldest event we got back is newer than the send, the\n  // window is only partly covered and a `false` here would be fabricated, not\n  // measured. Leave it NULL \u2014 a later night can still fill it.\n  const oldest = events.reduce((m, e) => Math.min(m, evTime(e.event_time) || Infinity), Infinity);\n  if (events.length >= ACTIVITY_LIMIT && isFinite(oldest) && oldest > sent) {\n    unmeasured++;\n    continue;\n  }\n  const returned = events.some((e) => {\n    if (!EVENTS.includes(e.event_type)) return false;\n    const t = evTime(e.event_time);\n    return !isNaN(t) && t >= sent && t <= until;\n  });\n  rows.push({\n    run_id: touch.run_id, pro_id: touch.pro_id, source: 'iterable_n8n',\n    channel: touch.channel, routing: 'route-to-pro', sent_at: touch.sent_at,\n    ['returned_' + touch.horizon + 'd']: returned,\n  });\n}\n\nconsole.log(`scored=${rows.length} unmeasured_lookup_failures=${unmeasured}`);\nconst out = [];\nfor (let i = 0; i < rows.length; i += CHUNK) out.push({ json: { batch: rows.slice(i, i + CHUNK) } });\nreturn out;\n"
+      }
+    },
+    {
+      "id": "post-b",
+      "name": "Post returns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1720,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://pathfinder-waypoint-v2-staging.up.railway.app/api/outcomes",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.batch) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Waypoint STAGING. Swap the host here (and in the sibling POST node) when you move to production. Auth is the waypoint-authorization credential.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rc9NEudzxaEZkLPE",
+          "name": "waypoint-authorization"
+        }
+      },
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "url": "https://pathfinder-waypoint-v2-staging.up.railway.app/api/funnel/worklist?days=7",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "waypoint-work-list",
+      "name": "Waypoint work list",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rc9NEudzxaEZkLPE",
+          "name": "waypoint-authorization"
+        }
+      },
+      "notes": "days=7, not 2: a touch whose QA took longer than the window would drop off the list and lose its sent_at/clicked/unsubscribed row entirely. Costs nothing \u2014 the response is bare (run_id, pro_id) pairs. Returns empty => the whole half is a no-op, which is fail-closed but SILENT; check it after any Railway deploy."
+    },
+    {
+      "parameters": {
+        "url": "https://pathfinder-waypoint-v2-staging.up.railway.app/api/funnel/worklist?days=120",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "waypoint-work-list-(sweep)",
+      "name": "Waypoint work list (sweep)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        620
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rc9NEudzxaEZkLPE",
+          "name": "waypoint-authorization"
+        }
+      },
+      "notes": "days=120, NOT 91. The 90d horizon is measured 90 days after the SEND, and the send trails the run by LCM drafting + human QA (up to ~3 days). At 91 the run had already aged out of the window, the Pro vanished from the work list, and the 90d return was discarded with no error. 120 leaves ~30 days of slack; raise it if QA turnaround ever grows."
+    }
+  ],
+  "connections": {
+    "Send window": {
+      "main": [
+        [
+          {
+            "node": "Iterable export",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Iterable export": {
+      "main": [
+        [
+          {
+            "node": "Build outcomes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build outcomes": {
+      "main": [
+        [
+          {
+            "node": "Post outcomes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nightly 03:00 UTC": {
+      "main": [
+        [
+          {
+            "node": "Waypoint work list (sweep)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Horizon windows": {
+      "main": [
+        [
+          {
+            "node": "Iterable sends (horizon)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Iterable sends (horizon)": {
+      "main": [
+        [
+          {
+            "node": "Eligible touches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eligible touches": {
+      "main": [
+        [
+          {
+            "node": "Amplitude user lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Amplitude user lookup": {
+      "main": [
+        [
+          {
+            "node": "Has Amplitude user?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Amplitude user?": {
+      "main": [
+        [
+          {
+            "node": "Amplitude user activity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Amplitude user activity": {
+      "main": [
+        [
+          {
+            "node": "Returns to outcomes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Returns to outcomes": {
+      "main": [
+        [
+          {
+            "node": "Post returns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hourly 09:00-15:00 MT": {
+      "main": [
+        [
+          {
+            "node": "Waypoint work list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waypoint work list": {
+      "main": [
+        [
+          {
+            "node": "Send window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waypoint work list (sweep)": {
+      "main": [
+        [
+          {
+            "node": "Horizon windows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {}
+}

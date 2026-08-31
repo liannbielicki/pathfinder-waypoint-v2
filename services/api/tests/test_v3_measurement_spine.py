@@ -185,6 +185,7 @@ async def test_control_exposure_outcome_needs_no_winner(db_session) -> None:
     db_session.add(ExposureRow(
         id="exp-control", pro_id="pro-c", org_id="org-c",
         item_id="item-c", item_version="v1", arm="B", channel="sms",
+        routing="route-to-pro",
     ))
     await db_session.commit()
 
@@ -234,11 +235,11 @@ async def test_a_return_plus_silent_control_promotes_causally_through_exposures(
     await register(db_session, [
         ExposureIn(
             exposure_id="exp-a", recommendation_id="winner-causal", arm="A",
-            channel="sms", send_status="confirmed", sent_at=SENT,
+            channel="sms", routing="route-to-pro", send_status="confirmed", sent_at=SENT,
         ),
         ExposureIn(
             exposure_id="exp-b", recommendation_id="winner-causal", arm="B",
-            channel="sms", send_status="confirmed", sent_at=SENT,
+            channel="sms", routing="route-to-pro", send_status="confirmed", sent_at=SENT,
         ),
     ])
 

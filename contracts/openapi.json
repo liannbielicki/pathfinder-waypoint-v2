@@ -72,6 +72,11 @@
             ],
             "title": "Recommendation Id"
           },
+          "routing": {
+            "default": "",
+            "title": "Routing",
+            "type": "string"
+          },
           "send_status": {
             "default": "unknown",
             "enum": [
@@ -330,6 +335,14 @@
             "title": "Pro Ids",
             "type": "array"
           },
+          "rounds": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rounds",
+            "type": "array"
+          },
           "stages": {
             "additionalProperties": true,
             "title": "Stages",
@@ -375,6 +388,7 @@
           "created_at",
           "journey_window",
           "stages",
+          "rounds",
           "candidates",
           "winners",
           "measurements",
@@ -484,7 +498,7 @@
         "type": "object"
       },
       "TouchOutcomeIn": {
-        "description": "One observed exposure/outcome record.\n\nLCM Personalization turns Waypoint's theme into an approved Housecall Pro\nSMS and sends it. It is not the measurement authority; outcome sources\nreport exposure and events back to Waypoint.\n\nV3 authority rules: attribution identity (pro, org, item, arm) comes ONLY\nfrom the winner/exposure records \u2014 callers cannot supply it, and any\ncaller-sent identity or returned_* horizon field is dropped at the wire.\nReturn horizons are derived from first_return_at against a confirmed send,\nor resolved by the checkpoint sweep \u2014 never asserted by a caller.",
+        "description": "One observed-outcome record from an outcome source (n8n Iterable/Amplitude\nflow, or manual backfill).\n\nTHREE ways to name the touch, any one is enough:\n\n* `recommendation_id` \u2014 the Waypoint winner_id (or an exposure id), echoed\n  back under either spelling (`recommendation_id` or `row_id`).\n* `exposure_id` \u2014 the exposure-level unit; alone it also keys the record.\n* `run_id` + `pro_id` \u2014 the NATURAL key, and the one that needs nothing\n  stamped into a message: `uq_winners_run_pro` makes one run plus one pro\n  exactly one winner. Both halves already cross the boundary on their own\n  (the LCM intake batch IS the run id, and the Iterable recipient IS the\n  pro_uuid), so an outcome is attributable without Waypoint ids ever\n  entering Iterable.\n\n`routing` is how a REAL send is told apart from a guardrailed test send that\nmerely carries a real Pro's context. It must be `route-to-pro` for the\nrecord to count as evidence \u2014 see waypoint.outcomes. Where an exposure\nexists, ITS routing is authoritative and the caller claim is ignored.\n\nV3 authority rules: attribution identity (pro, org, item, arm) comes ONLY\nfrom the winner/exposure records \u2014 caller identity is observational, and\nreturned_* horizon fields are not part of the wire contract at all. Return\nhorizons are derived from first_return_at against a confirmed send, or\nresolved by the checkpoint sweep \u2014 never asserted by a caller.",
         "properties": {
           "channel": {
             "default": "",
@@ -547,7 +561,7 @@
             "type": "string"
           },
           "recommendation_id": {
-            "minLength": 1,
+            "default": "",
             "title": "Recommendation Id",
             "type": "string"
           },
@@ -561,6 +575,16 @@
               }
             ],
             "title": "Replied"
+          },
+          "routing": {
+            "default": "",
+            "title": "Routing",
+            "type": "string"
+          },
+          "run_id": {
+            "default": "",
+            "title": "Run Id",
+            "type": "string"
           },
           "send_confirmed_at": {
             "anyOf": [
@@ -615,7 +639,6 @@
           }
         },
         "required": [
-          "recommendation_id",
           "source"
         ],
         "title": "TouchOutcomeIn",
@@ -776,6 +799,102 @@
           }
         },
         "summary": "Fleet Settings"
+      }
+    },
+    "/api/funnel": {
+      "get": {
+        "description": "Audience -> verdict -> LCM intake -> sent -> returned, from our own\ntables. OPERATOR auth: `detail=true` returns themes, mechanisms and\norg_ids, which the automation token has no business exporting \u2014 the\nmachine gets /api/funnel/worklist instead.",
+        "operationId": "funnel_api_funnel_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "detail",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Detail",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Funnel Api Funnel Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Funnel"
+      }
+    },
+    "/api/funnel/worklist": {
+      "get": {
+        "description": "The shipped touches as bare (run_id, pro_id) pairs \u2014 the n8n flow's\nwork list. Shares the outcomes token because it is the same automation,\nand carries no theme/mechanism/org_id for the reason in funnel.worklist.",
+        "operationId": "funnel_worklist_api_funnel_worklist_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Funnel Worklist Api Funnel Worklist Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Funnel Worklist"
       }
     },
     "/api/outcomes": {

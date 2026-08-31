@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.checkpoints import LEARNING_VERSION
 from waypoint.models import ExposureIn
+from waypoint.outcomes import merge_routing
 from waypoint.tables import ExposureRow, WinnerRow
 
 
@@ -82,6 +83,7 @@ async def _apply(session: AsyncSession, body: list[ExposureIn]) -> dict[str, int
                 id=item.exposure_id,
                 arm=item.arm,
                 channel=item.channel,
+                routing=item.routing,
                 send_status=item.send_status,
                 sent_at=item.sent_at,
                 learning_version=LEARNING_VERSION,
@@ -99,5 +101,8 @@ async def _apply(session: AsyncSession, body: list[ExposureIn]) -> dict[str, int
                     row.send_status = item.send_status
                 if item.sent_at is not None:
                     row.sent_at = item.sent_at
+            # Routing merges like any other source claim: an empty claim
+            # defers, a first claim is taken, disagreement fails closed.
+            row.routing = merge_routing(row.routing, item.routing)
         stored += 1
     return {"stored": stored, "unknown_recommendation": unknown}

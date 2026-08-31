@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest",
+    "codegen": "openapi-typescript ../../contracts/openapi.json -o src/lib/api-types.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

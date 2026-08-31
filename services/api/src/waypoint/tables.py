@@ -226,6 +226,9 @@ class ExposureRow(Base):
     item_version: Mapped[str | None] = mapped_column(default=None)
     arm: Mapped[str | None] = mapped_column(default=None)
     channel: Mapped[str] = mapped_column(default="")
+    # Authoritative routing claim for every outcome attributed to this
+    # exposure (see outcomes.REAL_SEND_ROUTING). "" = unclaimed, fails closed.
+    routing: Mapped[str] = mapped_column(default="")
     send_status: Mapped[str] = mapped_column(default="unknown")
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
     learning_version: Mapped[str] = mapped_column(default="")
@@ -291,7 +294,9 @@ class UsageRow(Base):
 class TouchOutcomeRow(Base):
     """One observed outcome record per (recommendation, source). Horizon fields
     are tri-state: True/False are measured facts, None means not yet measurable.
-    evidence_limitation labels records that cannot honestly claim attribution."""
+    evidence_limitation labels records that cannot honestly claim attribution,
+    and is DERIVED on every write from (winner resolved?, routing) — never
+    left at whatever the first submission computed."""
 
     __tablename__ = "touch_outcomes"
     __table_args__ = (
@@ -323,6 +328,9 @@ class TouchOutcomeRow(Base):
     journey_window: Mapped[str] = mapped_column(default="churn_risk")
     channel: Mapped[str] = mapped_column(default="")
     mechanism: Mapped[str] = mapped_column(default="")
+    # How the message was routed, merged across submissions (outcomes.py).
+    # "" = no source has claimed a routing yet, which fails closed.
+    routing: Mapped[str] = mapped_column(default="")
     churn_risk_state: Mapped[str | None] = mapped_column(default=None)
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
     send_status: Mapped[str] = mapped_column(default="unknown")

@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # is a deliberate infra decision, not an env var.
     MODEL_RANKER: str = ""
     APP_PASSWORD: SecretStr
+    # Machine token for the outcome automation (POST /api/outcomes and
+    # GET /api/funnel/worklist) — nothing else, so the n8n flow never
+    # holds APP_PASSWORD (which is full operator access, and which n8n would
+    # persist in plaintext execution history). Unset => that endpoint stays
+    # cookie-only, exactly as before. Generate: openssl rand -hex 32
+    OUTCOMES_TOKEN: SecretStr | None = None
     SESSION_KEY: SecretStr = Field(min_length=32)
     LOG_LEVEL: str = "INFO"
 

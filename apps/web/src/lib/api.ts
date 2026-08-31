@@ -62,17 +62,24 @@ export interface Handoff {
   response: Record<string, unknown> | null;
 }
 
+// One evolve_rounds ledger row: a single loop iteration for one Pro.
+export interface EvolveRound {
+  pro_id: string;
+  round: number;
+  mechanism: string;
+  outcome: "win" | "lose" | "suppressed" | "unavailable";
+  score_pp: number | null;
+}
+
 export type RunDetail = Omit<
   components["schemas"]["RunDetail"],
-  "candidates" | "winners" | "measurements" | "handoffs"
+  "candidates" | "winners" | "measurements" | "handoffs" | "rounds"
 > & {
   candidates: Candidate[];
   winners: Winner[];
   measurements: Measurement[];
   handoffs: Handoff[];
-  // Per-Pro jobs a worker is actively leasing right now. Not in the generated
-  // base type; regenerate api-types.ts from the live OpenAPI schema to sync.
-  agents_in_flight: number;
+  rounds: EvolveRound[];
 };
 
 export const TERMINAL_STATES = new Set([
@@ -112,10 +119,9 @@ export const login = (password: string) =>
     body: JSON.stringify({ password }),
   });
 
-// journey_window postdates the generated api-types.ts; regenerate from the
-// live OpenAPI schema to fold it into RunCreate proper.
-export type RunCreateInput = RunCreate & {
-  journey_window?: "churn_risk" | "churn_risk_open" | "onboarding" | "upsell";
+// The server defaults journey_window; callers (RetryPanel) may omit it.
+export type RunCreateInput = Omit<RunCreate, "journey_window"> & {
+  journey_window?: RunCreate["journey_window"];
 };
 
 export const createRun = (body: RunCreateInput) =>

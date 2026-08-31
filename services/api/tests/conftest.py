@@ -3,12 +3,16 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic.config import Config
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from alembic import command
+from waypoint.api import create_app
+from waypoint.settings import Settings
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+asyncpg://localhost:5432/waypoint_test"
@@ -357,3 +361,53 @@ async def seeded_job(db_session: AsyncSession):
         pro_id = "pro_1"
 
     return Seeded()
+
+
+# --- app + client fixtures (shared by test_api and test_funnel) --------------
+
+TEST_SETTINGS = Settings(
+    _env_file=None,
+    DATABASE_URL="postgresql+asyncpg://localhost:5432/waypoint_test",
+    LLM_API_KEY="test",
+    N8N_CONTEXT_URL="https://n8n.example/webhook/context",
+    N8N_TOKEN="test",
+    PERSONA_URL="https://personas.example/personas",
+    PERSONA_TOKEN="test",
+    HANDOFF_URL="https://lcm.example/handoff",
+    HANDOFF_TOKEN="lcm-token",
+    BYPASS_TOKEN="bypass-secret",
+    RUN_COST_USD="25.00",
+    DAY_COST_USD="500.00",
+    WORKER_COUNT=1,
+    MODEL_FAST="claude-haiku-4-5",
+    MODEL_DEEP="claude-sonnet-5",
+    APP_PASSWORD="operator-password",
+    SESSION_KEY="0123456789abcdef0123456789abcdef",
+)
+
+# Same app, but with the scoped machine token configured. Kept separate so the
+# "no token configured" path stays testable on the default settings.
+TOKEN_SETTINGS = TEST_SETTINGS.model_copy(update={"OUTCOMES_TOKEN": SecretStr("tok-good")})
+
+
+@pytest.fixture
+async def client(db_session_factory) -> AsyncIterator[httpx.AsyncClient]:
+    app = create_app(settings=TEST_SETTINGS, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as c:
+        yield c
+
+
+@pytest.fixture
+async def auth_client(client: httpx.AsyncClient) -> httpx.AsyncClient:
+    response = await client.post("/api/auth/login", json={"password": "operator-password"})
+    assert response.status_code == 200
+    return client
+
+
+@pytest.fixture
+async def token_client(db_session_factory) -> AsyncIterator[httpx.AsyncClient]:
+    app = create_app(settings=TOKEN_SETTINGS, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as c:
+        yield c

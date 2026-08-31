@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 import { HandoffReceipt } from "@/components/HandoffReceipt";
+import { LoopProgress } from "@/components/LoopProgress";
 import { RetryPanel } from "@/components/RetryPanel";
 import { RunStatus } from "@/components/RunStatus";
 import { WinnerReview } from "@/components/WinnerReview";
@@ -90,6 +91,7 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         <>
           <RetryPanel run={run} />
           <RunStatus run={run} onKill={onKill} />
+          <LoopProgress run={run} />
           <WinnerReview run={run} onHandoff={onHandoff} handingOff={handingOff} />
           <HandoffReceipt handoffs={run.handoffs} />
         </>
