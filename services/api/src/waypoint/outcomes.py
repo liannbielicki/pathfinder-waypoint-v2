@@ -168,18 +168,27 @@ def merge_routing(stored: str, submitted: str) -> str:
 
 
 def evidence_limitation(
-    winner: WinnerRow | None, exposure: ExposureRow | None, routing: str
+    winner: WinnerRow | None,
+    exposure: ExposureRow | None,
+    routing: str,
+    delivered: bool | None = None,
 ) -> str | None:
     """Why this record cannot be evidence, or None when it can.
 
     DERIVED, and recomputed on every write. Computing it only on the first
     submission let a later guardrailed return land on a row already marked
     clean — the exact laundering the routing gate exists to prevent.
+
+    delivered=False (a bounce) disqualifies like bad routing does: the Pro
+    provably never received the message, so its silence must never become a
+    measured negative against the winner.
     """
     if winner is None and exposure is None:
         return "unattributed: recommendation_id matches no winner or exposure"
     if routing != REAL_SEND_ROUTING:
         return f"not a real-Pro send: routing={routing or 'unknown'!r}"
+    if delivered is False:
+        return "send bounced: never delivered to the Pro"
     return None
 
 
@@ -473,7 +482,7 @@ def _apply_item(
             "sent_at": item.sent_at,
             "first_return_at": item.first_return_at,
             "routing": routing,
-            "evidence_limitation": evidence_limitation(winner, exposure, routing),
+            "evidence_limitation": evidence_limitation(winner, exposure, routing, item.delivered),
             "pro_id": item.pro_id,
             "exposure_id": item.exposure_id,
             "send_status": item.send_status,
@@ -500,8 +509,12 @@ def _apply_item(
         if winner is not None or exposure is not None:
             for field_name, value in fill.items():
                 setattr(existing, field_name, value)
-        existing.evidence_limitation = evidence_limitation(winner, exposure, existing.routing)
         _apply_flags(existing, item)
+        # After _apply_flags: the verdict must see the flags this submission
+        # just measured (a bounce landing on an existing row disqualifies it).
+        existing.evidence_limitation = evidence_limitation(
+            winner, exposure, existing.routing, existing.delivered
+        )
         stored = existing
     return stored.evidence_limitation is not None
 

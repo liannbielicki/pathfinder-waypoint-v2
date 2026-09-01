@@ -92,11 +92,37 @@ def make_client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
-def _routing(event: dict[str, Any]) -> str:
+def _stamps(event: dict[str, Any]) -> dict[str, str]:
+    """The LCM's attribution stamps off one export event.
+
+    The LCM writes them into the SEND request's dataFields, but Iterable
+    echoes them back on export events as `transactionalData` — a JSON STRING
+    with keys lcmRun / lcmVariant / lcmRouting (the verified contract in
+    docs/n8n/outcome-ingestion.md, the only shape real events have ever
+    shown). The dataFields spellings are kept as a fallback in case an event
+    shape ever carries them directly."""
+    parsed: dict[str, Any] = {}
+    raw = event.get("transactionalData")
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, dict):
+            parsed = decoded
     data = event.get("dataFields") or {}
-    claim = data.get("routing")
+    run_candidates = (parsed.get("lcmRun"), *(data.get(k) for k in _RUN_ID_KEYS))
+    return {
+        "run": next((str(v) for v in run_candidates if v), ""),
+        "routing": str(parsed.get("lcmRouting") or data.get("routing") or ""),
+        "variant": str(parsed.get("lcmVariant") or data.get("lcmVariant") or ""),
+    }
+
+
+def _routing(event: dict[str, Any]) -> str:
+    claim = _stamps(event)["routing"]
     if claim:
-        return str(claim)
+        return claim
     names = " ".join(
         str(event.get(key) or "") for key in ("campaignName", "templateName")
     ).lower()
@@ -106,13 +132,15 @@ def _routing(event: dict[str, Any]) -> str:
 
 
 def _run_pro(event: dict[str, Any]) -> tuple[str, str]:
-    data = event.get("dataFields") or {}
-    run_id = next((str(data[k]) for k in _RUN_ID_KEYS if data.get(k)), "")
-    return run_id, str(event.get("userId") or "")
+    return _stamps(event)["run"], str(event.get("userId") or "")
 
 
 async def _fetch_events(
-    client: httpx.AsyncClient, data_type: str, since: datetime, until: datetime
+    client: httpx.AsyncClient,
+    data_type: str,
+    since: datetime,
+    until: datetime,
+    tolerate_400: bool = False,
 ) -> list[dict[str, Any]]:
     """One export call, newline-delimited JSON. Malformed lines are skipped
     with a log, never a crash. Timestamps carry an explicit +00:00 offset so
@@ -125,10 +153,11 @@ async def _fetch_events(
             "endDateTime": until.strftime("%Y-%m-%d %H:%M:%S") + " +00:00",
         },
     )
-    if response.status_code == 400:
-        # An export type this project doesn't recognize must cost ONE data
-        # type's events, never the tick — a raise here would hold the cursor
-        # and starve send ingestion behind a name mismatch.
+    if response.status_code == 400 and tolerate_400:
+        # OUTCOME types only: a rejected optional type must cost that type's
+        # events, never the tick. The SEND fetch is the tick's authoritative
+        # stream — its 400 must raise so the cursor holds and the window
+        # replays, or every send in it would be skipped permanently.
         log.warning("iterable %s: export rejected the request (400); skipping", data_type)
         return []
     response.raise_for_status()
@@ -173,7 +202,7 @@ def _send_to_exposure(event: dict[str, Any], winner_id: str | None) -> ExposureI
     if not message_id or sent_at is None or not (winner_id or pro_id):
         log.warning("iterable send skipped: missing messageId/createdAt/recipient")
         return None
-    variant = str((event.get("dataFields") or {}).get("lcmVariant") or "")
+    variant = _stamps(event)["variant"]
     return ExposureIn(
         exposure_id=str(message_id),  # Iterable's id: retries never fork
         recommendation_id=winner_id,
@@ -190,10 +219,12 @@ def _send_to_exposure(event: dict[str, Any], winner_id: str | None) -> ExposureI
 
 def _sends_to_exposures(
     sends: list[dict[str, Any]], winners: dict[tuple[str, str], str], now: datetime
-) -> tuple[list[ExposureIn], int]:
+) -> tuple[list[ExposureIn], int, int]:
     """Map send events to exposures; a recent send whose stamped run id
     resolved to no winner yet is deferred (counted, not registered) so the
-    replayed window can link it once the winner is visible."""
+    replayed window can link it once the winner is visible. Unstamped sends
+    are counted as ignored — surfaced in poll's result so a total stamp
+    mismatch is visible, never silent."""
     exposures: list[ExposureIn] = []
     deferred = ignored = 0
     for event in sends:
@@ -216,9 +247,12 @@ def _sends_to_exposures(
             )
         if (exposure := _send_to_exposure(event, winner_id)) is not None:
             exposures.append(exposure)
-    if ignored:
-        log.debug("iterable: ignored %d send(s) with no LCM batch stamp", ignored)
-    return exposures, deferred
+    if ignored and ignored == len(sends):
+        # Every send unstamped is a contract break (LCM rename, wrong field),
+        # not background traffic — it must be loud, or measurement goes dark
+        # with the cursor still advancing.
+        log.warning("iterable: ALL %d send(s) in the window carry no LCM stamp", ignored)
+    return exposures, deferred, ignored
 
 
 async def poll(
@@ -232,18 +266,18 @@ async def poll(
     since = parse_time(cursor.get("since")) or (now - INITIAL_LOOKBACK)
     until = min(now - LAG, since + CATCHUP)
     if until - since < MIN_WINDOW:
-        return {"exposures": 0, "outcomes": 0, "deferred": 0}  # too small; no calls spent
+        return {"exposures": 0, "outcomes": 0, "deferred": 0, "ignored": 0}
 
     sends = await _fetch_events(client, SEND_TYPE, since, until)
     pairs = {pair for pair in (_run_pro(e) for e in sends) if pair[0] and pair[1]}
     winners = await _resolve_winners(session, pairs)
-    exposures, deferred = _sends_to_exposures(sends, winners, now)
+    exposures, deferred, ignored = _sends_to_exposures(sends, winners, now)
     if exposures:
         await register(session, exposures)
 
     outcomes: list[TouchOutcomeIn] = []
     for data_type, (flag, value) in OUTCOME_TYPES.items():
-        for event in await _fetch_events(client, data_type, since, until):
+        for event in await _fetch_events(client, data_type, since, until, tolerate_400=True):
             if (outcome := _event_to_outcome(event, flag, value)) is not None:
                 outcomes.append(outcome)
     outcomes = await _known_outcomes(session, outcomes, {e.exposure_id for e in exposures})
@@ -256,7 +290,12 @@ async def poll(
         log.warning("iterable: %d send(s) deferred awaiting winner; window will replay", deferred)
     else:
         await save_cursor(session, SOURCE, {"since": until.isoformat()})
-    return {"exposures": len(exposures), "outcomes": len(outcomes), "deferred": deferred}
+    return {
+        "exposures": len(exposures),
+        "outcomes": len(outcomes),
+        "deferred": deferred,
+        "ignored": ignored,
+    }
 
 
 async def _known_outcomes(
@@ -266,12 +305,18 @@ async def _known_outcomes(
     send — a messageId that names a known exposure (registered this tick or
     earlier), or an event carrying the LCM batch stamp itself. Everything
     else is the project's unrelated SMS traffic and is not stored."""
-    message_ids = {o.exposure_id for o in outcomes if o.exposure_id} - registered
+    message_ids = list({o.exposure_id for o in outcomes if o.exposure_id} - registered)
     known = set(registered)
-    if message_ids:
+    # Chunked: the id set is the PROJECT's traffic, not Waypoint's — one
+    # unbounded IN() would overflow the wire protocol's parameter limit on a
+    # busy catch-up window and poison it (the tick fails before the cursor
+    # moves, then fails identically forever).
+    for start in range(0, len(message_ids), 5000):
         rows = (
             await session.execute(
-                select(ExposureRow.id).where(ExposureRow.id.in_(message_ids))
+                select(ExposureRow.id).where(
+                    ExposureRow.id.in_(message_ids[start : start + 5000])
+                )
             )
         ).scalars().all()
         known.update(rows)
@@ -285,11 +330,12 @@ async def _known_outcomes(
 def _event_to_outcome(event: dict[str, Any], flag: str, value: bool) -> TouchOutcomeIn | None:
     message_id = event.get("messageId")
     run_id, pro_id = _run_pro(event)
-    fields: dict[str, Any] = {"source": SOURCE, flag: value}
+    # run/pro always ride along when stamped — the messageId keys the row,
+    # but the stamp is what lets _known_outcomes keep a Waypoint event whose
+    # exposure is missing (send window lost, or send skipped as malformed).
+    fields: dict[str, Any] = {"source": SOURCE, flag: value, "run_id": run_id, "pro_id": pro_id}
     if message_id:
         fields["exposure_id"] = str(message_id)
-    else:
-        fields.update(run_id=run_id, pro_id=pro_id)
     try:
         return TouchOutcomeIn(**fields)
     except ValidationError:

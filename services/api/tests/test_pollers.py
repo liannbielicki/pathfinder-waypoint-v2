@@ -47,16 +47,20 @@ def send_event(
     variant: str = "",
     **extra: object,
 ) -> dict:
-    data_fields = {"run_id": run_id}
+    # Real export shape: Iterable echoes the LCM's send-time stamps back as
+    # `transactionalData`, a JSON STRING (docs/n8n/outcome-ingestion.md).
+    stamps: dict = {}
+    if run_id:
+        stamps["lcmRun"] = run_id
     if routing:
-        data_fields["routing"] = routing
+        stamps["lcmRouting"] = routing
     if variant:
-        data_fields["lcmVariant"] = variant
+        stamps["lcmVariant"] = variant
     return {
         "messageId": message_id,
         "userId": pro_id,
         "createdAt": SENT.isoformat(),
-        "dataFields": data_fields,
+        "transactionalData": json.dumps(stamps),
         **extra,
     }
 
@@ -213,6 +217,56 @@ async def test_iterable_rejected_data_type_costs_one_type_not_the_tick(
     assert (await load_cursor(db_session, "iterable")) != {}  # cursor advanced
 
 
+async def test_iterable_400_on_the_send_fetch_holds_the_cursor(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # The send stream is the tick's authoritative input: a rejected send
+    # fetch must raise and replay the window, never advance past real sends.
+    import pytest
+    from httpx import HTTPStatusError
+
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsSend.*"), status_code=400)
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        with pytest.raises(HTTPStatusError):
+            await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert await load_cursor(db_session, "iterable") == {}  # window held
+
+
+async def test_iterable_reads_stamps_from_datafields_as_fallback(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    winner_id = await seed_winner(db_session)
+    event = {
+        "messageId": "msg-df", "userId": "pro-uuid-1", "createdAt": SENT.isoformat(),
+        "dataFields": {"run_id": "run-lcm", "routing": "route-to-pro", "lcmVariant": "B"},
+    }
+    httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(event))
+    httpx_mock.add_response(url=ITERABLE_EXPORT, text="", is_reusable=True)
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    row = await db_session.get(ExposureRow, "msg-df")
+    assert row.winner_id == winner_id
+    assert row.routing == "route-to-pro"
+    assert row.arm == "B"
+
+
+async def test_iterable_bounce_disqualifies_the_outcome_as_evidence(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # A bounced message never reached the Pro: its silence must be labelled,
+    # never measured as a clean negative against the winner.
+    await seed_winner(db_session)
+    bounced = {"messageId": "msg-1", "userId": "pro-uuid-1"}
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsSend.*"), text=ndjson(send_event()))
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsBounce.*"), text=ndjson(bounced))
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsClick.*"), text="")
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
+    assert outcome.delivered is False
+    assert outcome.evidence_limitation == "send bounced: never delivered to the Pro"
+
+
 async def test_iterable_poll_is_gated_by_the_learning_kill_switch(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
@@ -241,7 +295,7 @@ async def test_iterable_ignores_non_waypoint_sms_traffic(
     )
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert result == {"exposures": 0, "outcomes": 0, "deferred": 0}
+    assert result == {"exposures": 0, "outcomes": 0, "deferred": 0, "ignored": 1}
     assert (await db_session.execute(select(ExposureRow))).scalars().all() == []
     assert (await db_session.execute(select(TouchOutcomeRow))).scalars().all() == []
     assert (await load_cursor(db_session, "iterable")) != {}  # gate never holds the cursor
@@ -263,7 +317,7 @@ async def test_iterable_defers_sends_until_their_winner_is_visible(
     )
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         first = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-        assert first == {"exposures": 0, "outcomes": 0, "deferred": 1}
+        assert first == {"exposures": 0, "outcomes": 0, "deferred": 1, "ignored": 0}
         assert await db_session.get(ExposureRow, "msg-1") is None
         assert await load_cursor(db_session, "iterable") == {}  # window held
         winner_id = await seed_winner(db_session)
@@ -376,7 +430,7 @@ async def test_pollers_spend_no_calls_until_a_min_window_accumulates(
     await save_cursor(db_session, "amplitude", {"until": small.isoformat()})
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert result == {"exposures": 0, "outcomes": 0, "deferred": 0}
+    assert result == {"exposures": 0, "outcomes": 0, "deferred": 0, "ignored": 0}
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     assert result == {"returns": 0, "outcomes": 0}

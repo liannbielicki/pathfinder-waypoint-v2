@@ -152,9 +152,13 @@ def evidence_block(patterns: list[PatternEvidence]) -> str:
             for h, (t, m) in p.returned.items()
             if m > 0
         ) or "no return horizons measured yet"
+        # Only a MEASURED unsubscribe count may render: not every live source
+        # writes the flag, and printing "0 unsubscribed" would assert an
+        # observation nothing made (label the limitation, never pretend) —
+        # same rule as the m > 0 horizon filter above.
         lines.append(
-            f"- {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}, "
-            f"{p.unsubscribed} unsubscribed"
+            f"- {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}"
+            + (f", {p.unsubscribed} unsubscribed" if p.unsubscribed else "")
         )
     return "Observed outcomes for similar pros (returns to the app are the goal):\n" + "\n".join(
         lines
