@@ -58,6 +58,20 @@ def test_model_ranker_defaults_to_empty_meaning_use_model_fast() -> None:
     assert Settings.model_fields["MODEL_RANKER"].default == ""
 
 
+def test_empty_poller_keys_mean_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Railway placeholder variables arrive as "" — the poller must stay
+    # disabled, not run with blank credentials.
+    for key, val in _MINIMAL_ENV.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setenv("ITERABLE_API_KEY", "")
+    monkeypatch.setenv("AMPLITUDE_API_KEY", "")
+    monkeypatch.setenv("AMPLITUDE_SECRET_KEY", "")
+    settings = Settings.load()
+    assert settings.ITERABLE_API_KEY is None
+    assert settings.AMPLITUDE_API_KEY is None
+    assert settings.AMPLITUDE_SECRET_KEY is None
+
+
 def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     # Provide the required env so load() succeeds; default of the new flag is what we assert.
     for key, val in _MINIMAL_ENV.items():

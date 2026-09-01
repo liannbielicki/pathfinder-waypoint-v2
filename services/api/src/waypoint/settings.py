@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     AMPLITUDE_RETURN_EVENT: str = "session_start"
     # Cadence for both outcome pollers.
     POLL_SECONDS: float = Field(default=300.0, gt=0)
+
+    @field_validator("ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, value: object) -> object:
+        # Railway placeholder variables arrive as "" — that is "no key", and
+        # must disable the poller, not enable it with blank credentials.
+        return None if value == "" else value
 
     @classmethod
     def load(cls) -> Settings:
