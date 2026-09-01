@@ -443,6 +443,31 @@ async def test_pollers_spend_no_calls_until_a_min_window_accumulates(
     assert await load_cursor(db_session, "amplitude") == {"until": small.isoformat()}
 
 
+async def test_sweep_never_grades_past_the_amplitude_cursor(db_session) -> None:
+    # A backfilled send must not be stamped a negative before the amplitude
+    # poller has provably ingested that period's returns.
+    from waypoint.checkpoints import sweep_if_enabled
+    from waypoint.exposures import register
+    from waypoint.models import ExposureIn
+
+    sent = NOW - timedelta(days=8)
+    await register(db_session, [ExposureIn(
+        exposure_id="exp-old", pro_id="pro-uuid-1", channel="sms",
+        routing="route-to-pro", send_status="confirmed", sent_at=sent,
+    )])
+    # Returns are only ingested up to one day AFTER the send — no horizon has
+    # provably closed, so nothing may resolve.
+    await save_cursor(db_session, "amplitude", {"until": (sent + timedelta(days=1)).isoformat()})
+    result = await sweep_if_enabled(db_session, NOW)
+    assert result == {"resolved": 0, "synthesized": 0}
+    # Coverage catches up past sent + 7d + grace: now the negatives are real.
+    await save_cursor(db_session, "amplitude", {"until": NOW.isoformat()})
+    result = await sweep_if_enabled(db_session, NOW)
+    assert result is not None and result["synthesized"] == 1
+    outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
+    assert outcome.returned_7d is False
+
+
 # --- worker wiring -----------------------------------------------------------
 
 

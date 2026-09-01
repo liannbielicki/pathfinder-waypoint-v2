@@ -22,11 +22,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from waypoint.cursors import parse_time
 from waypoint.outcomes import derive_checkpoint_flags, evidence_limitation, promote_winners
 from waypoint.tables import (
     CandidateRow,
     ExposureRow,
     FleetControlRow,
+    PollCursorRow,
     RunRow,
     TouchOutcomeRow,
     WinnerRow,
@@ -218,8 +220,20 @@ async def sweep_if_enabled(
     session: AsyncSession, now: datetime, limit: int = 500
 ) -> dict[str, int] | None:
     """One sweep, gated by the learning kill switch ONLY — the fleet kill
-    switch is independent and never stops measurement."""
+    switch is independent and never stops measurement.
+
+    A negative may only be stamped for a period whose returns are PROVABLY
+    ingested. When the amplitude poller owns return ingestion, its cursor is
+    exactly how far returns have been read — so the sweep's clock is capped
+    to it. Without the cap, a backfill registers week-old sends today and
+    the sweep grades them "no return" before their returns have even been
+    fetched — permanent false negatives. No cursor row (poller not in use)
+    keeps the old wall-clock behavior."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is not None and fleet.learning_killed:
         return None
+    amplitude = await session.get(PollCursorRow, "amplitude")
+    covered = parse_time(amplitude.cursor.get("until")) if amplitude else None
+    if covered is not None:
+        now = min(now, covered)
     return await resolve_due_checkpoints(session, now, limit)
