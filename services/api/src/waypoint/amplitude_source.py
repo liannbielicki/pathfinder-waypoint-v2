@@ -17,12 +17,12 @@ successful ingest, so a failed tick replays its window.
 """
 
 import gzip
-import io
 import json
 import logging
+import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import IO, Any
 
 import httpx
 from sqlalchemy import select
@@ -38,6 +38,10 @@ log = logging.getLogger("waypoint.amplitude_source")
 
 SOURCE = "amplitude"
 BASE_URL = "https://amplitude.com"
+
+
+class SizeCapError(Exception):
+    """Amplitude refused the export: the response would exceed its size cap."""
 HOUR = timedelta(hours=1)
 LAG = HOUR  # the export for an hour is complete only once the hour is over
 # Amplitude 400s an export whose response would be too large; staging hit
@@ -84,61 +88,75 @@ def _event_time(value: Any) -> datetime | None:
         return None
 
 
-def _parse_archive(content: bytes) -> list[dict[str, Any]]:
-    """Zip of .json.gz NDJSON files -> event dicts; malformed lines and
-    members are skipped with a log, never a crash."""
+def _parse_archive(spool: IO[bytes], return_event: str) -> list[dict[str, Any]]:
+    """Zip of .json.gz NDJSON files -> matching event dicts; malformed lines
+    and members are skipped with a log, never a crash. Members are streamed
+    line-by-line and filtered to return_event as they're read: an export under
+    the 4GB cap can still be GBs decompressed, so nothing else may accumulate
+    in memory."""
     events: list[dict[str, Any]] = []
-    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+    with zipfile.ZipFile(spool) as archive:
         for name in archive.namelist():
             try:
-                lines = gzip.decompress(archive.read(name)).splitlines()
+                with archive.open(name) as member, gzip.open(member) as lines:
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            log.warning(
+                                "amplitude export: skipping malformed line in %s", name
+                            )
+                            continue
+                        if isinstance(event, dict) and event.get("event_type") == return_event:
+                            events.append(event)
             except (OSError, zipfile.BadZipFile):
                 log.warning("amplitude export: skipping unreadable member %s", name)
                 continue
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    log.warning("amplitude export: skipping malformed line in %s", name)
-                    continue
-                if isinstance(event, dict):
-                    events.append(event)
     return events
 
 
 async def _fetch_events(
-    client: httpx.AsyncClient, since: datetime, until: datetime
+    client: httpx.AsyncClient, since: datetime, until: datetime, return_event: str
 ) -> list[dict[str, Any]]:
     """Export hours [since, until) — Amplitude's start/end are inclusive
-    hour stamps. 404 means no data for the range, which is a quiet window."""
-    response = await client.get(
-        "/api/2/export",
-        params={
-            "start": since.strftime("%Y%m%dT%H"),
-            "end": (until - HOUR).strftime("%Y%m%dT%H"),
-        },
-    )
-    if response.status_code == 404:
-        return []
-    if response.status_code >= 400:
-        # Surface Amplitude's own complaint (size cap, retention, bad range)
-        # before raising — the held cursor retries the window, and without
-        # the body the operator can't tell WHY it keeps failing.
-        log.warning(
-            "amplitude export %d for %s..%s: %.300s",
-            response.status_code,
-            response.request.url.params.get("start"),
-            response.request.url.params.get("end"),
-            response.text,
-        )
-    response.raise_for_status()
-    try:
-        return _parse_archive(response.content)
-    except zipfile.BadZipFile:
-        log.warning("amplitude export: response was not a zip archive; skipping window")
-        return []
+    hour stamps. 404 means no data for the range, which is a quiet window.
+    The body is streamed to a temp file, never held in memory: responses run
+    up to Amplitude's 4GB cap."""
+    params = {
+        "start": since.strftime("%Y%m%dT%H"),
+        "end": (until - HOUR).strftime("%Y%m%dT%H"),
+    }
+    async with client.stream("GET", "/api/2/export", params=params) as response:
+        if response.status_code == 404:
+            return []
+        if response.status_code >= 400:
+            # Surface Amplitude's own complaint (size cap, retention, bad
+            # range) before raising — the held cursor retries the window, and
+            # without the body the operator can't tell WHY it keeps failing.
+            body = (await response.aread()).decode("utf-8", errors="replace")
+            log.warning(
+                "amplitude export %d for %s..%s: %.300s",
+                response.status_code,
+                params["start"],
+                params["end"],
+                body,
+            )
+            if response.status_code == 400 and "Too much data" in body:
+                raise SizeCapError(f"{params['start']}..{params['end']}")
+            response.raise_for_status()
+        with tempfile.TemporaryFile() as spool:
+            async for chunk in response.aiter_bytes():
+                spool.write(chunk)
+            spool.seek(0)
+            try:
+                return _parse_archive(spool, return_event)
+            except zipfile.BadZipFile:
+                log.warning(
+                    "amplitude export: response was not a zip archive; skipping window"
+                )
+                return []
 
 
 def _returns_by_pro(
@@ -220,7 +238,18 @@ async def poll(
     if until - since < MIN_WINDOW:
         return {"returns": 0, "outcomes": 0}  # window too small; no call spent
 
-    events = await _fetch_events(client, since, until)
+    while True:
+        try:
+            events = await _fetch_events(
+                client, since, until, settings.AMPLITUDE_RETURN_EVENT
+            )
+            break
+        except SizeCapError:
+            hours = int((until - since) / HOUR)
+            if hours <= 1:
+                raise  # even one hour is over the cap; hold the cursor
+            until = since + HOUR * (hours // 2)
+            log.warning("amplitude size cap: shrinking window to %dh", hours // 2)
     returns = _returns_by_pro(events, settings.AMPLITUDE_RETURN_EVENT)
     outcomes = await _outcomes_for(session, returns)
     if outcomes:

@@ -361,8 +361,9 @@ async def test_amplitude_repoll_keeps_one_outcome_per_exposure(
         routing="route-to-pro", send_status="confirmed", sent_at=SENT, channel="sms",
     ))
     await db_session.commit()
+    noise = {**return_event(), "event_type": "page_view"}  # filtered during parse
     httpx_mock.add_response(
-        url=AMPLITUDE_EXPORT, content=amplitude_zip(return_event()), is_reusable=True
+        url=AMPLITUDE_EXPORT, content=amplitude_zip(noise, return_event()), is_reusable=True
     )
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         first = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
@@ -419,6 +420,37 @@ async def test_amplitude_catchup_is_bounded_per_tick(db_session, httpx_mock: HTT
     request = httpx_mock.get_requests()[0]
     assert request.url.params["start"] == since.strftime("%Y%m%dT%H")
     assert request.url.params["end"] == (since + timedelta(hours=5)).strftime("%Y%m%dT%H")
+
+
+async def test_amplitude_size_cap_shrinks_the_window_within_the_tick(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # Staging: even 6h of the full product's events can exceed Amplitude's
+    # export size cap. The tick halves the window (6h -> 3h -> 1h) instead of
+    # crash-looping forever on the same range.
+    # Verbatim staging response body (2026-09-01).
+    size_cap = json.dumps({"error": {
+        "http_code": 400, "type": "invalid", "message": "Invalid chart definition",
+        "metadata": {"details": (
+            "Too much data at once; use a smaller time range if possible or use s3 export"
+        )},
+    }})
+    since = (NOW - timedelta(days=7)).replace(minute=0)
+    await save_cursor(db_session, "amplitude", {"until": since.isoformat()})
+    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=400, content=size_cap.encode())
+    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=400, content=size_cap.encode())
+    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert await load_cursor(db_session, "amplitude") == {
+        "until": (since + timedelta(hours=1)).isoformat()
+    }
+    ends = [request.url.params["end"] for request in httpx_mock.get_requests()]
+    assert ends == [
+        (since + timedelta(hours=5)).strftime("%Y%m%dT%H"),
+        (since + timedelta(hours=2)).strftime("%Y%m%dT%H"),
+        since.strftime("%Y%m%dT%H"),
+    ]
 
 
 async def test_pollers_spend_no_calls_until_a_min_window_accumulates(
