@@ -56,7 +56,9 @@ def make_client(settings: Settings) -> httpx.AsyncClient:
     assert settings.AMPLITUDE_SECRET_KEY is not None
     return httpx.AsyncClient(
         base_url=BASE_URL,
-        timeout=httpx.Timeout(120.0, connect=15.0),
+        # A multi-hour export of a busy project is a large zip; 120s read
+        # proved too short in staging (ReadTimeout on the 24h catch-up).
+        timeout=httpx.Timeout(600.0, connect=15.0),
         follow_redirects=False,
         auth=(
             settings.AMPLITUDE_API_KEY.get_secret_value(),
