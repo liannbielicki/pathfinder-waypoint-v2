@@ -339,7 +339,8 @@ async def test_amplitude_never_reads_past_the_iterable_cursor(
     # registered yet — a lagging Iterable poller pauses return ingestion
     # instead of dropping returns into irreversible false negatives.
     await save_cursor(
-        db_session, "amplitude", {"until": (NOW - timedelta(days=1)).replace(minute=0).isoformat()}
+        db_session, "amplitude",
+        {"until": (NOW - timedelta(hours=9)).replace(minute=0).isoformat()},
     )
     await save_cursor(db_session, "iterable", {"since": (NOW - timedelta(hours=6)).isoformat()})
     httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
@@ -407,17 +408,17 @@ async def test_amplitude_404_and_malformed_archive_are_quiet_skips(
 
 
 async def test_amplitude_catchup_is_bounded_per_tick(db_session, httpx_mock: HTTPXMock) -> None:
-    # A week behind: one tick covers at most MAX_HOURS_PER_TICK hours.
+    # A week behind: one tick covers at most MAX_HOURS_PER_TICK (6) hours.
     since = (NOW - timedelta(days=7)).replace(minute=0)
     await save_cursor(db_session, "amplitude", {"until": since.isoformat()})
     httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     cursor = await load_cursor(db_session, "amplitude")
-    assert cursor == {"until": (since + timedelta(hours=24)).isoformat()}
+    assert cursor == {"until": (since + timedelta(hours=6)).isoformat()}
     request = httpx_mock.get_requests()[0]
     assert request.url.params["start"] == since.strftime("%Y%m%dT%H")
-    assert request.url.params["end"] == (since + timedelta(hours=23)).strftime("%Y%m%dT%H")
+    assert request.url.params["end"] == (since + timedelta(hours=5)).strftime("%Y%m%dT%H")
 
 
 async def test_pollers_spend_no_calls_until_a_min_window_accumulates(
