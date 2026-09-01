@@ -141,13 +141,14 @@ async def test_iterable_send_registers_a_confirmed_winner_linked_exposure(
 async def test_iterable_guardrail_and_unmarked_sends_fail_closed(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
+    await seed_winner(db_session)
     guardrailed = send_event(
-        message_id="msg-guard", run_id="", routing="", campaignName="Guardrail QA blast"
+        message_id="msg-guard", routing="", campaignName="Guardrail QA blast"
     )
-    unmarked = send_event(message_id="msg-unknown", run_id="", routing="")
+    unmarked = send_event(message_id="msg-unknown", routing="")
     # "test" must match as a whole word only — "Latest" is a real campaign.
     latest = send_event(
-        message_id="msg-latest", run_id="", routing="", campaignName="Latest Tips for Pros"
+        message_id="msg-latest", routing="", campaignName="Latest Tips for Pros"
     )
     httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(guardrailed, unmarked, latest))
     httpx_mock.add_response(url=ITERABLE_EXPORT, text="", is_reusable=True)
@@ -185,7 +186,8 @@ async def test_iterable_repoll_of_the_same_window_does_not_duplicate(
 async def test_iterable_malformed_rows_are_skipped_not_crashed(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
-    body = 'not json\n[1, 2]\n{"messageId": ""}\n' + ndjson(send_event(run_id="", routing=""))
+    await seed_winner(db_session)
+    body = 'not json\n[1, 2]\n{"messageId": ""}\n' + ndjson(send_event(routing=""))
     httpx_mock.add_response(url=ITERABLE_EXPORT, text=body)
     httpx_mock.add_response(url=ITERABLE_EXPORT, text="", is_reusable=True)
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
@@ -203,6 +205,28 @@ async def test_iterable_poll_is_gated_by_the_learning_kill_switch(
         result = await iterable_source.poll_if_enabled(db_session, client, POLLER_SETTINGS, NOW)
     assert result is None
     assert not httpx_mock.get_requests()
+
+
+async def test_iterable_ignores_non_waypoint_sms_traffic(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # The run_id gate: the export covers ALL of the project's SMS — sends
+    # with no LCM batch stamp (and their delivery events) are not stored.
+    unstamped_send = send_event(message_id="msg-mkt", run_id="", routing="")
+    unstamped_delivered = {"messageId": "msg-mkt", "userId": "pro-uuid-1"}
+    httpx_mock.add_response(
+        url=re.compile(r".*dataTypeName=smsSend.*"), text=ndjson(unstamped_send)
+    )
+    httpx_mock.add_response(
+        url=re.compile(r".*dataTypeName=smsDelivered.*"), text=ndjson(unstamped_delivered)
+    )
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsUnsubscribe.*"), text="")
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert result == {"exposures": 0, "outcomes": 0, "deferred": 0}
+    assert (await db_session.execute(select(ExposureRow))).scalars().all() == []
+    assert (await db_session.execute(select(TouchOutcomeRow))).scalars().all() == []
+    assert (await load_cursor(db_session, "iterable")) != {}  # gate never holds the cursor
 
 
 async def test_iterable_defers_sends_until_their_winner_is_visible(

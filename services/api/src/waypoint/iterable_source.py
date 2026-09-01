@@ -46,7 +46,7 @@ from waypoint.exposures import register
 from waypoint.models import ExposureIn, TouchOutcomeIn
 from waypoint.outcomes import ingest
 from waypoint.settings import Settings
-from waypoint.tables import FleetControlRow, WinnerRow
+from waypoint.tables import ExposureRow, FleetControlRow, WinnerRow
 
 log = logging.getLogger("waypoint.iterable_source")
 
@@ -184,11 +184,17 @@ def _sends_to_exposures(
     resolved to no winner yet is deferred (counted, not registered) so the
     replayed window can link it once the winner is visible."""
     exposures: list[ExposureIn] = []
-    deferred = 0
+    deferred = ignored = 0
     for event in sends:
         pair = _run_pro(event)
+        if not pair[0]:
+            # The run_id gate: a send with no LCM batch stamp is not a
+            # Waypoint send (the export covers ALL of the project's SMS) —
+            # it can never be evidence, so it is not stored at all.
+            ignored += 1
+            continue
         winner_id = winners.get(pair)
-        if winner_id is None and pair[0] and pair[1]:
+        if winner_id is None and pair[1]:
             sent_at = parse_time(event.get("createdAt"))
             if sent_at is not None and sent_at > now - DEFER_LIMIT:
                 deferred += 1
@@ -199,6 +205,8 @@ def _sends_to_exposures(
             )
         if (exposure := _send_to_exposure(event, winner_id)) is not None:
             exposures.append(exposure)
+    if ignored:
+        log.debug("iterable: ignored %d send(s) with no LCM batch stamp", ignored)
     return exposures, deferred
 
 
@@ -227,6 +235,7 @@ async def poll(
         for event in await _fetch_events(client, data_type, since, until):
             if (outcome := _event_to_outcome(event, flag)) is not None:
                 outcomes.append(outcome)
+    outcomes = await _known_outcomes(session, outcomes, {e.exposure_id for e in exposures})
     if outcomes:
         await ingest(session, outcomes)
 
@@ -237,6 +246,29 @@ async def poll(
     else:
         await save_cursor(session, SOURCE, {"since": until.isoformat()})
     return {"exposures": len(exposures), "outcomes": len(outcomes), "deferred": deferred}
+
+
+async def _known_outcomes(
+    session: AsyncSession, outcomes: list[TouchOutcomeIn], registered: set[str]
+) -> list[TouchOutcomeIn]:
+    """The run_id gate for outcome events: keep only events for a Waypoint
+    send — a messageId that names a known exposure (registered this tick or
+    earlier), or an event carrying the LCM batch stamp itself. Everything
+    else is the project's unrelated SMS traffic and is not stored."""
+    message_ids = {o.exposure_id for o in outcomes if o.exposure_id} - registered
+    known = set(registered)
+    if message_ids:
+        rows = (
+            await session.execute(
+                select(ExposureRow.id).where(ExposureRow.id.in_(message_ids))
+            )
+        ).scalars().all()
+        known.update(rows)
+    kept = [o for o in outcomes if (o.exposure_id in known) or o.run_id]
+    if len(kept) < len(outcomes):
+        log.debug("iterable: ignored %d outcome event(s) for non-Waypoint sends",
+                  len(outcomes) - len(kept))
+    return kept
 
 
 def _event_to_outcome(event: dict[str, Any], flag: str) -> TouchOutcomeIn | None:
