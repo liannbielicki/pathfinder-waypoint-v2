@@ -40,7 +40,10 @@ SOURCE = "amplitude"
 BASE_URL = "https://amplitude.com"
 HOUR = timedelta(hours=1)
 LAG = HOUR  # the export for an hour is complete only once the hour is over
-MAX_HOURS_PER_TICK = 24
+# Amplitude 400s an export whose response would be too large; staging hit
+# that on a 24h window of the full product's events. Small windows keep every
+# response under the cap — catch-up just takes more ticks.
+MAX_HOURS_PER_TICK = 6
 INITIAL_LOOKBACK = timedelta(hours=24)
 # Call-volume floor: fetch only once this many complete NEW hours exist.
 # One multi-hour export call covers the whole window, so this caps the
@@ -119,6 +122,17 @@ async def _fetch_events(
     )
     if response.status_code == 404:
         return []
+    if response.status_code >= 400:
+        # Surface Amplitude's own complaint (size cap, retention, bad range)
+        # before raising — the held cursor retries the window, and without
+        # the body the operator can't tell WHY it keeps failing.
+        log.warning(
+            "amplitude export %d for %s..%s: %.300s",
+            response.status_code,
+            response.request.url.params.get("start"),
+            response.request.url.params.get("end"),
+            response.text,
+        )
     response.raise_for_status()
     try:
         return _parse_archive(response.content)
