@@ -3,7 +3,7 @@
 Polls Iterable's export API for SMS events since a durable cursor and feeds
 the existing receiving side: each send becomes an exposure
 (exposures.register — the authoritative send confirmation that starts the
-measurement clock) and each delivery/unsubscribe becomes a TouchOutcomeIn
+measurement clock) and each bounce/click becomes a TouchOutcomeIn
 (outcomes.ingest). Both receivers are idempotent per caller key, so a
 replayed window is safe.
 
@@ -53,8 +53,13 @@ log = logging.getLogger("waypoint.iterable_source")
 SOURCE = "iterable"
 BASE_URL = "https://api.iterable.com"
 SEND_TYPE = "smsSend"
-# dataTypeName -> the TouchOutcomeIn flag it measures.
-OUTCOME_TYPES = {"smsDelivered": "delivered", "smsUnsubscribe": "unsubscribed"}
+# dataTypeName -> (TouchOutcomeIn flag, value). Iterable's export has no
+# smsDelivered/smsUnsubscribe types (a 400 in prod proved it): a bounce is a
+# failed delivery, a click is engagement, and SMS opt-outs never export.
+OUTCOME_TYPES: dict[str, tuple[str, bool]] = {
+    "smsBounce": ("delivered", False),
+    "smsClick": ("clicked", True),
+}
 CATCHUP = timedelta(hours=24)
 INITIAL_LOOKBACK = timedelta(hours=24)
 # The export index lags real time; the window trails `now` so an event
@@ -120,6 +125,12 @@ async def _fetch_events(
             "endDateTime": until.strftime("%Y-%m-%d %H:%M:%S") + " +00:00",
         },
     )
+    if response.status_code == 400:
+        # An export type this project doesn't recognize must cost ONE data
+        # type's events, never the tick — a raise here would hold the cursor
+        # and starve send ingestion behind a name mismatch.
+        log.warning("iterable %s: export rejected the request (400); skipping", data_type)
+        return []
     response.raise_for_status()
     events: list[dict[str, Any]] = []
     for line in response.text.splitlines():
@@ -213,7 +224,7 @@ def _sends_to_exposures(
 async def poll(
     session: AsyncSession, client: httpx.AsyncClient, settings: Settings, now: datetime
 ) -> dict[str, int]:
-    """One bounded tick: sends -> exposures, delivery/unsubscribe -> outcomes,
+    """One bounded tick: sends -> exposures, bounce/click -> outcomes,
     then advance the cursor. An HTTP failure raises — and a deferred send
     returns — before the cursor moves, so the next tick replays the same
     window (receivers are idempotent)."""
@@ -231,9 +242,9 @@ async def poll(
         await register(session, exposures)
 
     outcomes: list[TouchOutcomeIn] = []
-    for data_type, flag in OUTCOME_TYPES.items():
+    for data_type, (flag, value) in OUTCOME_TYPES.items():
         for event in await _fetch_events(client, data_type, since, until):
-            if (outcome := _event_to_outcome(event, flag)) is not None:
+            if (outcome := _event_to_outcome(event, flag, value)) is not None:
                 outcomes.append(outcome)
     outcomes = await _known_outcomes(session, outcomes, {e.exposure_id for e in exposures})
     if outcomes:
@@ -271,10 +282,10 @@ async def _known_outcomes(
     return kept
 
 
-def _event_to_outcome(event: dict[str, Any], flag: str) -> TouchOutcomeIn | None:
+def _event_to_outcome(event: dict[str, Any], flag: str, value: bool) -> TouchOutcomeIn | None:
     message_id = event.get("messageId")
     run_id, pro_id = _run_pro(event)
-    fields: dict[str, Any] = {"source": SOURCE, flag: True}
+    fields: dict[str, Any] = {"source": SOURCE, flag: value}
     if message_id:
         fields["exposure_id"] = str(message_id)
     else:

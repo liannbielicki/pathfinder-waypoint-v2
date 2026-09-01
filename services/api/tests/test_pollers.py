@@ -166,11 +166,11 @@ async def test_iterable_repoll_of_the_same_window_does_not_duplicate(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
     await seed_winner(db_session)
-    delivered = {"messageId": "msg-1", "userId": "pro-uuid-1"}
+    clicked = {"messageId": "msg-1", "userId": "pro-uuid-1"}
     for _ in range(2):  # same window twice, as after a failed cursor advance
         httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(send_event()))
-        httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(delivered))
-        httpx_mock.add_response(url=ITERABLE_EXPORT, text="")
+        httpx_mock.add_response(url=ITERABLE_EXPORT, text="")  # smsBounce
+        httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(clicked))  # smsClick
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
         await save_cursor(db_session, "iterable", {})  # replay the window
@@ -179,7 +179,7 @@ async def test_iterable_repoll_of_the_same_window_does_not_duplicate(
     outcomes = (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
     assert len(exposures) == 1
     assert len(outcomes) == 1
-    assert outcomes[0].delivered is True
+    assert outcomes[0].clicked is True
     assert outcomes[0].source == "iterable"
 
 
@@ -193,6 +193,24 @@ async def test_iterable_malformed_rows_are_skipped_not_crashed(
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     assert result["exposures"] == 1  # only the well-formed send survived
+
+
+async def test_iterable_rejected_data_type_costs_one_type_not_the_tick(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # A 400 on one export type (e.g. a name this project doesn't support)
+    # must not hold the cursor and starve send ingestion — prod hit exactly
+    # this with a nonexistent dataTypeName.
+    await seed_winner(db_session)
+    httpx_mock.add_response(
+        url=re.compile(r".*dataTypeName=smsSend.*"), text=ndjson(send_event())
+    )
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsBounce.*"), status_code=400)
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsClick.*"), text="")
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert result["exposures"] == 1
+    assert (await load_cursor(db_session, "iterable")) != {}  # cursor advanced
 
 
 async def test_iterable_poll_is_gated_by_the_learning_kill_switch(
@@ -213,14 +231,14 @@ async def test_iterable_ignores_non_waypoint_sms_traffic(
     # The run_id gate: the export covers ALL of the project's SMS — sends
     # with no LCM batch stamp (and their delivery events) are not stored.
     unstamped_send = send_event(message_id="msg-mkt", run_id="", routing="")
-    unstamped_delivered = {"messageId": "msg-mkt", "userId": "pro-uuid-1"}
+    unstamped_click = {"messageId": "msg-mkt", "userId": "pro-uuid-1"}
     httpx_mock.add_response(
         url=re.compile(r".*dataTypeName=smsSend.*"), text=ndjson(unstamped_send)
     )
+    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsBounce.*"), text="")
     httpx_mock.add_response(
-        url=re.compile(r".*dataTypeName=smsDelivered.*"), text=ndjson(unstamped_delivered)
+        url=re.compile(r".*dataTypeName=smsClick.*"), text=ndjson(unstamped_click)
     )
-    httpx_mock.add_response(url=re.compile(r".*dataTypeName=smsUnsubscribe.*"), text="")
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     assert result == {"exposures": 0, "outcomes": 0, "deferred": 0}
@@ -240,7 +258,7 @@ async def test_iterable_defers_sends_until_their_winner_is_visible(
         is_reusable=True,
     )
     httpx_mock.add_response(
-        url=re.compile(r".*dataTypeName=sms(Delivered|Unsubscribe).*"), text="",
+        url=re.compile(r".*dataTypeName=sms(Bounce|Click).*"), text="",
         is_reusable=True,
     )
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
