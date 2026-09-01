@@ -30,6 +30,7 @@ _TABLES = (
     "exposures",
     "items",
     "persona_evals",
+    "poll_cursors",
     "runs",
     "llm_usage",
     "fleet_control",

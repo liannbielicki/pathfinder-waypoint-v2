@@ -213,6 +213,8 @@ class ExposureRow(Base):
     """
 
     __tablename__ = "exposures"
+    # Backs the Amplitude poller's per-tick window match (pro + recent sends).
+    __table_args__ = (Index("ix_exposures_pro_id_sent_at", "pro_id", "sent_at"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), default=None)
@@ -233,6 +235,18 @@ class ExposureRow(Base):
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
     learning_version: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class PollCursorRow(Base):
+    """Durable per-source poll cursor (iterable/amplitude outcome pollers).
+    One row per source; `cursor` holds the source's own resume state so a
+    restart never re-reads an unbounded history or skips a window."""
+
+    __tablename__ = "poll_cursors"
+
+    source: Mapped[str] = mapped_column(primary_key=True)
+    cursor: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
 class ItemRow(Base):

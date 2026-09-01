@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     OUTCOMES_TOKEN: SecretStr | None = None
     SESSION_KEY: SecretStr = Field(min_length=32)
     LOG_LEVEL: str = "INFO"
+    # Direct outcome pollers (iterable_source.py / amplitude_source.py). A
+    # missing key disables that poller with one startup log line — the worker
+    # runs fine with zero keys configured.
+    ITERABLE_API_KEY: SecretStr | None = None
+    AMPLITUDE_API_KEY: SecretStr | None = None
+    AMPLITUDE_SECRET_KEY: SecretStr | None = None
+    # Amplitude event_type that counts as a return (first_return_at source).
+    AMPLITUDE_RETURN_EVENT: str = "session_start"
+    # Cadence for both outcome pollers.
+    POLL_SECONDS: float = Field(default=300.0, gt=0)
 
     @classmethod
     def load(cls) -> Settings:

@@ -92,6 +92,12 @@ async def _apply(session: AsyncSession, body: list[ExposureIn]) -> dict[str, int
             session.add(row)
             existing[item.exposure_id] = row
         else:
+            if row.winner_id is None and winner is not None:
+                # A winner-less exposure has no winner identity to protect
+                # yet: link it the moment a resubmission resolves the winner,
+                # or its measured outcomes can never reach promotion.
+                for field, value in _identity_from(item, winner).items():
+                    setattr(row, field, value)
             # Identity is immutable, and send state only ADVANCES: once a send
             # is confirmed the clock is running — a later "pending"/"failed"
             # or a rewritten sent_at would silently invalidate checkpoints

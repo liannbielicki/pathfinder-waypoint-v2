@@ -69,6 +69,30 @@ async def test_send_confirmation_updates_in_place_without_touching_identity(db_s
     assert row.item_id == "item-1"
 
 
+async def test_winner_link_backfills_onto_a_winner_less_exposure(db_session) -> None:
+    # A winner-less exposure has no winner identity to protect: a later
+    # resubmission that resolves the winner must link it, or its measured
+    # outcomes could never reach promotion.
+    await register(db_session, [ExposureIn(exposure_id="exp-bf", pro_id="pro-real", channel="sms")])
+    db_session.add(RunRow(
+        id="run-bf", pro_ids=["pro-real"], audience_query="q", audience_run="r",
+        channels=["sms"],
+    ))
+    await db_session.flush()
+    db_session.add(WinnerRow(
+        id="win-bf", run_id="run-bf", pro_id="pro-real", kind="winner",
+        item_id="item-bf", item_version="v1", evidence={"org_id": "org-bf"},
+    ))
+    await db_session.commit()
+
+    await register(db_session, [ExposureIn(exposure_id="exp-bf", recommendation_id="win-bf")])
+
+    row = await db_session.get(ExposureRow, "exp-bf")
+    assert row.winner_id == "win-bf"
+    assert row.run_id == "run-bf"
+    assert row.item_id == "item-bf"
+
+
 async def test_unknown_recommendation_is_reported_not_stored(db_session) -> None:
     result = await register(db_session, [ExposureIn(
         exposure_id="exp-miss", recommendation_id="no-such-winner",

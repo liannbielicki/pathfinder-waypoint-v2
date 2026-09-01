@@ -32,8 +32,8 @@ def test_missing_required_runtime_values_fail_startup() -> None:
 
 def test_all_runtime_names_are_short_and_descriptive() -> None:
     names = set(Settings.model_fields)
-    # CTA_FEASIBILITY_HINTS (21 chars) is the longest name today.
-    assert all(len(name) < 22 for name in names)
+    # AMPLITUDE_RETURN_EVENT (22 chars) is the longest name today.
+    assert all(len(name) < 23 for name in names)
     assert names == {
         "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
         "N8N_TIMEOUT_SECONDS", "N8N_MAX_CONCURRENT",
@@ -44,6 +44,8 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
         "CTA_FEASIBILITY_HINTS", "MODEL_FAST", "MODEL_DEEP", "MODEL_RANKER", "APP_PASSWORD",
         "OUTCOMES_TOKEN",
         "SESSION_KEY", "LOG_LEVEL",
+        "ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY",
+        "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS",
     }
 
 

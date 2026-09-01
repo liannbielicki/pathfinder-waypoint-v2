@@ -17,7 +17,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from waypoint import queue
+from waypoint import amplitude_source, iterable_source, queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.checkpoints import sweep_if_enabled
 from waypoint.db import make_engine, make_session_factory
@@ -151,6 +151,24 @@ def make_pricing(settings: Settings) -> Pricing:
             "rank": settings.MODEL_RANKER or settings.MODEL_FAST,
         }
     )
+
+
+def poller_specs(settings: Settings) -> list[tuple[str, Any, Any]]:
+    """(name, make_client, poll) for each outcome poller whose keys are
+    configured. A missing key disables that poller with one startup log line;
+    the worker runs fine with zero keys configured."""
+    specs: list[tuple[str, Any, Any]] = []
+    if settings.ITERABLE_API_KEY is not None:
+        specs.append(("iterable", iterable_source.make_client, iterable_source.poll_if_enabled))
+    else:
+        log.info("ITERABLE_API_KEY unset; iterable outcome poller disabled")
+    if settings.AMPLITUDE_API_KEY is not None and settings.AMPLITUDE_SECRET_KEY is not None:
+        specs.append(
+            ("amplitude", amplitude_source.make_client, amplitude_source.poll_if_enabled)
+        )
+    else:
+        log.info("AMPLITUDE_API_KEY/AMPLITUDE_SECRET_KEY unset; amplitude poller disabled")
+    return specs
 
 
 LLMStacks = Callable[[], AbstractAsyncContextManager[tuple[MeteredLLM, AsyncSession]]]
@@ -387,9 +405,28 @@ async def main() -> None:
             except Exception:
                 log.warning("checkpoint sweep failed; next tick retries", exc_info=True)
 
+    async def poller_loop(name: str, client: httpx.AsyncClient, poll: Any) -> None:
+        # Same shape as checkpoint_loop: timed cadence, session-per-tick,
+        # gated by the learning kill switch, failures log and the next tick
+        # retries the same window (the cursor only advances on success).
+        while True:
+            await asyncio.sleep(settings.POLL_SECONDS)
+            try:
+                async with factory() as session:
+                    result = await poll(session, client, settings, datetime.now(UTC))
+                if result and any(result.values()):
+                    log.info("%s poll: %s", name, result)
+            except Exception:
+                log.warning("%s poll failed; next tick retries", name, exc_info=True)
+
+    pollers = [
+        poller_loop(name, make_client(settings), poll)
+        for name, make_client, poll in poller_specs(settings)
+    ]
+
     log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
     await asyncio.gather(
-        checkpoint_loop(), *(spawn(i) for i in range(settings.WORKER_COUNT))
+        checkpoint_loop(), *pollers, *(spawn(i) for i in range(settings.WORKER_COUNT))
     )
 
 
