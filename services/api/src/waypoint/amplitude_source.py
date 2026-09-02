@@ -171,11 +171,11 @@ async def _amplitude_id(
     return amplitude_id, 1
 
 
-async def _session_starts(
+async def _return_times(
     client: httpx.AsyncClient,
     amplitude_id: str,
     oldest_needed: datetime,
-    return_event: str,
+    return_events: frozenset[str],
 ) -> tuple[list[datetime], int, bool]:
     """Qualifying return-event times, paging newest-first until the page
     reaches past oldest_needed, history is exhausted, or PAGE_CAP. Returns
@@ -199,7 +199,7 @@ async def _session_starts(
         ]
         times.extend(
             moment for e in events if isinstance(e, dict)
-            if e.get("event_type") == return_event
+            if e.get("event_type") in return_events
             and (moment := _event_time(e.get("event_time"))) is not None
         )
         if len(events) < PAGE_SIZE:
@@ -244,8 +244,8 @@ async def poll(
             break
         assert all(e.sent_at is not None for e in exposures)
         oldest_needed = min(e.sent_at for e in exposures)  # type: ignore[type-var]
-        returns, spent, covered = await _session_starts(
-            client, amplitude_id, oldest_needed, settings.AMPLITUDE_RETURN_EVENT
+        returns, spent, covered = await _return_times(
+            client, amplitude_id, oldest_needed, settings.amplitude_return_events
         )
         calls += spent
         outcomes = []

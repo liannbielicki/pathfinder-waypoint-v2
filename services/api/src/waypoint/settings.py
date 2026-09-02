@@ -69,10 +69,20 @@ class Settings(BaseSettings):
     ITERABLE_API_KEY: SecretStr | None = None
     AMPLITUDE_API_KEY: SecretStr | None = None
     AMPLITUDE_SECRET_KEY: SecretStr | None = None
-    # Amplitude event_type that counts as a return (first_return_at source).
-    AMPLITUDE_RETURN_EVENT: str = "session_start"
+    # Comma-separated Amplitude event_type names that count as a return
+    # (first_return_at source) — matching ANY qualifies. HCP's Amplitude has
+    # no session_start; the taxonomy's active-use events are "Loaded a Screen"
+    # (mobile) and "Loaded a Page" (web). The canonical set is the data
+    # owner's call (TODOS.md "Canonical Amplitude active-use event contract").
+    AMPLITUDE_RETURN_EVENT: str = "Loaded a Screen,Loaded a Page"
     # Cadence for both outcome pollers.
     POLL_SECONDS: float = Field(default=300.0, gt=0)
+
+    @property
+    def amplitude_return_events(self) -> frozenset[str]:
+        return frozenset(
+            name.strip() for name in self.AMPLITUDE_RETURN_EVENT.split(",") if name.strip()
+        )
 
     @field_validator("ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY", mode="before")
     @classmethod

@@ -65,14 +65,6 @@ def ndjson(*events: dict) -> str:
     return "\n".join(json.dumps(event) for event in events)
 
 
-def return_event(pro_id: str = "pro-uuid-1", at: datetime = SENT + timedelta(hours=1)) -> dict:
-    return {
-        "event_type": "session_start",
-        "user_id": pro_id,
-        "event_time": at.astimezone(UTC).replace(tzinfo=None).isoformat(sep=" "),
-    }
-
-
 async def seed_winner(db_session, run_id: str = "run-lcm", pro_id: str = "pro-uuid-1") -> str:
     db_session.add(RunRow(
         id=run_id, pro_ids=[pro_id], audience_query="q", audience_run="r", channels=["sms"],
@@ -353,7 +345,7 @@ def usersearch_body(pro_id: str = "pro-uuid-1", amplitude_id: int = 12345) -> di
     }
 
 
-def amp_event(event_type: str = "session_start", at: datetime = SENT_OLD + timedelta(hours=1)) -> dict:
+def amp_event(event_type: str = "Loaded a Screen", at: datetime = SENT_OLD + timedelta(hours=1)) -> dict:
     return {
         "event_type": event_type,
         "event_time": at.astimezone(UTC).replace(tzinfo=None).isoformat(sep=" "),
@@ -382,8 +374,8 @@ async def test_amplitude_lookup_ingests_first_return_and_stamps_coverage(
     httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
     httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
         amp_event(at=SENT_OLD + timedelta(hours=5)),
-        amp_event("page_view"),  # not the return event: never a qualifying return
-        amp_event(at=SENT_OLD + timedelta(hours=1)),
+        amp_event("Push Notification Sent"),  # not a return event: never qualifies
+        amp_event("Loaded a Page", at=SENT_OLD + timedelta(hours=1)),  # either set member counts
         amp_event(at=SENT_OLD - timedelta(hours=1)),  # pre-send: not qualifying
     ))
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
