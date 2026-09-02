@@ -31,6 +31,7 @@ _TABLES = (
     "items",
     "persona_evals",
     "poll_cursors",
+    "amplitude_ids",
     "runs",
     "llm_usage",
     "fleet_control",

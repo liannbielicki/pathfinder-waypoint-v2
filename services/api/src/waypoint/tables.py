@@ -233,8 +233,25 @@ class ExposureRow(Base):
     routing: Mapped[str] = mapped_column(default="")
     send_status: Mapped[str] = mapped_column(default="unknown")
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    # How far this exposure's return events are provably fetched: an Amplitude
+    # per-pro lookup at time T covers all history before T. The checkpoint
+    # sweep stamps a measured negative for a horizon only once this stamp
+    # passes the horizon's close (checkpoints.py). NULL = never fetched.
+    returns_checked_at: Mapped[datetime | None] = mapped_column(default=None)
     learning_version: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class AmplitudeIdRow(Base):
+    """pro_uuid -> Amplitude numeric id cache (one usersearch per pro, ever).
+    amplitude_id NULL = the search returned no single exact user_id match
+    (e.g. Apple hide-my-email); retried after amplitude_source.RETRY_UNRESOLVED."""
+
+    __tablename__ = "amplitude_ids"
+
+    pro_id: Mapped[str] = mapped_column(primary_key=True)
+    amplitude_id: Mapped[str | None] = mapped_column(default=None)
+    updated_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
 class PollCursorRow(Base):

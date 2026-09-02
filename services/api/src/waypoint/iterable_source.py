@@ -79,6 +79,12 @@ DEFER_LIMIT = timedelta(hours=24)
 # "Greatest" are real campaigns); "guardrail" in any form. Guardrailed sends
 # carry a real Pro's context but go to an internal inbox — never evidence.
 GUARDRAIL_PATTERN = re.compile(r"guardrail|\btest\b")
+# The recipient's email domain IS the routing (LCM team, 2026-09-02): an SMS
+# has no destination-number parameter — the addressed profile decides both the
+# phone and the email, so a real send addresses the Pro's profile and a
+# guardrailed one addresses a tester's on an internal domain. Iterable stamps
+# the profile email on every SMS event (smsSend/smsClick/smsBounce).
+INTERNAL_DOMAINS = frozenset({"housecallpro.com", "gethousecallpro.com", "codefied.com"})
 _RUN_ID_KEYS = ("run_id", "batch_id", "batchId")
 
 
@@ -120,9 +126,20 @@ def _stamps(event: dict[str, Any]) -> dict[str, str]:
 
 
 def _routing(event: dict[str, Any]) -> str:
+    """An explicit lcmRouting stamp wins; otherwise the recipient's email
+    domain decides (see INTERNAL_DOMAINS). The name heuristic stays as a
+    last-resort tripwire for events that carry a name but no email; anything
+    undeterminable stays "" and never counts as evidence."""
     claim = _stamps(event)["routing"]
     if claim:
         return claim
+    email = str(event.get("email") or "").strip().lower()
+    if "@" in email:
+        domain = email.rsplit("@", 1)[1]
+        # Subdomains are internal too: qa@mail.housecallpro.com must never
+        # classify as a real-Pro send.
+        internal = any(domain == d or domain.endswith("." + d) for d in INTERNAL_DOMAINS)
+        return "guardrailed-test" if internal else "route-to-pro"
     names = " ".join(
         str(event.get(key) or "") for key in ("campaignName", "templateName")
     ).lower()
@@ -209,6 +226,9 @@ def _send_to_exposure(event: dict[str, Any], winner_id: str | None) -> ExposureI
         pro_id=pro_id,
         # The LCM's arm stamp: "A" treated / "B" control. Anything else stays
         # None (legacy), so promotion's A+B causal gate sees the real arms.
+        # NOTE: unstamped (non-Waypoint) rows come through as lcmVariant "A"
+        # (LCM team, 2026-09-02) — only the run_id gate upstream keeps those
+        # fake-A rows out, so never weaken that gate to "register everything".
         arm=variant if variant in ("A", "B") else None,  # type: ignore[arg-type]
         channel="sms",
         routing=_routing(event),
@@ -269,6 +289,11 @@ async def poll(
         return {"exposures": 0, "outcomes": 0, "deferred": 0, "ignored": 0}
 
     sends = await _fetch_events(client, SEND_TYPE, since, until)
+    if sends and not any(e.get("email") for e in sends):
+        # Iterable stamps the profile email on every SMS event; a window with
+        # none means the export shape changed and routing would silently fail
+        # closed for every send (LCM team's own lost-hour warning).
+        log.warning("iterable: NO send in the window carries an email; routing is dark")
     pairs = {pair for pair in (_run_pro(e) for e in sends) if pair[0] and pair[1]}
     winners = await _resolve_winners(session, pairs)
     exposures, deferred, ignored = _sends_to_exposures(sends, winners, now)

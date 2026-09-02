@@ -7,11 +7,8 @@ disable, malformed-response tolerance, and one end-to-end path from a mocked
 Iterable send plus a mocked Amplitude return to a validated winner.
 """
 
-import gzip
-import io
 import json
 import re
-import zipfile
 from datetime import UTC, datetime, timedelta
 
 from pydantic import SecretStr
@@ -36,7 +33,6 @@ POLLER_SETTINGS = TEST_SETTINGS.model_copy(
 )
 
 ITERABLE_EXPORT = re.compile(r"https://api\.iterable\.com/api/export/data\.json.*")
-AMPLITUDE_EXPORT = re.compile(r"https://amplitude\.com/api/2/export.*")
 
 
 def send_event(
@@ -67,13 +63,6 @@ def send_event(
 
 def ndjson(*events: dict) -> str:
     return "\n".join(json.dumps(event) for event in events)
-
-
-def amplitude_zip(*events: dict) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("export/hour.json.gz", gzip.compress(ndjson(*events).encode()))
-    return buffer.getvalue()
 
 
 def return_event(pro_id: str = "pro-uuid-1", at: datetime = SENT + timedelta(hours=1)) -> dict:
@@ -164,6 +153,27 @@ async def test_iterable_guardrail_and_unmarked_sends_fail_closed(
     assert guard_row.routing == "guardrailed-test"
     assert unknown_row.routing == ""  # undeterminable stays non-evidence
     assert latest_row.routing == ""  # substring "test" must not flag it
+
+
+async def test_iterable_routing_from_the_recipient_email_domain(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # The LCM stamps no lcmRouting; the recipient's email domain IS the
+    # routing (an SMS has no destination-number parameter — the addressed
+    # profile decides both phone and email). Internal domains are guardrailed
+    # testers; any other domain is a real Pro; no email fails closed.
+    await seed_winner(db_session)
+    real = send_event(message_id="msg-real", routing="", email="pro@plumberco.com")
+    internal = send_event(message_id="msg-int", routing="", email="QA@GetHousecallPro.com")
+    stamped = send_event(message_id="msg-stamped", email="qa@housecallpro.com")
+    httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(real, internal, stamped))
+    httpx_mock.add_response(url=ITERABLE_EXPORT, text="", is_reusable=True)
+    async with iterable_source.make_client(POLLER_SETTINGS) as client:
+        await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert (await db_session.get(ExposureRow, "msg-real")).routing == "route-to-pro"
+    assert (await db_session.get(ExposureRow, "msg-int")).routing == "guardrailed-test"
+    # An explicit lcmRouting stamp outranks the domain.
+    assert (await db_session.get(ExposureRow, "msg-stamped")).routing == "route-to-pro"
 
 
 async def test_iterable_repoll_of_the_same_window_does_not_duplicate(
@@ -331,153 +341,229 @@ async def test_iterable_defers_sends_until_their_winner_is_visible(
 
 # --- amplitude ---------------------------------------------------------------
 
+USERSEARCH = re.compile(r"https://amplitude\.com/api/2/usersearch.*")
+USERACTIVITY = re.compile(r"https://amplitude\.com/api/2/useractivity.*")
+SENT_OLD = NOW - timedelta(days=2)
 
-async def test_amplitude_never_reads_past_the_iterable_cursor(
-    db_session, httpx_mock: HTTPXMock
+
+def usersearch_body(pro_id: str = "pro-uuid-1", amplitude_id: int = 12345) -> dict:
+    return {
+        "matches": [{"user_id": pro_id, "amplitude_id": amplitude_id}],
+        "type": "match_user_or_device_id",
+    }
+
+
+def amp_event(event_type: str = "session_start", at: datetime = SENT_OLD + timedelta(hours=1)) -> dict:
+    return {
+        "event_type": event_type,
+        "event_time": at.astimezone(UTC).replace(tzinfo=None).isoformat(sep=" "),
+    }
+
+
+def activity_body(*events: dict) -> dict:
+    return {"userData": {"num_events": len(events)}, "events": list(events)}
+
+
+async def seed_exposure(
+    db_session, exposure_id: str = "exp-a", pro_id: str = "pro-uuid-1",
+    sent_at: datetime = SENT_OLD, **extra,
 ) -> None:
-    # Returns must not be consumed for hours whose exposures may not be
-    # registered yet — a lagging Iterable poller pauses return ingestion
-    # instead of dropping returns into irreversible false negatives.
-    await save_cursor(
-        db_session, "amplitude",
-        {"until": (NOW - timedelta(hours=9)).replace(minute=0).isoformat()},
-    )
-    await save_cursor(db_session, "iterable", {"since": (NOW - timedelta(hours=6)).isoformat()})
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
-    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
-        await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    bound = (NOW - timedelta(hours=6)).replace(minute=0)
-    assert await load_cursor(db_session, "amplitude") == {"until": bound.isoformat()}
-    request = httpx_mock.get_requests()[0]
-    assert request.url.params["end"] == (bound - timedelta(hours=1)).strftime("%Y%m%dT%H")
-
-
-async def test_amplitude_repoll_keeps_one_outcome_per_exposure(
-    db_session, httpx_mock: HTTPXMock
-) -> None:
-    await seed_winner(db_session)
     db_session.add(ExposureRow(
-        id="exp-a", winner_id="win-run-lcm", run_id="run-lcm", pro_id="pro-uuid-1",
-        routing="route-to-pro", send_status="confirmed", sent_at=SENT, channel="sms",
+        id=exposure_id, pro_id=pro_id, routing="route-to-pro",
+        send_status="confirmed", sent_at=sent_at, channel="sms", **extra,
     ))
     await db_session.commit()
-    noise = {**return_event(), "event_type": "page_view"}  # filtered during parse
-    httpx_mock.add_response(
-        url=AMPLITUDE_EXPORT, content=amplitude_zip(noise, return_event()), is_reusable=True
-    )
+
+
+async def test_amplitude_lookup_ingests_first_return_and_stamps_coverage(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    await seed_exposure(db_session)
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
+        amp_event(at=SENT_OLD + timedelta(hours=5)),
+        amp_event("page_view"),  # not the return event: never a qualifying return
+        amp_event(at=SENT_OLD + timedelta(hours=1)),
+        amp_event(at=SENT_OLD - timedelta(hours=1)),  # pre-send: not qualifying
+    ))
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         first = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-        await save_cursor(db_session, "amplitude", {})  # replay the window
+        # Outcome recorded: the exposure is settled, the repoll spends nothing.
         second = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert first == {"returns": 1, "outcomes": 1}
-    assert second == {"returns": 1, "outcomes": 1}
-    outcomes = (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
-    assert len(outcomes) == 1
-    assert outcomes[0].source == "amplitude"
-    assert outcomes[0].first_return_at == SENT + timedelta(hours=1)
-    assert outcomes[0].returned_7d is True  # derived, never caller-asserted
+    assert first == {"checked": 1, "returns": 1, "unresolved": 0, "calls": 2}
+    assert second == {"checked": 0, "returns": 0, "unresolved": 0, "calls": 0}
+    assert len(httpx_mock.get_requests()) == 2
+    outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
+    assert outcome.source == "amplitude"
+    assert outcome.first_return_at == SENT_OLD + timedelta(hours=1)  # the FIRST in window
+    assert outcome.returned_1d is True  # derived, never caller-asserted
+    exposure = await db_session.get(ExposureRow, "exp-a")
+    # Stamped now MINUS the indexing-lag grace: a just-happened return may not
+    # be indexed yet, and over-claiming coverage would mint false negatives.
+    assert exposure.returns_checked_at == NOW - amplitude_source.GRACE
 
 
-async def test_amplitude_return_before_the_send_is_not_a_qualifying_event(
+async def test_amplitude_no_return_stamps_coverage_and_backs_off(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
-    db_session.add(ExposureRow(
-        id="exp-b", pro_id="pro-uuid-1", routing="route-to-pro",
-        send_status="confirmed", sent_at=SENT, channel="sms",
+    await seed_exposure(db_session)
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
+        amp_event(at=SENT_OLD - timedelta(hours=1)),  # organic pre-send activity
+    ), is_reusable=True)
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        first = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+        # Every closed horizon is covered by the stamp; the next check is owed
+        # only when the 7d horizon closes, so an immediate re-tick is free.
+        second = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+        third = await amplitude_source.poll(
+            db_session, client, POLLER_SETTINGS, SENT_OLD + timedelta(days=8)
+        )
+    assert first == {"checked": 1, "returns": 0, "unresolved": 0, "calls": 2}
+    assert second == {"checked": 0, "returns": 0, "unresolved": 0, "calls": 0}
+    # The 7d close re-checks the same pro; the cached amplitude_id is reused,
+    # so only the activity call is spent.
+    assert third == {"checked": 1, "returns": 0, "unresolved": 0, "calls": 1}
+    assert not (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
+
+
+async def test_amplitude_ambiguous_identity_is_never_stamped(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    # usersearch is a partial match: anything but exactly one EXACT user_id
+    # match cannot prove identity, so the pro's returns stay unmeasured
+    # (never a false negative) and the failure is cached, not retried hot.
+    await seed_exposure(db_session)
+    body = {"matches": [
+        {"user_id": "pro-uuid-1", "amplitude_id": 1},
+        {"user_id": "pro-uuid-1", "amplitude_id": 2},
+    ], "type": "match_user_or_device_id"}
+    httpx_mock.add_response(url=USERSEARCH, json=body)
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        first = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+        second = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert first == {"checked": 0, "returns": 0, "unresolved": 1, "calls": 1}
+    assert second == {"checked": 0, "returns": 0, "unresolved": 1, "calls": 0}
+    exposure = await db_session.get(ExposureRow, "exp-a")
+    assert exposure.returns_checked_at is None
+
+
+async def test_amplitude_one_lookup_covers_all_of_a_pros_exposures(
+    db_session, httpx_mock: HTTPXMock
+) -> None:
+    await seed_exposure(db_session, "exp-old", sent_at=NOW - timedelta(days=10))
+    await seed_exposure(db_session, "exp-new", sent_at=SENT_OLD)
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
+        amp_event(at=SENT_OLD + timedelta(hours=1)),
     ))
-    await db_session.commit()
-    httpx_mock.add_response(
-        url=AMPLITUDE_EXPORT,
-        content=amplitude_zip(return_event(at=SENT - timedelta(hours=1))),
-    )
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert result == {"returns": 1, "outcomes": 0}
+    # One usersearch + one activity call settles BOTH exposures: the return
+    # falls in exp-new's window and in exp-old's 30d window too.
+    assert result == {"checked": 2, "returns": 2, "unresolved": 0, "calls": 2}
+    outcomes = (await db_session.execute(select(TouchOutcomeRow))).scalars().all()
+    assert {o.exposure_id for o in outcomes} == {"exp-old", "exp-new"}
 
 
-async def test_amplitude_404_and_malformed_archive_are_quiet_skips(
+async def test_amplitude_call_budget_bounds_the_tick(
+    db_session, httpx_mock: HTTPXMock, monkeypatch
+) -> None:
+    monkeypatch.setattr(amplitude_source, "CALL_BUDGET", 3)
+    # pro-1 strictly older so the oldest-first ordering is deterministic.
+    await seed_exposure(db_session, "exp-1", pro_id="pro-1", sent_at=SENT_OLD - timedelta(days=1))
+    await seed_exposure(db_session, "exp-2", pro_id="pro-2")
+    httpx_mock.add_response(
+        url="https://amplitude.com/api/2/usersearch?user=pro-1",
+        json=usersearch_body("pro-1", 111),
+    )
+    httpx_mock.add_response(
+        url="https://amplitude.com/api/2/usersearch?user=pro-2",
+        json=usersearch_body("pro-2", 222),
+    )
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(), is_reusable=True)
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    # pro-1 costs 2 calls; pro-2's usersearch exhausts the budget before its
+    # activity lookup, so it stays due (and its usersearch is cached).
+    assert result == {"checked": 1, "returns": 0, "unresolved": 0, "calls": 3}
+    exposure = await db_session.get(ExposureRow, "exp-2")
+    assert exposure.returns_checked_at is None
+
+
+async def test_amplitude_out_paged_history_never_stamps_coverage(
+    db_session, httpx_mock: HTTPXMock, monkeypatch
+) -> None:
+    # A hyper-active pro whose history out-pages PAGE_CAP before reaching the
+    # oldest pending send: returns found are ingested (positive evidence),
+    # but coverage is NOT stamped — an earlier return may hide past the cap,
+    # so a silent horizon must not become a measured negative.
+    monkeypatch.setattr(amplitude_source, "PAGE_SIZE", 2)
+    monkeypatch.setattr(amplitude_source, "PAGE_CAP", 1)
+    monkeypatch.setattr(amplitude_source, "_OUTPAGED_UNTIL", {})
+    await seed_exposure(db_session)
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
+        amp_event(at=SENT_OLD + timedelta(days=1)),
+        amp_event(at=SENT_OLD + timedelta(hours=6)),  # full page, newer than sent
+    ))
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert result == {"checked": 0, "returns": 1, "unresolved": 0, "calls": 2}
+    outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
+    assert outcome.first_return_at == SENT_OLD + timedelta(hours=6)
+    exposure = await db_session.get(ExposureRow, "exp-a")
+    assert exposure.returns_checked_at is None
+    # The pro backs off instead of re-spending PAGE_CAP calls every tick.
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        again = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert again == {"checked": 0, "returns": 0, "unresolved": 0, "calls": 0}
+
+
+async def test_amplitude_covered_silent_exposures_never_starve_the_due_query(
+    db_session, httpx_mock: HTTPXMock, monkeypatch
+) -> None:
+    # A fully-covered silent exposure matches confirmed/no-outcome FOREVER and
+    # the set of them grows without bound — they must be excluded in SQL or
+    # they eventually fill the FETCH_LIMIT head and stall all measurement.
+    monkeypatch.setattr(amplitude_source, "FETCH_LIMIT", 1)
+    done_sent = NOW - timedelta(days=40)
+    await seed_exposure(db_session, "exp-done", sent_at=done_sent)
+    exposure = await db_session.get(ExposureRow, "exp-done")
+    exposure.returns_checked_at = done_sent + timedelta(days=31)
+    await db_session.commit()
+    await seed_exposure(db_session, "exp-due", sent_at=SENT_OLD)
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body())
+    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
+        result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+    assert result["checked"] == 1
+    assert (await db_session.get(ExposureRow, "exp-due")).returns_checked_at is not None
+
+
+async def test_pollers_spend_no_calls_when_nothing_is_due(
     db_session, httpx_mock: HTTPXMock
 ) -> None:
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, content=b"this is not a zip")
-    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
-        first = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-        await save_cursor(db_session, "amplitude", {})
-        second = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert first == {"returns": 0, "outcomes": 0}
-    assert second == {"returns": 0, "outcomes": 0}
-
-
-async def test_amplitude_catchup_is_bounded_per_tick(db_session, httpx_mock: HTTPXMock) -> None:
-    # A week behind: one tick covers at most MAX_HOURS_PER_TICK (6) hours.
-    since = (NOW - timedelta(days=7)).replace(minute=0)
-    await save_cursor(db_session, "amplitude", {"until": since.isoformat()})
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
-    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
-        await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    cursor = await load_cursor(db_session, "amplitude")
-    assert cursor == {"until": (since + timedelta(hours=6)).isoformat()}
-    request = httpx_mock.get_requests()[0]
-    assert request.url.params["start"] == since.strftime("%Y%m%dT%H")
-    assert request.url.params["end"] == (since + timedelta(hours=5)).strftime("%Y%m%dT%H")
-
-
-async def test_amplitude_size_cap_shrinks_the_window_within_the_tick(
-    db_session, httpx_mock: HTTPXMock
-) -> None:
-    # Staging: even 6h of the full product's events can exceed Amplitude's
-    # export size cap. The tick halves the window (6h -> 3h -> 1h) instead of
-    # crash-looping forever on the same range.
-    # Verbatim staging response body (2026-09-01).
-    size_cap = json.dumps({"error": {
-        "http_code": 400, "type": "invalid", "message": "Invalid chart definition",
-        "metadata": {"details": (
-            "Too much data at once; use a smaller time range if possible or use s3 export"
-        )},
-    }})
-    since = (NOW - timedelta(days=7)).replace(minute=0)
-    await save_cursor(db_session, "amplitude", {"until": since.isoformat()})
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=400, content=size_cap.encode())
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=400, content=size_cap.encode())
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, status_code=404)
-    async with amplitude_source.make_client(POLLER_SETTINGS) as client:
-        await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert await load_cursor(db_session, "amplitude") == {
-        "until": (since + timedelta(hours=1)).isoformat()
-    }
-    ends = [request.url.params["end"] for request in httpx_mock.get_requests()]
-    assert ends == [
-        (since + timedelta(hours=5)).strftime("%Y%m%dT%H"),
-        (since + timedelta(hours=2)).strftime("%Y%m%dT%H"),
-        since.strftime("%Y%m%dT%H"),
-    ]
-
-
-async def test_pollers_spend_no_calls_until_a_min_window_accumulates(
-    db_session, httpx_mock: HTTPXMock
-) -> None:
-    # Call-volume floor: under MIN_WINDOW of new data means ZERO HTTP calls,
-    # however fast the worker ticks.
+    # Iterable: under MIN_WINDOW of new data means ZERO HTTP calls, however
+    # fast the worker ticks. Amplitude: no exposure with a closed, unfetched
+    # horizon means the same.
     await save_cursor(db_session, "iterable", {"since": (NOW - timedelta(hours=1)).isoformat()})
-    small = (NOW - timedelta(hours=1)).replace(minute=0) - timedelta(hours=2)
-    await save_cursor(db_session, "amplitude", {"until": small.isoformat()})
+    await seed_exposure(db_session, sent_at=NOW - timedelta(hours=2))  # 1d not closed
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         result = await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     assert result == {"exposures": 0, "outcomes": 0, "deferred": 0, "ignored": 0}
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
         result = await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
-    assert result == {"returns": 0, "outcomes": 0}
+    assert result == {"checked": 0, "returns": 0, "unresolved": 0, "calls": 0}
     assert not httpx_mock.get_requests()
-    # Neither cursor moved: the small window is still owed, not skipped.
     assert await load_cursor(db_session, "iterable") == {
         "since": (NOW - timedelta(hours=1)).isoformat()
     }
-    assert await load_cursor(db_session, "amplitude") == {"until": small.isoformat()}
 
 
-async def test_sweep_never_grades_past_the_amplitude_cursor(db_session) -> None:
+async def test_sweep_gates_on_the_exposure_coverage_stamp(db_session) -> None:
     # A backfilled send must not be stamped a negative before the amplitude
-    # poller has provably ingested that period's returns.
+    # poller has provably fetched that pro's returns past the horizon.
     from waypoint.checkpoints import sweep_if_enabled
     from waypoint.exposures import register
     from waypoint.models import ExposureIn
@@ -487,16 +573,30 @@ async def test_sweep_never_grades_past_the_amplitude_cursor(db_session) -> None:
         exposure_id="exp-old", pro_id="pro-uuid-1", channel="sms",
         routing="route-to-pro", send_status="confirmed", sent_at=sent,
     )])
-    # Returns are only ingested up to one day AFTER the send — no horizon has
-    # provably closed, so nothing may resolve.
-    await save_cursor(db_session, "amplitude", {"until": (sent + timedelta(days=1)).isoformat()})
+    # The poller's heartbeat row activates per-exposure gating.
+    await save_cursor(db_session, "amplitude", {"mode": "user_activity"})
     result = await sweep_if_enabled(db_session, NOW)
-    assert result == {"resolved": 0, "synthesized": 0}
-    # Coverage catches up past sent + 7d + grace: now the negatives are real.
-    await save_cursor(db_session, "amplitude", {"until": NOW.isoformat()})
-    result = await sweep_if_enabled(db_session, NOW)
-    assert result is not None and result["synthesized"] == 1
+    # The silent exposure synthesizes its outcome row, but with no coverage
+    # stamp no horizon may be graded.
+    assert result == {"resolved": 0, "synthesized": 1}
     outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
+    assert outcome.returned_1d is None and outcome.returned_7d is None
+
+    # Coverage through sent+1d proves exactly the 1d horizon.
+    exposure = await db_session.get(ExposureRow, "exp-old")
+    exposure.returns_checked_at = sent + timedelta(days=1)
+    await db_session.commit()
+    result = await sweep_if_enabled(db_session, NOW)
+    assert result is not None and result["resolved"] == 1
+    await db_session.refresh(outcome)
+    assert outcome.returned_1d is False
+    assert outcome.returned_7d is None  # 7d returns not fetched yet
+
+    # Coverage through now proves the rest.
+    exposure.returns_checked_at = NOW
+    await db_session.commit()
+    await sweep_if_enabled(db_session, NOW)
+    await db_session.refresh(outcome)
     assert outcome.returned_7d is False
 
 
@@ -521,11 +621,17 @@ async def test_end_to_end_send_plus_return_validates_the_winner(
     winner_id = await seed_winner(db_session)
     httpx_mock.add_response(url=ITERABLE_EXPORT, text=ndjson(send_event()))
     httpx_mock.add_response(url=ITERABLE_EXPORT, text="", is_reusable=True)
-    httpx_mock.add_response(url=AMPLITUDE_EXPORT, content=amplitude_zip(return_event()))
+    httpx_mock.add_response(url=USERSEARCH, json=usersearch_body())
+    httpx_mock.add_response(url=USERACTIVITY, json=activity_body(
+        amp_event(at=SENT + timedelta(hours=1)),
+    ))
     async with iterable_source.make_client(POLLER_SETTINGS) as client:
         await iterable_source.poll(db_session, client, POLLER_SETTINGS, NOW)
     async with amplitude_source.make_client(POLLER_SETTINGS) as client:
-        await amplitude_source.poll(db_session, client, POLLER_SETTINGS, NOW)
+        # The exposure's first horizon closes a day after the send.
+        await amplitude_source.poll(
+            db_session, client, POLLER_SETTINGS, SENT + timedelta(days=2)
+        )
     winner = await db_session.get(WinnerRow, winner_id)
     await db_session.refresh(winner)
     assert winner.validation_status == "validated"

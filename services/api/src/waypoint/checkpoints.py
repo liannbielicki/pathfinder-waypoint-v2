@@ -22,7 +22,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.cursors import parse_time
 from waypoint.outcomes import derive_checkpoint_flags, evidence_limitation, promote_winners
 from waypoint.tables import (
     CandidateRow,
@@ -43,15 +42,28 @@ CHECKPOINT_VERSION = "checkpoints_v1"
 # this long after it nominally closes.
 GRACE = timedelta(hours=6)
 
-_HORIZONS: tuple[tuple[str, timedelta], ...] = (
+HORIZONS: tuple[tuple[str, timedelta], ...] = (
     ("returned_1d", timedelta(days=1)),
     ("returned_7d", timedelta(days=7)),
     ("returned_30d", timedelta(days=30)),
 )
 
 
-def _due_horizons(sent_at: datetime, now: datetime) -> list[str]:
-    return [flag for flag, window in _HORIZONS if sent_at + window + GRACE <= now]
+def _due_horizons(
+    sent_at: datetime, now: datetime, returns_covered: datetime | None
+) -> list[str]:
+    """Horizons whose window has provably closed: past its nominal end plus
+    GRACE (sources index late), and — when return coverage is per-exposure
+    (returns_covered is not None-by-gate, see resolve_due_checkpoints) — with
+    the exposure's return events fetched past the horizon's close. Without
+    that proof a backfilled send would be graded "no return" before its
+    returns were ever fetched — a permanent false negative."""
+    return [
+        flag
+        for flag, window in HORIZONS
+        if sent_at + window + GRACE <= now
+        and (returns_covered is None or sent_at + window <= returns_covered)
+    ]
 
 
 async def _synthesize_exposure_rows(
@@ -59,7 +71,7 @@ async def _synthesize_exposure_rows(
 ) -> int:
     """Confirmed exposures old enough for their first checkpoint that have no
     outcome row at all get one (source="checkpoint") so their negatives exist."""
-    first_due = now - _HORIZONS[0][1] - GRACE
+    first_due = now - HORIZONS[0][1] - GRACE
     rows = (
         await session.execute(
             select(ExposureRow)
@@ -125,9 +137,15 @@ async def _synthesize_exposure_rows(
 
 
 async def resolve_due_checkpoints(
-    session: AsyncSession, now: datetime, limit: int = 500
+    session: AsyncSession, now: datetime, limit: int = 500, gated: bool = False
 ) -> dict[str, int]:
-    """One bounded sweep. Returns {"resolved": n, "synthesized": m}."""
+    """One bounded sweep. Returns {"resolved": n, "synthesized": m}.
+
+    With gated=True (the amplitude poller owns return ingestion), a horizon
+    may be stamped a measured negative only once its row's exposure carries a
+    returns_checked_at stamp past the horizon's close — the per-exposure
+    proof that the pro's return events were actually fetched. Rows with no
+    exposure or no stamp only ever derive positives from first_return_at."""
     synthesized = await _synthesize_exposure_rows(session, now, limit)
 
     due_flags = [
@@ -135,20 +153,47 @@ async def resolve_due_checkpoints(
         TouchOutcomeRow.returned_7d.is_(None),
         TouchOutcomeRow.returned_30d.is_(None),
     ]
+    conditions = [
+        TouchOutcomeRow.send_status == "confirmed",
+        TouchOutcomeRow.sent_at.is_not(None),
+        TouchOutcomeRow.sent_at <= now - HORIZONS[0][1] - GRACE,
+        due_flags[0] | due_flags[1] | due_flags[2],
+    ]
+    if gated:
+        # A row whose exposure has NO coverage stamp (unresolved amplitude
+        # identity, out-paged history, or no exposure link at all) can never
+        # be graded — left in the query, those permanently-ungradable rows
+        # accumulate at the oldest-first head until they fill the LIMIT and
+        # newer resolvable rows are never swept again.
+        conditions.append(
+            select(ExposureRow.id)
+            .where(
+                ExposureRow.id == TouchOutcomeRow.exposure_id,
+                ExposureRow.returns_checked_at.is_not(None),
+            )
+            .exists()
+        )
     rows = (
         await session.execute(
             select(TouchOutcomeRow)
-            .where(
-                TouchOutcomeRow.send_status == "confirmed",
-                TouchOutcomeRow.sent_at.is_not(None),
-                TouchOutcomeRow.sent_at <= now - _HORIZONS[0][1] - GRACE,
-                due_flags[0] | due_flags[1] | due_flags[2],
-            )
+            .where(*conditions)
             .order_by(TouchOutcomeRow.sent_at)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
     ).scalars().all()
+    coverage: dict[str, datetime | None] = {}
+    if gated:
+        exposure_ids = {row.exposure_id for row in rows if row.exposure_id}
+        if exposure_ids:
+            coverage = {
+                e.id: e.returns_checked_at
+                for e in (
+                    await session.execute(
+                        select(ExposureRow).where(ExposureRow.id.in_(exposure_ids))
+                    )
+                ).scalars()
+            }
     resolved: list[TouchOutcomeRow] = []
     for row in rows:
         if row.sent_at is None:  # excluded by the query; narrows the type
@@ -160,7 +205,12 @@ async def resolve_due_checkpoints(
         derived = derive_checkpoint_flags(
             sent_at=row.sent_at, first_return_at=row.first_return_at
         )
-        for flag in _due_horizons(row.sent_at, now):
+        covered = coverage.get(row.exposure_id or "") if gated else None
+        if gated and covered is None:
+            due = []  # returns never fetched: only positives may derive
+        else:
+            due = _due_horizons(row.sent_at, now, covered)
+        for flag in due:
             if derived.get(flag) is None:
                 derived[flag] = False
         changed = False
@@ -223,17 +273,15 @@ async def sweep_if_enabled(
     switch is independent and never stops measurement.
 
     A negative may only be stamped for a period whose returns are PROVABLY
-    ingested. When the amplitude poller owns return ingestion, its cursor is
-    exactly how far returns have been read — so the sweep's clock is capped
-    to it. Without the cap, a backfill registers week-old sends today and
-    the sweep grades them "no return" before their returns have even been
-    fetched — permanent false negatives. No cursor row (poller not in use)
-    keeps the old wall-clock behavior."""
+    ingested. When the amplitude poller owns return ingestion (its heartbeat
+    row exists in poll_cursors), that proof is the per-exposure
+    returns_checked_at stamp — see resolve_due_checkpoints(gated=True). No
+    heartbeat row (poller not in use) keeps the old wall-clock behavior.
+    Runbook note: the row's existence outlives the poller — disabling the
+    amplitude keys leaves the sweep gated (fail-safe: no negatives are ever
+    stamped again); delete the poll_cursors "amplitude" row to un-gate."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is not None and fleet.learning_killed:
         return None
     amplitude = await session.get(PollCursorRow, "amplitude")
-    covered = parse_time(amplitude.cursor.get("until")) if amplitude else None
-    if covered is not None:
-        now = min(now, covered)
-    return await resolve_due_checkpoints(session, now, limit)
+    return await resolve_due_checkpoints(session, now, limit, gated=amplitude is not None)
