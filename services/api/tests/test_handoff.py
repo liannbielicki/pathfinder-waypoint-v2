@@ -234,6 +234,9 @@ async def test_trickle_push_sends_ready_winner_and_is_idempotent(
     # but nothing new goes on the wire — still exactly one POST.
     assert await push_ready_winners(db_session, STUB_SETTINGS, "run-t", pro_id="pro_1") == 1
     assert len(httpx_mock.get_requests()) == 1
+    # The theme carries the title (feature name) AND the customer moment.
+    sent = json.loads(httpx_mock.get_requests()[0].content)
+    assert sent["rows"][0]["theme"] == "AR nudge: A gentle check-in about overdue invoices"
 
 
 async def test_trickle_push_is_scoped_to_the_finished_pro(

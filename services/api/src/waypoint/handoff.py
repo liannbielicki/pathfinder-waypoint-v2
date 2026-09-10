@@ -228,10 +228,13 @@ async def ready_rows(
             rows.append(
                 {
                     "pro_uuid": winner.pro_id,
-                    # The full customer-moment text, not the title: Allison's SMS
-                    # copywriter sees ONLY this field (her journeyStage), so a
-                    # title here collapses compound themes to their headline.
-                    "theme": candidate.recommendation["pro_facing_concept"],
+                    # Title AND the full customer-moment text: Allison's SMS
+                    # copywriter sees ONLY this field (her journeyStage). The
+                    # concept alone often omits the feature name (it is written
+                    # in plain language), the title alone collapses compound
+                    # themes to their headline, so send both.
+                    "theme": f"{candidate.recommendation['title']}: "
+                    f"{candidate.recommendation['pro_facing_concept']}",
                     "theme_category": candidate.recommendation["mechanism"],
                     "org_id": winner.evidence.get("org_id", ""),
                     "row_id": winner.id,
