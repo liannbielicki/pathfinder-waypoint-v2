@@ -235,7 +235,7 @@ async def test_handoff_creates_durable_receipt(
     ).scalar_one()
     # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
     assert row.payload == {
-        "pro_uuid": "pro_1", "theme": "C", "theme_category": "invoice_delivery",
+        "pro_uuid": "pro_1", "theme": "T: C", "theme_category": "invoice_delivery",
         "org_id": "org_1", "row_id": winner.id,
     }
 
