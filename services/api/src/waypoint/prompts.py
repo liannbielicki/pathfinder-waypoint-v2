@@ -255,8 +255,9 @@ metric; higher is better):
 {history_json}
 
 Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
-manager_rationale, channel, risk. Return a JSON array of exactly {count}
-{ideas_word} and nothing else.
+manager_rationale, channel, risk. Keep each string concise and actions to 1-3
+short strings. Begin the response with `[` and return a JSON array of exactly
+{count} {ideas_word}; do not add markdown, commentary, or code fences.
 
 This Pro's context:
 {fenced_context(org_context)}

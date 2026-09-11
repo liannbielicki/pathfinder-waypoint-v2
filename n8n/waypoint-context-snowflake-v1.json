@@ -1,0 +1,302 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pathfinder-org-context",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "855da866-ec6d-418e-9473-c20231041d88",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        3504,
+        1488
+      ],
+      "webhookId": "a1000000-0000-4000-8000-000000000001",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "S1K5XexjImlWuwzp",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// TRUST BOUNDARY. Every id is validated here and nowhere else: the two\n// Snowflake nodes downstream interpolate the pre-quoted lists this node\n// emits, so the regexes below are what make that interpolation\n// injection-safe. Error messages name the PROBLEM, never the offending\n// value -- mirrors src/pathfinder/action_console/secret_scrub.py.\n\nconst MAX_IDS = 10000;\nconst INT_RE = /^[0-9]+$/;\n\n// Both normalizers LOWERCASE. Snowflake string comparison is case-sensitive,\n// so an uppercase-submitted uuid used to be interpolated verbatim and matched\n// nothing -- a silent empty result, not an error. Lowercasing also matches\n// _canon() in n8n.py, which is what the client keys rows by.\nfunction toDashedUuid(raw) {\n  const stripped = String(raw).trim().toLowerCase().replace(/-/g, '');\n  if (!/^[0-9a-f]{32}$/.test(stripped)) return null;\n  return `${stripped.slice(0,8)}-${stripped.slice(8,12)}-${stripped.slice(12,16)}-${stripped.slice(16,20)}-${stripped.slice(20)}`;\n}\n\nfunction toIterableProUuid(raw) {\n  const stripped = String(raw).trim().toLowerCase().replace(/^pro_/, '').replace(/-/g, '');\n  if (!/^[0-9a-f]{32}$/.test(stripped)) return null;\n  return `pro_${stripped}`;\n}\n\nconst body = $input.first().json.body || {};\nconst raw = body.id;\nconst rawList = Array.isArray(raw) ? raw : [raw];\n\nif (rawList.length === 0 || rawList.some(v => v === undefined || v === null || v === '')) {\n  throw new Error('id(s) must be a non-empty value or array of values');\n}\n// Cap moved here from the old Validate node, which no longer sees the raw\n// request. Losing it would let one call fan out unboundedly.\nif (rawList.length > MAX_IDS) {\n  throw new Error(`at most ${MAX_IDS} ids per request, got ${rawList.length}`);\n}\n\n// Deduped per bucket rather than rejected: with three accepted id spaces a\n// duplicate is far more likely to be a caller listing the same org twice\n// than a bug worth failing the whole batch over. IN () would dedupe anyway.\nconst uuids = new Set();\nconst proUuids = new Set();\nconst ints = new Set();\nfor (const entry of rawList) {\n  const value = String(entry).trim();\n  if (/^pro_/i.test(value)) {\n    const asProUuid = toIterableProUuid(value);\n    if (!asProUuid) throw new Error(`id \"${entry}\" has a pro_ prefix but isn't a well-formed pro id`);\n    proUuids.add(asProUuid);\n    continue;\n  }\n  const asUuid = toDashedUuid(value);\n  if (asUuid) { uuids.add(asUuid); continue; }\n  if (INT_RE.test(value)) { ints.add(value); continue; }\n  throw new Error(`id \"${entry}\" is neither an org_uuid, a pro_ id, nor an integer org_id`);\n}\n\n// Sentinels keep `IN (...)` syntactically valid when a bucket is empty.\nconst quote = (values, fallback) =>\n  (values.size ? [...values] : [fallback]).map(v => `'${v}'`).join(', ');\n\nconst uuidList    = quote(uuids, '00000000-0000-0000-0000-000000000000');\nconst proUuidList = quote(proUuids, 'pro_00000000000000000000000000000000');\nconst intList     = (ints.size ? [...ints] : ['-1']).join(', ');\n\nreturn [{ json: { uuid_list: uuidList, pro_uuid_list: proUuidList, int_list: intList } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3728,
+        1488
+      ],
+      "id": "11663907-8e7f-41ee-823b-eae08eba6fbb",
+      "name": "Router"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the org-context query. Validation lives in the Router node -- this\n// node only re-checks the SHAPE of the pre-quoted lists, so a future edit to\n// Router that loosens its regexes cannot silently open a SQL injection path\n// here. The pattern below matches exactly what Router emits and nothing else.\nconst LIST_RE = /^(?:'(?:pro_)?[0-9a-fA-F-]+'|-?[0-9]+)(?:, (?:'(?:pro_)?[0-9a-fA-F-]+'|-?[0-9]+))*$/;\n\n// $input.first(), not $json: this node runs once for ALL items, where $json\n// is undefined.\nconst routed = $input.first().json;\nconst lists = {\n  __UUID_LIST__: routed.uuid_list,\n  __PRO_UUID_LIST__: routed.pro_uuid_list,\n  __INT_LIST__: routed.int_list,\n};\nfor (const [placeholder, value] of Object.entries(lists)) {\n  if (typeof value !== 'string' || !LIST_RE.test(value)) {\n    throw new Error(`${placeholder} is not a well-formed pre-quoted id list`);\n  }\n}\n\n// Lowercase quoted aliases are REQUIRED: Snowflake returns column names\n// uppercase, and index_rows_by_org() in org_context_contract.py looks up\n// the literal key 'org_uuid'. The 44 columns are: 'org_uuid',\n// 'contract_version', 'audience_query_version' (run metadata, not an org\n// field -- Waypoint captures it as batch lineage and drops it from org\n// briefs), then 41 of the 43 names in ALLOWED_FIELDS (n8n.py). The two\n// missing names are allowlisted but have NO source column here, and\n// degrade to None client-side, which n8n.py's header explicitly allows:\n// 'email_consent_state' never had one, and 'sms_consent_state' was\n// REMOVED 2026-08-19 -- its source, communications_sms_consents, records\n// the Pro's CUSTOMERS' marketing-SMS consent, not the Pro's own, so it\n// gated the sms channel on the wrong party and pushed consent language\n// into recommendations. (An earlier version of this comment said 46; it\n// was counting the phantom email field.) The\n// 'org-context-v2' literal below must match CONTRACT_VERSION exactly --\n// on a mismatch minimize_row() refuses EVERY row, by design. Adding\n// columns is contract-compliant (v2 allows additive fields); Waypoint\n// drops any name not yet in its allowlist.\nconst template = `-- Org context pack, contract org-context-v2. Built inline over live tables;\n-- ANALYTICS.MAIN.PATHFINDER_ORG_CONTEXT_V1 never existed and is not referenced.\n--\n-- PERF SHAPE: this query resolves its own spine from the raw submitted ids\n-- (candidates -> resolved -> spine). It used to be handed a list of org_uuids\n-- by the Router Query node, which forced two Snowflake round trips to run\n-- back to back. Router Query still exists, but only to feed pro_uuid to\n-- Iterable, and now runs in PARALLEL with this one instead of ahead of it.\n--\n-- PERF DEBT -- SIX BANDS ARE SUSPENDED, EMITTING NULL:\n--   last_job_activity_band, open_ar_band, ar_aging_band, platform_usage_band,\n--   health_grade, upsell_grade\n--\n-- ponytail: six fields traded for ~200 GB per call. Restore them via nightly\n-- per-org rollups, NOT by putting the removed CTEs back.\n--\n-- ALL FIGURES BELOW WERE MEASURED, not estimated -- five orgs per probe,\n-- via get_query_operator_stats.\n--\n-- CAUSE 1, the big one: health_index_yesterday is a VIEW, and cost 25.4s /\n-- 74.3 GB alone. It recomputes the entire health index -- including\n-- last_value(...) OVER (PARTITION BY organization_id ORDER BY bizdate) over\n-- all of agg_organization_plan_by_bizdate -- so its window frames are built\n-- for every org before any outer filter applies. Its operator profile is full\n-- of tables this query never names (RAW_FIVETRAN_PROD.SERVICE_REQUESTS at\n-- 38.8%, time-tracking entries, product activity, bills, charges).\n-- The cancels CTE below recovers the cancel signals from the base table for\n-- 0.28s / 0.18 GB. The two GRADES have no materialized source and are gone.\n--\n-- CAUSE 2: NO table in analytics.main has a clustering key (verified:\n-- cluster_by empty on all 14 this query touched). A WHERE on organization_id\n-- prunes NOTHING, and neither does a date floor:\n--   service_requests_details    76.3 GB  4480/4480 partitions  (lastjob)\n--   dim_invoice                 29.0 GB  1792/1792 partitions  (ar)\n--   fact_job_invoiced_estimate  19.7 GB  1160/1160 partitions  (plat)\n-- Adding job_created_date >= DATEADD(day,-400,...) to lastjob still scanned\n-- 4480/4480. There is no predicate that makes those three tables cheap.\n--\n-- What DOES fix the remaining six: a nightly per-org rollup carrying\n-- last_job_date, open_ar_usd, max_days_overdue, the 90d mobile/web send\n-- split, and the two health grades -- ~200k rows, clustered on\n-- organization_id. Needs write access this credential does not have.\n--\n-- CHECKED AND FINE, do not \"optimize\" these: account_ltv is 5 MB / 0.34s, so\n-- the APPROX_PERCENTILE in ltvcut is already cheap. agg_current_customer is\n-- 20 MB, orginfo 20 MB, detail_retention_cases 20 MB.\n--\n-- CORRECTNESS TRAPS -- both are SILENT when wrong (the query still succeeds\n-- and still returns a plausible band):\n--   * dim_invoice.DUE_AMOUNT is in CENTS. Always /100.0, or every AR band is\n--     100x high and every org looks like a collections emergency.\n--     (agg_current_customer T28_*_AMOUNT columns are DOLLARS -- verified\n--     median 28d CC volume approx 8.5k USD -- do NOT divide those.)\n--\n-- NO LITERAL DOLLAR SIGN may appear anywhere in this SQL text (including\n-- this comment): dollar-sequences are replacement patterns to JS\n-- String.replace(). Every substitution below uses split/join instead, but\n-- the rule stands -- one future .replace() call would splice the query\n-- silently. That is also why the segment guard below is an IN list, not a\n-- regex anchored with a dollar.\n--   * INVOICE_STATUS is paid | draft | open | canceled. Open AR filters to\n--     'open' ONLY; for one sampled org 'draft' was ~6x the real open balance.\n--\n-- SPINE is analytics.main.dim_organization (926,837 rows, strictly 1:1\n-- ORG_UUID <-> ORGANIZATION_ID). marts.customer_base.agg_current_customer is\n-- NOT the spine: it holds 64,480 CURRENT customers only, so spining on it\n-- would silently refuse churned orgs -- exactly the outreach targets. It is a\n-- LEFT JOIN source only. The spine also carries segment_actual (closed\n-- 1A-4D / A-D vocabulary, ~100% populated, vocabulary-guarded below) and\n-- currently_paying / billing_suspended for lifecycle_stage -- both work for\n-- churned orgs.\n--\n-- NOTED DEVIATION 1: jobs/estimates/outreach 28d bands, quickbooks USAGE, and\n-- the v2.1 acc-derived bands (payments_28d_band, email_engagement_state,\n-- marketing_campaigns_28d_band, leads_created_28d_band,\n-- jobs_reviewed_28d_band, wisetack_state, mrr_band, and the\n-- open_retention_case arm of churn_risk_state) come from pre-aggregated\n-- agg_current_customer to control cost. For the ~93% of orgs absent from it\n-- those fields are NULL rather than wrong. health_grade / upsell_grade /\n-- cancel-request signals likewise come from\n-- production.customer_success.health_index_yesterday (current customers\n-- only; absent -> NULL). NULL is contract-compliant: minimize_row drops\n-- blank allowlisted values rather than asserting them.\n--\n-- NOTED DEVIATION 4 (v2): four attached features have NO verified usage source\n-- (voip, card_on_file, time_tracking, flat_rate_pricing). When attached they\n-- emit 'attached_usage_unknown'. That is NOT collapsed into 'attached_unused':\n-- \"we cannot see whether they use it\" and \"they pay and do not use it\" drive\n-- opposite outreach, and the whole point of v2 is keeping them apart.\n--\n-- REMOVED 2026-08-19: sms_consent_state. Its source table\n-- (communications_sms_consents) records the Pro's CUSTOMERS' marketing-SMS\n-- consent, not the Pro's own -- MAX(opted_out) over any customer row marked\n-- nearly every org opted_out and blocked the sms channel for the wrong\n-- reason. Do NOT re-add it from that table.\n--\n-- BANDS ONLY. No raw amount, count, date, free-text string, or identifier\n-- crosses this boundary. 'vertical' is mapped from 174 dirty distinct source\n-- values onto a closed 16-value vocabulary; 'recommended_focus' is filtered\n-- against the 34 verified feature names and otherwise emits 'other'.\n-- 'segment' is guarded onto its closed vocabulary; health/upsell\n-- grades are guarded onto closed 3-value vocabularies; everything from\n-- health_index free-text columns (reason_*, cancel_reason) is NOT emitted.\nWITH candidates AS (\n  -- Three UNION arms instead of one OR spanning both sides of a join: each\n  -- arm prunes on its own key. UNION dedupes an org submitted twice under\n  -- two different id spaces.\n  SELECT o.org_uuid, o.organization_id\n    FROM analytics.main.dim_organization o\n   WHERE o.org_uuid IN (__UUID_LIST__)\n  UNION\n  SELECT o.org_uuid, o.organization_id\n    FROM analytics.main.dim_organization o\n   WHERE o.organization_id IN (__INT_LIST__)\n  UNION\n  SELECT o.org_uuid, o.organization_id\n    FROM analytics.main.dim_organization o\n    JOIN analytics.main.dim_service_pro p\n      ON p.organization_id = o.organization_id\n   WHERE p.pro_uuid IN (__PRO_UUID_LIST__)\n),\nresolved AS (\n  -- Admin-pro EXISTS filter, not a join: it reproduces exactly the row set\n  -- Router Query used to hand us (orgs with at least one unarchived admin\n  -- pro) without needing to pick WHICH pro, which only Iterable cares about.\n  -- Drop this CTE and orgs with no admin pro would start appearing in the\n  -- response with null Iterable fields -- a real behavior change.\n  SELECT c.org_uuid, c.organization_id AS oid\n    FROM candidates c\n   WHERE EXISTS (\n     SELECT 1 FROM analytics.main.dim_service_pro p\n      WHERE p.organization_id = c.organization_id\n        AND p.is_admin = true\n        AND p.archived = false\n   )\n),\nspine AS (\n  SELECT r.org_uuid, r.oid,\n         IFF(d.segment_actual IN ('1A','1B','1C','1D','2A','2B','2C','2D',\n                                  '3A','3B','3C','3D','4A','4B','4C','4D',\n                                  'A','B','C','D'), d.segment_actual, NULL) seg,\n         d.currently_paying cp, d.billing_suspended bs\n    FROM resolved r\n    JOIN analytics.main.dim_organization d ON d.organization_id = r.oid\n),\nacc AS (\n  SELECT s.org_uuid, a.t28_jobs_created jc, a.t28_estimates_created ec,\n         COALESCE(a.t28_sales_communications,0)\n       + COALESCE(a.t28_marketing_communications,0)\n       + COALESCE(a.t28_customer_success_communications,0) oc,\n         COALESCE(a.t28_quickbooks_online_engagements,0)\n       + COALESCE(a.t28_quickbooks_desktop_engagements,0) qb,\n         COALESCE(a.t28_cc_amount,0) + COALESCE(a.t28_ach_amount,0)\n       + COALESCE(a.t28_check_amount,0) + COALESCE(a.t28_cash_amount,0)\n       + COALESCE(a.t28_other_cc_amount,0) + COALESCE(a.t28_etransfer_amount,0)\n       + COALESCE(a.t28_other_amount,0) pay,\n         a.t28_emails_sent es,\n         COALESCE(a.t28_emails_opened,0) + COALESCE(a.t28_emails_clicked,0) eo,\n         a.t28_emails_clicked ecl,\n         a.t28_marketing_campaigns_sent mc,\n         a.t28_leads_created lc,\n         a.t28_jobs_reviewed jr,\n         a.has_open_retention_case rc,\n         a.saas_mrr mrr,\n         a.currently_offering_wisetack wt\n    FROM spine s\n    JOIN marts.customer_base.agg_current_customer a ON a.organization_id = s.oid\n),\ncancels AS (\n  -- Replaces the health_index_yesterday VIEW, which cost 25.4s and 74.3 GB\n  -- for FIVE orgs -- the single most expensive thing in the old query. That\n  -- view recomputes the whole health index, including\n  -- last_value(...) OVER (PARTITION BY organization_id ORDER BY bizdate)\n  -- across all of agg_organization_plan_by_bizdate, so the window frames must\n  -- be built for every org before an outer org filter can apply. No predicate\n  -- can push into it.\n  --\n  -- Read straight from the base table the view itself reads (185,922 rows,\n  -- 20 MB): 0.28s and 0.18 GB. Predicates copied verbatim from the view's\n  -- cancel_requests/cancel_signals CTEs -- keep them in sync.\n  --\n  -- NOT byte-identical to the view, by one deliberate difference: the view\n  -- groups cancel_signals by (organization_id, type_3_enrollment_date) and so\n  -- scopes cancel history to the CURRENT enrollment epoch. This CTE counts\n  -- every Core SaaS Retention Type-3 case for the org, whichever epoch it\n  -- belongs to. Measured effect on a 5-org sample: one org moved from 'none'\n  -- to 'prior_cancel_request' because it churned and re-enrolled. For outreach\n  -- \"this org has cancelled before\" is the more useful reading, but it IS a\n  -- behavior change. To restore the old scoping you need type_3_enrollment_date\n  -- from agg_organization_plan_by_bizdate, which is one of the tables that\n  -- made the view expensive in the first place.\n  --\n  -- COVERAGE GAIN: health_index_yesterday holds current customers only, so\n  -- churned orgs got NULL churn signals. This table has their cases, so\n  -- churn_risk_state now works for exactly the orgs outreach targets.\n  SELECT s.org_uuid,\n         MAX(IFF(rc.created_date <= CURRENT_DATE() - 1\n                 AND (rc.closed_date IS NULL OR rc.closed_date >= CURRENT_DATE() - 1),\n                 1, 0)) ocr,\n         COUNT(DISTINCT IFF(rc.created_date < CURRENT_DATE() - 1\n                            AND rc.closed_date < CURRENT_DATE() - 1,\n                            rc.case_id, NULL)) pcr\n    FROM spine s\n    JOIN marts.customer_success.detail_retention_cases rc\n      ON rc.organization_id = s.oid\n   WHERE rc.recordtype = 'Core SaaS Retention'\n     AND rc.account_type_at_case_creation = 'Type 3'\n     AND rc.failed_billing_churn_flag = 0\n   GROUP BY 1\n),\nfeatrow AS (\n  -- PERF: 90d floor. feature_by_orgday is a daily snapshot, so without a date\n  -- predicate this read every row per org back to enrollment just to keep the\n  -- newest one. 90d matches the product-activity windows below.\n  -- BEHAVIOR CHANGE: an org with no snapshot in 90d (long-churned) now emits\n  -- NULL for feature_adoption_band and all ten feature_*_state columns instead\n  -- of a years-stale attachment set. Widen or drop the floor to restore.\n  SELECT s.org_uuid,\n         COALESCE(f.booking_widget,0) a_online_booking,\n         COALESCE(f.premium_reviews,0) a_premium_reviews,\n         COALESCE(f.sales_proposal,0) a_sales_proposal,\n         COALESCE(f.service_agreements,0) a_service_agreements,\n         COALESCE(f.hcp_assist,0) a_hcp_assist,\n         GREATEST(COALESCE(f.quickbooks,0), COALESCE(f.quickbooks_desktop,0)) a_quickbooks,\n         COALESCE(f.voip,0) a_voip,\n         COALESCE(f.card_on_file,0) a_card_on_file,\n         COALESCE(f.time_tracking,0) a_time_tracking,\n         COALESCE(f.flat_rate_pricing,0) a_flat_rate_pricing,\n         COALESCE(f.booking_widget,0)+COALESCE(f.card_on_file,0)\n       + COALESCE(f.service_agreements,0)+COALESCE(f.premium_reviews,0)\n       + COALESCE(f.sales_proposal,0)+COALESCE(f.hcp_assist,0)\n       + COALESCE(f.voip,0)+COALESCE(f.quickbooks,0)\n       + COALESCE(f.time_tracking,0)+COALESCE(f.flat_rate_pricing,0) n\n    FROM spine s\n    JOIN analytics.main.feature_by_orgday f\n      ON f.organization_id = s.oid\n     AND f.date >= DATEADD(day,-90,CURRENT_DATE())\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY s.org_uuid ORDER BY f.date DESC) = 1\n),\nu_ob AS (\n  SELECT s.org_uuid, COUNT(*) c FROM spine s\n    JOIN analytics.main.fact_online_booking_product_activity x\n      ON x.organization_id = s.oid\n     AND x.activity_bizdate >= DATEADD(day,-90,CURRENT_DATE())\n   GROUP BY 1\n),\nu_rv AS (\n  SELECT s.org_uuid, COUNT(*) c FROM spine s\n    JOIN analytics.main.fact_review_product_activity x\n      ON x.organization_id = s.oid\n     AND x.activity_bizdate >= DATEADD(day,-90,CURRENT_DATE())\n   GROUP BY 1\n),\nu_sp AS (\n  SELECT s.org_uuid, COUNT(*) c FROM spine s\n    JOIN analytics.main.fact_sales_proposal_product_activity x\n      ON x.organization_id = s.oid\n     AND x.activity_bizdate >= DATEADD(day,-90,CURRENT_DATE())\n   GROUP BY 1\n),\nu_svp AS (\n  SELECT s.org_uuid, COUNT(*) c FROM spine s\n    JOIN analytics.main.fact_service_plans_product_activity x\n      ON x.organization_id = s.oid\n     AND x.activity_bizdate >= DATEADD(day,-90,CURRENT_DATE())\n   GROUP BY 1\n),\nu_ha AS (\n  SELECT s.org_uuid, COUNT(*) c FROM spine s\n    JOIN analytics.main.fact_hcp_assist_and_csr_ai_call_product_activity x\n      ON x.organization_id = s.oid\n     AND x.activity_bizdate >= DATEADD(day,-90,CURRENT_DATE())\n   GROUP BY 1\n),\nstp AS (\n  -- PERF: was a 10-arm UNION ALL over featrow (ten passes) followed by a\n  -- GROUP BY to pivot the long form back to one row per org. Same ten states,\n  -- one pass, no pivot. The long form is gone entirely -- topunused below now\n  -- reads these wide columns through a CASE instead of joining the union.\n  SELECT f.org_uuid,\n         CASE WHEN f.a_online_booking = 0 THEN 'not_attached'\n              WHEN COALESCE(u_ob.c,0) > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_online_booking,\n         CASE WHEN f.a_premium_reviews = 0 THEN 'not_attached'\n              WHEN COALESCE(u_rv.c,0) > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_premium_reviews,\n         CASE WHEN f.a_sales_proposal = 0 THEN 'not_attached'\n              WHEN COALESCE(u_sp.c,0) > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_sales_proposal,\n         CASE WHEN f.a_service_agreements = 0 THEN 'not_attached'\n              WHEN COALESCE(u_svp.c,0) > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_service_agreements,\n         CASE WHEN f.a_hcp_assist = 0 THEN 'not_attached'\n              WHEN COALESCE(u_ha.c,0) > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_hcp_assist,\n         CASE WHEN f.a_quickbooks = 0 THEN 'not_attached'\n              WHEN acc.org_uuid IS NULL THEN 'attached_usage_unknown'\n              WHEN acc.qb > 0 THEN 'attached_active'\n              ELSE 'attached_unused' END s_quickbooks,\n         IFF(f.a_voip = 0, 'not_attached', 'attached_usage_unknown') s_voip,\n         IFF(f.a_card_on_file = 0, 'not_attached', 'attached_usage_unknown') s_card_on_file,\n         IFF(f.a_time_tracking = 0, 'not_attached', 'attached_usage_unknown') s_time_tracking,\n         IFF(f.a_flat_rate_pricing = 0, 'not_attached', 'attached_usage_unknown') s_flat_rate_pricing\n    FROM featrow f\n    LEFT JOIN u_ob  ON u_ob.org_uuid  = f.org_uuid\n    LEFT JOIN u_rv  ON u_rv.org_uuid  = f.org_uuid\n    LEFT JOIN u_sp  ON u_sp.org_uuid  = f.org_uuid\n    LEFT JOIN u_svp ON u_svp.org_uuid = f.org_uuid\n    LEFT JOIN u_ha  ON u_ha.org_uuid  = f.org_uuid\n    LEFT JOIN acc   ON acc.org_uuid   = f.org_uuid\n),\ngap AS (\n  SELECT s.org_uuid, l.features feats, l.plan_tier pt,\n         l.features[0]:feature::STRING f0,\n         l.features[0]:incremental_revenue_usd::FLOAT rev,\n         l.features[0]:retention_lift_pp::FLOAT lift\n    FROM spine s\n    JOIN production.ltv.ltv_feature_adoption_scores l ON l.organization_id = s.oid\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY s.org_uuid ORDER BY l.bizdate DESC) = 1\n),\nltvrank AS (\n  SELECT g.org_uuid, fl.index idx,\n         CASE fl.value:feature::STRING\n           WHEN 'online_booking'         THEN 'online_booking'\n           WHEN 'quickbooks'             THEN 'quickbooks'\n           WHEN 'service_agreements'     THEN 'service_agreements'\n           WHEN 'sales_proposal'         THEN 'sales_proposal'\n           WHEN 'hcp_assist'             THEN 'hcp_assist'\n           WHEN 'flat_rate_pricing'      THEN 'flat_rate_pricing'\n           WHEN 'voip'                   THEN 'voip'\n           WHEN 'employee_time_tracking' THEN 'time_tracking'\n           ELSE NULL END fkey\n    FROM gap g, LATERAL FLATTEN(input => g.feats) fl\n),\ntopunused AS (\n  -- The eight feature keys ltv_feature_adoption_scores can rank, matched\n  -- against the wide state row. Only these eight appear in ltvrank, so the\n  -- other two states (card_on_file, premium_reviews) are deliberately absent.\n  SELECT r.org_uuid, MIN_BY(r.fkey, r.idx) fkey\n    FROM ltvrank r\n    JOIN stp p ON p.org_uuid = r.org_uuid\n   WHERE r.fkey IS NOT NULL\n     AND CASE r.fkey\n           WHEN 'online_booking'     THEN p.s_online_booking\n           WHEN 'quickbooks'         THEN p.s_quickbooks\n           WHEN 'service_agreements' THEN p.s_service_agreements\n           WHEN 'sales_proposal'     THEN p.s_sales_proposal\n           WHEN 'hcp_assist'         THEN p.s_hcp_assist\n           WHEN 'flat_rate_pricing'  THEN p.s_flat_rate_pricing\n           WHEN 'voip'               THEN p.s_voip\n           WHEN 'time_tracking'      THEN p.s_time_tracking\n         END = 'attached_unused'\n   GROUP BY 1\n),\nltvcut AS (\n  -- PERF: was NTILE(4) OVER (ORDER BY total_ltv) across the whole of\n  -- account_ltv on EVERY request -- a full sort no batch size could shrink,\n  -- and the query's fixed cost floor. APPROX_PERCENTILE is one pass over the\n  -- same column with no global ordering. Cutoffs are t-digest approximate;\n  -- the output is a quartile BAND, so a few rows near a boundary shifting one\n  -- band is within tolerance. Promote to a daily-refreshed cutoff table if\n  -- even that drifts too much (needs write access this credential lacks).\n  SELECT APPROX_PERCENTILE(total_ltv, 0.25) q1,\n         APPROX_PERCENTILE(total_ltv, 0.50) q2,\n         APPROX_PERCENTILE(total_ltv, 0.75) q3\n    FROM production.ltv.account_ltv\n   WHERE total_ltv IS NOT NULL\n),\nltv AS (\n  SELECT s.org_uuid,\n         CASE WHEN a.total_ltv <= c.q1 THEN 1\n              WHEN a.total_ltv <= c.q2 THEN 2\n              WHEN a.total_ltv <= c.q3 THEN 3\n              ELSE 4 END q\n    FROM spine s\n    JOIN production.ltv.account_ltv a ON a.organization_id = s.oid\n   CROSS JOIN ltvcut c\n   WHERE a.total_ltv IS NOT NULL\n),\ninv AS (\n  SELECT s.org_uuid, SUM(v.invoices_sent) n\n    FROM spine s\n    JOIN marts.fintech.agg_invoice_activity v ON v.organization_id = s.oid\n   WHERE v.bizdate >= DATEADD(day,-28,CURRENT_DATE())\n   GROUP BY 1\n),\noi AS (\n  SELECT s.org_uuid, o.vertical vt, o.actual_employee_count ec,\n         DATEDIFF(month, o.enrollment_date, CURRENT_DATE()) tenure_mo\n    FROM spine s\n    JOIN analytics.main.orginfo o ON o.organization_id = s.oid\n)\nSELECT\n  s.org_uuid AS \"org_uuid\",\n  'org-context-v2' AS \"contract_version\",\n  '__AUDIENCE_QUERY_VERSION__' AS \"audience_query_version\",\n  s.seg AS \"segment\",\n  CASE WHEN s.cp IS NULL THEN 'never_enrolled'\n       WHEN s.bs = 1 THEN 'suspended'\n       WHEN s.cp > 0 THEN 'paying'\n       ELSE 'not_paying' END AS \"lifecycle_stage\",\n  -- SUSPENDED, see PERF DEBT: both grades come only from the health_index\n  -- scoring model, and there is no materialized source for them.\n  CAST(NULL AS VARCHAR) AS \"health_grade\",\n  CAST(NULL AS VARCHAR) AS \"upsell_grade\",\n  -- PRESERVED via the cancels CTE. The 'none' arm now keys off having ANY\n  -- source for the org (acc = current customer, or a retention case on file)\n  -- rather than health_index presence; NULL still means \"no source, unknown\".\n  CASE WHEN cancels.ocr = 1 THEN 'open_cancel_request'\n       WHEN acc.rc = 1 THEN 'open_retention_case'\n       WHEN cancels.pcr > 0 THEN 'prior_cancel_request'\n       WHEN acc.org_uuid IS NOT NULL OR cancels.org_uuid IS NOT NULL THEN 'none'\n       ELSE NULL END AS \"churn_risk_state\",\n  CASE WHEN featrow.n IS NULL THEN NULL WHEN featrow.n=0 THEN 'none'\n       WHEN featrow.n<=2 THEN 'low' WHEN featrow.n<=5 THEN 'medium'\n       ELSE 'high' END AS \"feature_adoption_band\",\n  CASE WHEN gap.rev IS NULL THEN NULL WHEN gap.rev<=0 THEN 'none'\n       WHEN gap.rev<142 THEN 'small' WHEN gap.rev<1489 THEN 'moderate'\n       ELSE 'large' END AS \"plan_gap_band\",\n  CASE ltv.q WHEN 1 THEN 'bottom_quartile' WHEN 2 THEN 'lower_mid'\n       WHEN 3 THEN 'upper_mid' WHEN 4 THEN 'top_quartile'\n       ELSE NULL END AS \"ltv_score_band\",\n  -- SUSPENDED, see PERF DEBT in the header. dim_invoice cannot be pruned\n  -- (measured 1792/1792 partitions, 29 GB, 99.5% of query time).\n  CAST(NULL AS VARCHAR) AS \"open_ar_band\",\n  CAST(NULL AS VARCHAR) AS \"ar_aging_band\",\n  CASE WHEN acc.jc IS NULL THEN NULL WHEN acc.jc=0 THEN '0'\n       WHEN acc.jc<=5 THEN '1_5' WHEN acc.jc<=20 THEN '6_20'\n       WHEN acc.jc<=100 THEN '21_100' ELSE 'over_100' END AS \"jobs_created_28d_band\",\n  CASE WHEN acc.ec IS NULL THEN NULL WHEN acc.ec=0 THEN '0'\n       WHEN acc.ec<=5 THEN '1_5' WHEN acc.ec<=20 THEN '6_20'\n       WHEN acc.ec<=100 THEN '21_100' ELSE 'over_100' END AS \"estimates_created_28d_band\",\n  CASE WHEN inv.n IS NULL THEN NULL WHEN inv.n=0 THEN '0'\n       WHEN inv.n<=5 THEN '1_5' WHEN inv.n<=20 THEN '6_20'\n       WHEN inv.n<=100 THEN '21_100' ELSE 'over_100' END AS \"invoices_sent_28d_band\",\n  CASE WHEN acc.oc IS NULL THEN NULL WHEN acc.oc=0 THEN '0'\n       WHEN acc.oc<=5 THEN '1_5' WHEN acc.oc<=20 THEN '6_20'\n       ELSE 'over_20' END AS \"outreach_count_28d_band\",\n  CASE WHEN acc.pay IS NULL THEN NULL WHEN acc.pay<=0 THEN '0'\n       WHEN acc.pay<5000 THEN 'under_5k' WHEN acc.pay<25000 THEN '5k_25k'\n       WHEN acc.pay<100000 THEN '25k_100k' ELSE 'over_100k' END AS \"payments_28d_band\",\n  CASE WHEN acc.es IS NULL THEN NULL WHEN acc.es=0 THEN 'no_sends'\n       WHEN COALESCE(acc.ecl,0)>0 THEN 'clicking'\n       WHEN acc.eo>0 THEN 'opening'\n       ELSE 'unengaged' END AS \"email_engagement_state\",\n  CASE WHEN acc.mc IS NULL THEN NULL WHEN acc.mc=0 THEN '0'\n       WHEN acc.mc<=2 THEN '1_2' WHEN acc.mc<=10 THEN '3_10'\n       ELSE 'over_10' END AS \"marketing_campaigns_28d_band\",\n  CASE WHEN acc.lc IS NULL THEN NULL WHEN acc.lc=0 THEN '0'\n       WHEN acc.lc<=5 THEN '1_5' WHEN acc.lc<=20 THEN '6_20'\n       ELSE 'over_20' END AS \"leads_created_28d_band\",\n  CASE WHEN acc.jr IS NULL THEN NULL WHEN acc.jr=0 THEN '0'\n       WHEN acc.jr<=5 THEN '1_5' WHEN acc.jr<=20 THEN '6_20'\n       ELSE 'over_20' END AS \"jobs_reviewed_28d_band\",\n  -- SUSPENDED, see PERF DEBT in the header. NOT 'never': the old expression\n  -- returned 'never' whenever the row was missing, so simply dropping the CTE\n  -- would assert \"this org has never had a job\" about every org alive.\n  CAST(NULL AS VARCHAR) AS \"last_job_activity_band\",\n  CASE WHEN acc.wt IS NULL THEN NULL\n       WHEN acc.wt=1 THEN 'offering' ELSE 'not_offering' END AS \"wisetack_state\",\n  CASE WHEN acc.mrr IS NULL THEN NULL WHEN acc.mrr<=0 THEN 'none'\n       WHEN acc.mrr<80 THEN 'under_80' WHEN acc.mrr<190 THEN '80_190'\n       WHEN acc.mrr<330 THEN '190_330' ELSE 'over_330' END AS \"mrr_band\",\n  -- SUSPENDED, see PERF DEBT in the header. The 90d floor did NOT prune\n  -- fact_job_invoiced_estimate_sent (measured 1160/1160 partitions, 19.7 GB).\n  CAST(NULL AS VARCHAR) AS \"platform_usage_band\",\n  stp.s_online_booking     AS \"feature_online_booking_state\",\n  stp.s_premium_reviews    AS \"feature_premium_reviews_state\",\n  stp.s_sales_proposal     AS \"feature_sales_proposal_state\",\n  stp.s_service_agreements AS \"feature_service_agreements_state\",\n  stp.s_hcp_assist         AS \"feature_hcp_assist_state\",\n  stp.s_quickbooks         AS \"feature_quickbooks_state\",\n  stp.s_voip               AS \"feature_voip_state\",\n  stp.s_card_on_file       AS \"feature_card_on_file_state\",\n  stp.s_time_tracking      AS \"feature_time_tracking_state\",\n  stp.s_flat_rate_pricing  AS \"feature_flat_rate_pricing_state\",\n  CASE WHEN gap.rev IS NULL OR gap.rev <= 0 THEN NULL\n       WHEN gap.f0 IN ('accounting','ach_payments','cc_payments','checklists',\n            'consumer_financing','conquer','csr_ai','customer_intake_flow',\n            'employee_time_tracking','estimates','flat_rate_pricing','hcp_assist',\n            'hcp_cam','instapay','invoicing','job_cost','marketing_campaigns',\n            'online_booking','payroll','pipeline','price_book','profit_rhino',\n            'property_profile','quickbooks','recurring_job','reporting',\n            'review_requests','sales_proposal','scheduling','service_agreements',\n            'sms_number','vehicle_gps','voip','website')\n       THEN gap.f0 ELSE 'other' END AS \"recommended_focus\",\n  CASE WHEN gap.rev IS NULL THEN NULL WHEN gap.rev<=0 THEN 'none'\n       WHEN gap.rev<142 THEN 'low' WHEN gap.rev<578 THEN 'moderate'\n       WHEN gap.rev<1489 THEN 'high'\n       ELSE 'very_high' END AS \"recommended_focus_value_band\",\n  CASE WHEN gap.lift IS NULL THEN NULL WHEN gap.lift<=0 THEN 'none'\n       WHEN gap.lift<1.4 THEN 'low' WHEN gap.lift<8.1 THEN 'moderate'\n       WHEN gap.lift<36.9 THEN 'high'\n       ELSE 'very_high' END AS \"recommended_focus_retention_lift_band\",\n  topunused.fkey AS \"top_unused_paid_feature\",\n  CASE\n    WHEN LOWER(TRIM(oi.vt)) IN ('heating & air conditioning','hvac',\n         'heating and air conditioning','heating-and-air-conditioning',\n         'plumbing heating and air-conditioning','refrigeration') THEN 'hvac'\n    WHEN LOWER(TRIM(oi.vt)) IN ('plumbing') THEN 'plumbing'\n    WHEN LOWER(TRIM(oi.vt)) IN ('electrical','electric') THEN 'electrical'\n    WHEN LOWER(TRIM(oi.vt)) IN ('home cleaning','cleaning','janitorial',\n         'general cleaning','cleaning services','home-cleaning')\n         THEN 'cleaning'\n    WHEN LOWER(TRIM(oi.vt)) IN ('general contractor','general contractors',\n         'construction','remodel','construction/remodels',\n         'construction & remodeling','general contracting','remodeling',\n         'construction and contracting','construction-remodeling')\n         THEN 'general_contractor'\n    WHEN LOWER(TRIM(oi.vt)) IN ('landscaping & lawn','landscaping',\n         'landscape & lawn','lawncare') THEN 'landscaping_lawn'\n    WHEN LOWER(TRIM(oi.vt)) IN ('handyman') THEN 'handyman'\n    WHEN LOWER(TRIM(oi.vt)) IN ('automotive') THEN 'automotive'\n    WHEN LOWER(TRIM(oi.vt)) IN ('carpet cleaning') THEN 'carpet_cleaning'\n    WHEN LOWER(TRIM(oi.vt)) IN ('window & exterior cleaning')\n         THEN 'window_exterior_cleaning'\n    WHEN LOWER(TRIM(oi.vt)) IN ('painting') THEN 'painting'\n    WHEN LOWER(TRIM(oi.vt)) IN ('appliances','appliance services')\n         THEN 'appliances'\n    WHEN LOWER(TRIM(oi.vt)) IN ('roof & attic') THEN 'roofing'\n    WHEN LOWER(TRIM(oi.vt)) IN ('junk removal') THEN 'junk_removal'\n    WHEN LOWER(TRIM(oi.vt)) IN ('pest control') THEN 'pest_control'\n    WHEN oi.vt IS NULL OR TRIM(oi.vt) = '' THEN NULL\n    ELSE 'other' END AS \"vertical\",\n  CASE WHEN gap.pt IN ('basic','essentials','max','max+','max++')\n       THEN gap.pt ELSE NULL END AS \"plan_tier\",\n  CASE oi.ec WHEN 'Owner/Operator' THEN 'owner_operator'\n             WHEN '2-9 employees' THEN '2_9'\n             WHEN '10+ employees' THEN '10_plus'\n             ELSE NULL END AS \"org_size_band\",\n  CASE WHEN oi.tenure_mo IS NULL THEN NULL WHEN oi.tenure_mo<12 THEN 'under_1y'\n       WHEN oi.tenure_mo<24 THEN '1_2y' WHEN oi.tenure_mo<48 THEN '2_4y'\n       ELSE 'over_4y' END AS \"tenure_band\"\nFROM spine s\nLEFT JOIN acc       ON acc.org_uuid       = s.org_uuid\nLEFT JOIN cancels   ON cancels.org_uuid   = s.org_uuid\nLEFT JOIN featrow   ON featrow.org_uuid   = s.org_uuid\nLEFT JOIN stp       ON stp.org_uuid       = s.org_uuid\nLEFT JOIN gap       ON gap.org_uuid       = s.org_uuid\nLEFT JOIN topunused ON topunused.org_uuid = s.org_uuid\nLEFT JOIN ltv       ON ltv.org_uuid       = s.org_uuid\nLEFT JOIN inv       ON inv.org_uuid       = s.org_uuid\nLEFT JOIN oi        ON oi.org_uuid        = s.org_uuid`;\n\n// Audience query version: bumps only when the SQL template actually changes.\n// The template still holds placeholders at this point, so it carries no\n// per-request data and the hash is stable across different audiences -- no\n// need to strip the id lists back out, which the old version did with a\n// split() that would have mangled any '-1' occurring inside '-180'.\nlet h = 5381;\nfor (let i = 0; i < template.length; i++) h = ((h * 33) ^ template.charCodeAt(i)) >>> 0;\nconst state = $getWorkflowStaticData('global');\nif (state.sqlHash !== h) {\n  state.sqlHash = h;\n  state.sqlSeq = (state.sqlSeq ?? 0) + 1;\n}\n\n// split/join, never String.replace: replace() parses dollar-sequences in the\n// replacement as patterns, which would splice the query.\nlet sql = template.split('__AUDIENCE_QUERY_VERSION__').join('audience_v' + state.sqlSeq);\nfor (const [placeholder, value] of Object.entries(lists)) {\n  sql = sql.split(placeholder).join(value);\n}\n\nreturn [{ json: { sql } }];"
+      },
+      "id": "57a1e23d-e446-48d9-a16c-da3d4b9a7410",
+      "name": "Validate + Build SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3968,
+        1360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "id": "7fe7ba27-5354-43b6-aea0-cd5d01ec8f59",
+      "name": "Snowflake",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        4208,
+        1360
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Resolves the submitted ids to one admin pro per org. This exists ONLY to\n-- feed pro_uuid to the Iterable node -- the org-context query no longer waits\n-- on it, it resolves its own spine inline, so these two run in parallel.\n--\n-- Three UNION arms instead of one OR: the old form's OR spanned both sides of\n-- a LEFT JOIN, which defeats pruning and degenerates toward scanning\n-- dim_organization against dim_service_pro. Each arm now prunes on its own key.\nwith candidates as (\n  select o.org_uuid, o.organization_id\n    from analytics.main.dim_organization o\n   where o.org_uuid in ({{ $json.uuid_list }})\n  union\n  select o.org_uuid, o.organization_id\n    from analytics.main.dim_organization o\n   where o.organization_id in ({{ $json.int_list }})\n  union\n  select o.org_uuid, o.organization_id\n    from analytics.main.dim_organization o\n    join analytics.main.dim_service_pro p\n      on p.organization_id = o.organization_id\n   where p.pro_uuid in ({{ $json.pro_uuid_list }})\n)\nselect\n    t.org_uuid         as \"org_uuid\"\n  , t.organization_id  as \"org_id\"\n  , p.service_pro_id   as \"pro_id\"\n  , p.pro_uuid         as \"pro_uuid\"\nfrom candidates t\njoin analytics.main.dim_service_pro p\n  on p.organization_id = t.organization_id\nwhere p.is_admin = true\n  and p.archived = false\nqualify row_number() over (\n  partition by t.org_uuid\n  order by iff(p.founding_pro = 1, 0, 1), p.created_dt asc\n) = 1",
+        "options": {}
+      },
+      "id": "a5107a27-500f-47a5-8967-9ca1c3f13f42",
+      "name": "Router Query",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        3968,
+        1616
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "by": "userId",
+        "userId": "={{ $json.pro_uuid }}"
+      },
+      "type": "n8n-nodes-base.iterable",
+      "typeVersion": 1,
+      "position": [
+        4208,
+        1616
+      ],
+      "id": "54e3818f-713c-41ee-b152-ba118393eeb6",
+      "name": "Get a user",
+      "credentials": {
+        "iterableApi": {
+          "id": "lAFIVbrqEGAsmipE",
+          "name": "Iterable account 3"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const { dataFields, ...rest } = item.json;\n  return {\n    json: {\n      org_uuid: $('Router Query').item.json.org_uuid,\n      ...rest,       // userId, etc.\n      ...dataFields, // Iterable custom fields \u2014 Waypoint drops these anyway\n      // id echo LAST so Snowflake's value always wins: Waypoint re-keys the\n      // brief by pro_uuid, and Iterable's dataFields copy can be stale/absent\n      pro_uuid: $('Router Query').item.json.pro_uuid,\n    },\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4448,
+        1616
+      ],
+      "id": "037f4630-aa42-48bf-9c59-916e8d64d5c8",
+      "name": "Table Structure for Merge"
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4704,
+        1488
+      ],
+      "id": "21a0eacd-b6f6-441b-a21b-bb1215b871bd",
+      "name": "Merge",
+      "notes": "Append all existing Snowflake query outputs before the existing PII Supression node."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Denylist, not allowlist: strips known-PII keys anywhere in the merged\n// object (top level and nested, e.g. Iterable's user.dataFields), keeps\n// everything else untouched -- Snowflake bands, org_uuid, pro_uuid, and\n// any Iterable custom field not named below.\n// ponytail: denylist ceiling -- a new PII field on either side leaks\n// through silently until someone adds it here. Upgrade to the n8n.py-style\n// allowlist if that risk becomes real.\nconst PII_KEYS = new Set([\n  'email', 'emailaddress', 'phone', 'phonenumber', 'mobile_number', 'mobilenumber',\n  'first_name', 'firstname', 'last_name', 'lastname', 'name', 'fullname', 'full_name',\n  'address', 'street', 'city', 'state', 'zip', 'zipcode', 'postal_code',\n  'ip', 'ipaddress', 'ssn', 'dob', 'date_of_birth', 'birthdate',\n  'devices', 'useragent', 'lead_id',\n]);\n\nfunction stripPii(value) {\n  if (Array.isArray(value)) return value.map(stripPii);\n  if (value && typeof value === 'object') {\n    const out = {};\n    for (const [key, val] of Object.entries(value)) {\n      if (PII_KEYS.has(key.toLowerCase())) continue;\n      out[key] = stripPii(val);\n    }\n    return out;\n  }\n  return value;\n}\n\nreturn $input.all().map(item => ({ json: stripPii(item.json) }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4928,
+        1488
+      ],
+      "id": "cb8c382e-9238-4315-b0ee-2b0d3d11abac",
+      "name": "PII Supression"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "id": "581bde7d-74b2-4db5-9e94-c371f8064c67",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        5152,
+        1488
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router": {
+      "main": [
+        [
+          {
+            "node": "Validate + Build SQL",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Router Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate + Build SQL": {
+      "main": [
+        [
+          {
+            "node": "Snowflake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Snowflake": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router Query": {
+      "main": [
+        [
+          {
+            "node": "Get a user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a user": {
+      "main": [
+        [
+          {
+            "node": "Table Structure for Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Table Structure for Merge": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "PII Supression",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PII Supression": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {
+    "Webhook": [
+      {
+        "headers": {
+          "content-type": "application/json"
+        },
+        "params": {},
+        "query": {},
+        "body": {
+          "id": [
+            "64268dc9-5646-46ab-b9e0-854fdc62cca4"
+          ]
+        },
+        "webhookUrl": "https://queue-n8n.aux-dev.housecall-internal.com/webhook/pathfinder-org-context",
+        "executionMode": "production"
+      }
+    ]
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "550b64ee34a90b1bd7903ef3c81a5acf3a4b2f70ce4e4b050306ca06c7bfe882"
+  },
+  "name": "Waypoint Context - Snowflake v1"
+}
