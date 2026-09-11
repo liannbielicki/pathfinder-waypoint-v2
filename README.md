@@ -50,6 +50,28 @@ railway up
 Set every variable from `.env.example` (except `API_BASE_URL`) in Railway.
 Health check: `curl https://<railway-domain>/health` → `{"status": "ok"}`.
 
+## Local Context Layer Workbench
+
+The V3 branch includes a read-only local workbench at
+`/context-workbench`. Start the API from `services/api` with:
+
+```bash
+PYTHONPATH=src python scripts/run_workbench.py
+```
+
+Before starting it, create `services/api/.env` from the repository
+`.env.example` and set `CONTEXT_LAYER_BASE_URL`, `CONTEXT_LAYER_API_KEY`,
+`ANTHROPIC_API_KEY`, and optionally `WORKBENCH_MODEL`. The browser intentionally
+has no credential inputs; the local API reads these values only at run time.
+
+In another terminal, start the web app from `apps/web` with `pnpm dev`, then
+open `http://localhost:3000/context-workbench`. Fixture mode is safe for prompt
+iteration. Live mode requires an organization UUID, a Context Layer key, and an
+Anthropic key. Keys are request-scoped and are not persisted. The workbench
+never sends the raw Context Layer payload: the mandatory PII gate removes or
+blocks identity and unknown fields first, and the UI shows only the removal
+ledger and redacted context.
+
 **Vercel** (frontend, no secrets):
 
 ```bash
@@ -131,3 +153,21 @@ and the feasibility gate.
   this is expected, not a bug.
 
 The legacy repository and audit branch are reference-only. Do not copy their application structure into this repository.
+# Local Context Layer Workbench
+
+The V3 branch includes a read-only local workbench at `/context-workbench`.
+Start the API from `services/api` with:
+
+```bash
+PYTHONPATH=src python scripts/run_workbench.py
+```
+
+In another terminal, start the web app from `apps/web` with `pnpm dev`, then
+open `http://localhost:3000/context-workbench`. Fixture mode is safe for prompt
+iteration. Live mode requires an organization UUID, a Context Layer key, and an
+Anthropic key. Keys are request-scoped and are not persisted. The workbench
+never sends the raw Context Layer payload: the mandatory PII gate removes or
+blocks identity and unknown fields first, and the UI shows only the removal
+ledger and redacted context.
+
+---

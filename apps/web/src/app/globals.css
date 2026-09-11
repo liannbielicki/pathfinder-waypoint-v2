@@ -36,6 +36,17 @@ main {
   padding: 1.5rem 1rem 4rem;
 }
 
+.workbench { max-width: 78rem; }
+.workbench pre { overflow: auto; max-height: 24rem; padding: .75rem; background: color-mix(in srgb, var(--fg) 7%, var(--bg)); white-space: pre-wrap; }
+.workbench details summary { cursor: pointer; padding: .25rem 0; }
+.workbench .panel { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+.flow h2 { margin: 0; }
+.flow-list { list-style: none; display: flex; flex-wrap: wrap; gap: .75rem; padding: 0; margin: 1rem 0 0; }
+.flow-list li { display: flex; align-items: center; gap: .5rem; min-width: 10rem; position: relative; }
+.flow-list li:not(:last-child)::after { content: "→"; margin-left: auto; color: var(--accent); font-size: 1.25rem; }
+.flow-number { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; }
+.flow-list small { display: block; opacity: .72; }
+
 .panel {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -87,6 +98,26 @@ button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+.view-toggle { background: transparent; color: var(--accent); border: 1px solid var(--accent); margin: .5rem 0; }
+.human-view { overflow: auto; max-height: 36rem; }
+.human-view table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+.human-view th, .human-view td { border: 1px solid var(--border); padding: .4rem .55rem; text-align: left; vertical-align: top; }
+.human-view th { background: color-mix(in srgb, var(--fg) 7%, var(--bg)); white-space: nowrap; }
+.human-view table table { margin: .25rem 0; }
+.human-view ol { margin-block: .25rem; }
+.catalog-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+.catalog-actions { display: grid; grid-template-columns: minmax(10rem, 16rem); gap: .35rem; min-width: 14rem; }
+.catalog-actions button { width: 100%; }
+.catalog-header button + button { margin-left: .5rem; }
+.catalog-table { overflow: auto; max-height: 42rem; }
+.catalog-table table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+.catalog-table th, .catalog-table td { border: 1px solid var(--border); padding: .35rem; vertical-align: top; overflow-wrap: anywhere; }
+.catalog-table th { background: color-mix(in srgb, var(--fg) 7%, var(--bg)); }
+.catalog-table textarea { width: 100%; min-width: 0; margin: 0; min-height: 2.2rem; overflow: hidden; overflow-wrap: anywhere; resize: none; }
+.catalog-progress { margin-top: .6rem; }
+.catalog-progress label { display: block; font-size: .85rem; margin-bottom: .25rem; }
+.catalog-progress progress { display: block; width: min(32rem, 100%); height: 1rem; accent-color: var(--accent); }
+@media (max-width: 700px) { .catalog-header { display: block; } .catalog-actions { margin-top: 1rem; } }
 
 :focus-visible {
   outline: 3px solid var(--accent);
