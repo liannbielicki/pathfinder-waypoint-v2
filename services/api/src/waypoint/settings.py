@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # ceiling.
     MAX_LLM_IN_FLIGHT: int = Field(default=4, ge=1)
     KILL_SWITCH: bool = False
+    # Independent V3 learning-loop kill switch: stops checkpoint resolution
+    # and outcome-driven learning without stopping run processing.
+    LEARNING_KILL_SWITCH: bool = False
+    # Cadence and per-sweep bound for checkpoint resolution.
+    CHECKPOINT_SECONDS: float = Field(default=300.0, gt=0)
+    CHECKPOINT_LIMIT: int = Field(default=500, ge=1)
     # Feature-catalog CTA feasibility hints in idea context. Default OFF: today's
     # world is SMS-only and we do not yet trust channel<->works_on filtering.
     # Flip ON once multi-channel is live so ideas avoid web-only/broken links.
@@ -57,6 +63,33 @@ class Settings(BaseSettings):
     OUTCOMES_TOKEN: SecretStr | None = None
     SESSION_KEY: SecretStr = Field(min_length=32)
     LOG_LEVEL: str = "INFO"
+    # Direct outcome pollers (iterable_source.py / amplitude_source.py). A
+    # missing key disables that poller with one startup log line — the worker
+    # runs fine with zero keys configured.
+    ITERABLE_API_KEY: SecretStr | None = None
+    AMPLITUDE_API_KEY: SecretStr | None = None
+    AMPLITUDE_SECRET_KEY: SecretStr | None = None
+    # Comma-separated Amplitude event_type names that count as a return
+    # (first_return_at source) — matching ANY qualifies. HCP's Amplitude has
+    # no session_start; the taxonomy's active-use events are "Loaded a Screen"
+    # (mobile) and "Loaded a Page" (web). The canonical set is the data
+    # owner's call (TODOS.md "Canonical Amplitude active-use event contract").
+    AMPLITUDE_RETURN_EVENT: str = "Loaded a Screen,Loaded a Page"
+    # Cadence for both outcome pollers.
+    POLL_SECONDS: float = Field(default=300.0, gt=0)
+
+    @property
+    def amplitude_return_events(self) -> frozenset[str]:
+        return frozenset(
+            name.strip() for name in self.AMPLITUDE_RETURN_EVENT.split(",") if name.strip()
+        )
+
+    @field_validator("ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, value: object) -> object:
+        # Railway placeholder variables arrive as "" — that is "no key", and
+        # must disable the poller, not enable it with blank credentials.
+        return None if value == "" else value
 
     @classmethod
     def load(cls) -> Settings:

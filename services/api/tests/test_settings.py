@@ -32,17 +32,20 @@ def test_missing_required_runtime_values_fail_startup() -> None:
 
 def test_all_runtime_names_are_short_and_descriptive() -> None:
     names = set(Settings.model_fields)
-    # CTA_FEASIBILITY_HINTS (21 chars) is the longest name today.
-    assert all(len(name) < 22 for name in names)
+    # AMPLITUDE_RETURN_EVENT (22 chars) is the longest name today.
+    assert all(len(name) < 23 for name in names)
     assert names == {
         "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
         "N8N_TIMEOUT_SECONDS", "N8N_MAX_CONCURRENT",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",
         "BYPASS_TOKEN",
         "RUN_COST_USD", "DAY_COST_USD", "WORKER_COUNT", "MAX_LLM_IN_FLIGHT",
-        "KILL_SWITCH", "CTA_FEASIBILITY_HINTS", "MODEL_FAST", "MODEL_DEEP", "MODEL_RANKER", "APP_PASSWORD",
+        "KILL_SWITCH", "LEARNING_KILL_SWITCH", "CHECKPOINT_SECONDS", "CHECKPOINT_LIMIT",
+        "CTA_FEASIBILITY_HINTS", "MODEL_FAST", "MODEL_DEEP", "MODEL_RANKER", "APP_PASSWORD",
         "OUTCOMES_TOKEN",
         "SESSION_KEY", "LOG_LEVEL",
+        "ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY",
+        "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS",
     }
 
 
@@ -53,6 +56,20 @@ def test_max_llm_in_flight_is_optional_and_defaults_to_four() -> None:
 
 def test_model_ranker_defaults_to_empty_meaning_use_model_fast() -> None:
     assert Settings.model_fields["MODEL_RANKER"].default == ""
+
+
+def test_empty_poller_keys_mean_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Railway placeholder variables arrive as "" — the poller must stay
+    # disabled, not run with blank credentials.
+    for key, val in _MINIMAL_ENV.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setenv("ITERABLE_API_KEY", "")
+    monkeypatch.setenv("AMPLITUDE_API_KEY", "")
+    monkeypatch.setenv("AMPLITUDE_SECRET_KEY", "")
+    settings = Settings.load()
+    assert settings.ITERABLE_API_KEY is None
+    assert settings.AMPLITUDE_API_KEY is None
+    assert settings.AMPLITUDE_SECRET_KEY is None
 
 
 def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:

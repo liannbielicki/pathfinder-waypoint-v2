@@ -47,7 +47,9 @@ async def test_the_funnel_counts_every_stage(db_session: AsyncSession) -> None:
     # Only pro_0 earns a send event; pro_1 was handed off but QA dropped it.
     await ingest(db_session, [TouchOutcomeIn(
         run_id=run.id, pro_id="pro_0", source="iterable_n8n", routing="route-to-pro",
-        channel="sms", sent_at=datetime.now(UTC), returned_7d=True,
+        channel="sms", send_status="confirmed",
+        sent_at=datetime.now(UTC) - timedelta(days=4),
+        first_return_at=datetime.now(UTC) - timedelta(days=1),
     )])
 
     report = await summary(db_session, days=7)
@@ -70,7 +72,9 @@ async def test_a_guardrailed_send_is_not_counted_as_sent(db_session: AsyncSessio
     run = await _run_with_verdicts(db_session)
     await ingest(db_session, [TouchOutcomeIn(
         run_id=run.id, pro_id="pro_0", source="iterable_n8n", routing="guardrail",
-        channel="sms", sent_at=datetime.now(UTC), returned_7d=True,
+        channel="sms", send_status="confirmed",
+        sent_at=datetime.now(UTC) - timedelta(days=4),
+        first_return_at=datetime.now(UTC) - timedelta(days=1),
     )])
     row = next(r for r in (await summary(db_session, days=7))["runs"] if r["run_id"] == run.id)
     assert row["sent"] == 0
@@ -133,7 +137,9 @@ async def test_totals_survive_a_quiet_window_and_carry_the_horizons(
     run = await _run_with_verdicts(db_session)
     await ingest(db_session, [TouchOutcomeIn(
         run_id=run.id, pro_id="pro_0", source="iterable_n8n", routing="route-to-pro",
-        channel="sms", sent_at=datetime.now(UTC), returned_7d=True,
+        channel="sms", send_status="confirmed",
+        sent_at=datetime.now(UTC) - timedelta(days=4),
+        first_return_at=datetime.now(UTC) - timedelta(days=1),
     )])
     # `returned` is a dict, so an isinstance(int) sweep dropped it from totals —
     # the one number the funnel exists to produce.

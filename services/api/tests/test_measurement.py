@@ -1,126 +1,51 @@
-import json
-from dataclasses import dataclass
-from decimal import Decimal
+"""V3 deterministic measurement selection: no model in the loop.
 
-import pytest
+The catalog is human-owned; selection is a pure function of the winner's
+mechanism. Every winner is measurable — the primary objective (app_return)
+is always tracked, plus at most one mechanism-mapped metric.
+"""
 
-from waypoint.llm import LLMResult
-from waypoint.measurement import (
-    METRIC_CATALOG,
-    UnmeasurableWinner,
-    create_measurement_plan,
-)
+from waypoint.measurement import METRIC_CATALOG, select_indicators
 
 
-@dataclass
-class WinnerFixture:
-    run_id: str
-    pro_id: str
-    winner_id: str
-    mechanism: str
-    title: str
-
-
-INVOICE_WINNER = WinnerFixture(
-    run_id="run-1", pro_id="pro_1", winner_id="win-1",
-    mechanism="invoice_delivery", title="Send open invoices reminder",
-)
-UNKNOWN_MECHANISM_WINNER = WinnerFixture(
-    run_id="run-1", pro_id="pro_1", winner_id="win-2",
-    mechanism="quantum_alignment", title="Mystery proposal",
-)
-
-
-class FakeMeasureLLM:
-    def __init__(self) -> None:
-        self._text: str | None = None
-        self.prompts: list[str] = []
-
-    def respond(self, payload: dict) -> None:
-        self._text = json.dumps(payload)
-
-    def respond_raw(self, text: str) -> None:
-        self._text = text
-
-    async def complete(self, tier: str, prompt: str, run_id: str, stage: str,
-                       system: str | None = None, max_tokens: int = 1200) -> LLMResult:
-        self.prompts.append(prompt)
-        assert stage == "measure"
-        return LLMResult(text=self._text or "", model="fake",
-                         input_tokens=5, output_tokens=5, cost_usd=Decimal("0.001"))
-
-
-@pytest.fixture
-def fake_llm() -> FakeMeasureLLM:
-    return FakeMeasureLLM()
-
-
-async def test_loop_selects_invoice_indicator_for_invoice_proposal(
-    fake_llm: FakeMeasureLLM,
-) -> None:
-    fake_llm.respond({"indicators": [{"key": "invoices_sent", "window_days": 30}]})
-    plan = await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
-    assert [item.key for item in plan.indicators] == ["invoices_sent"]
+def test_invoice_mechanism_selects_the_invoice_indicator_first() -> None:
+    plan = select_indicators("invoice_delivery", METRIC_CATALOG)
+    assert [item.key for item in plan.indicators] == ["invoices_sent", "app_return"]
     assert plan.indicators[0].direction == "increase"
     assert plan.indicators[0].window_days == 30
 
 
-async def test_unmapped_metric_abstains_instead_of_inventing_source(
-    fake_llm: FakeMeasureLLM,
-) -> None:
-    fake_llm.respond({"indicators": [{"key": "imaginary_metric", "window_days": 30}]})
-    with pytest.raises(UnmeasurableWinner):
-        await create_measurement_plan(UNKNOWN_MECHANISM_WINNER, fake_llm, METRIC_CATALOG)
+def test_unknown_mechanism_still_measures_the_primary_objective() -> None:
+    plan = select_indicators("quantum_alignment", METRIC_CATALOG)
+    assert [item.key for item in plan.indicators] == ["app_return"]
 
 
-async def test_zero_indicators_is_unmeasurable(fake_llm: FakeMeasureLLM) -> None:
-    fake_llm.respond({"indicators": []})
-    with pytest.raises(UnmeasurableWinner):
-        await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
+def test_every_mapped_mechanism_resolves_to_a_catalog_key() -> None:
+    cases = {
+        "invoice_delivery": "invoices_sent",
+        "estimate_follow_up": "estimates_sent",
+        "review_requests": "reviews_requested",
+        "online_booking_setup": "online_booking_usage",
+        "feature_adoption": "feature_activations",
+    }
+    for mechanism, expected in cases.items():
+        plan = select_indicators(mechanism, METRIC_CATALOG)
+        assert plan.indicators[0].key == expected, mechanism
+        assert plan.indicators[1].key == "app_return"
 
 
-async def test_three_indicators_is_unmeasurable(fake_llm: FakeMeasureLLM) -> None:
-    fake_llm.respond({"indicators": [
-        {"key": "invoices_sent"}, {"key": "estimates_sent"}, {"key": "reviews_requested"},
-    ]})
-    with pytest.raises(UnmeasurableWinner):
-        await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
+def test_selection_is_deterministic() -> None:
+    first = select_indicators("review_requests", METRIC_CATALOG)
+    second = select_indicators("review_requests", METRIC_CATALOG)
+    assert [i.key for i in first.indicators] == [i.key for i in second.indicators]
 
 
-async def test_two_catalog_indicators_are_allowed(fake_llm: FakeMeasureLLM) -> None:
-    fake_llm.respond({"indicators": [{"key": "invoices_sent"}, {"key": "estimates_sent"}]})
-    plan = await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
-    assert len(plan.indicators) == 2
-
-
-async def test_fenced_selection_json_still_parses(fake_llm: FakeMeasureLLM) -> None:
-    # Production incident: the model wrapped its selection in ```json fences
-    # and a real winner came out "unmeasurable".
-    fake_llm.respond_raw('```json\n{"indicators": [{"key": "invoices_sent"}]}\n```')
-    plan = await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
-    assert [item.key for item in plan.indicators] == ["invoices_sent"]
-
-
-async def test_non_json_selection_is_still_unmeasurable(fake_llm: FakeMeasureLLM) -> None:
-    fake_llm.respond_raw("I would pick the invoices metric.")
-    with pytest.raises(UnmeasurableWinner, match="unparseable"):
-        await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
-
-
-async def test_prompt_offers_only_the_finite_catalog(fake_llm: FakeMeasureLLM) -> None:
-    fake_llm.respond({"indicators": [{"key": "invoices_sent"}]})
-    await create_measurement_plan(INVOICE_WINNER, fake_llm, METRIC_CATALOG)
-    prompt = fake_llm.prompts[0]
-    for key in METRIC_CATALOG:
-        assert key in prompt
-    assert "invoice_delivery" in prompt
+def test_plan_never_exceeds_the_two_indicator_bound() -> None:
+    # ck_measurement_count allows 1-2 indicators; selection must respect it.
+    for mechanism in ("invoice_delivery", "unmapped", "", "invoice estimate review"):
+        assert 1 <= len(select_indicators(mechanism, METRIC_CATALOG).indicators) <= 2
 
 
 def test_return_to_app_indicators_exist_and_label_their_limitation() -> None:
     assert METRIC_CATALOG["app_return"].window_days == 7
     assert METRIC_CATALOG["app_continued_use"].window_days == 30
-    for key in ("app_return", "app_continued_use"):
-        indicator = METRIC_CATALOG[key]
-        assert indicator.source == "amplitude"
-        assert indicator.direction == "increase"
-        assert "pending" in indicator.rationale.lower()

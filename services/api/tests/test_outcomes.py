@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from waypoint.models import TouchOutcomeIn
 from waypoint.outcomes import ingest
 from waypoint.tables import CandidateRow, RunRow, TouchOutcomeRow, WinnerRow
+
+# V3: a 7d positive is DERIVED from a confirmed send plus a real return
+# event; callers cannot assert horizons (returned_* was dropped at the wire).
+SENT = datetime(2026, 8, 1, 12, tzinfo=UTC)
+RETURNED_WITHIN_7D = {
+    "send_status": "confirmed", "sent_at": SENT,
+    "first_return_at": SENT + timedelta(days=3),
+}
 
 
 async def _ingest_with_new_session(
@@ -73,7 +82,7 @@ async def test_run_id_and_pro_id_resolve_to_the_winner_without_a_waypoint_id(
 
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       channel="sms", routing="route-to-pro", returned_7d=True),
+                       channel="sms", routing="route-to-pro", **RETURNED_WITHIN_7D),
     ])
     assert result == {"stored": 1, "unattributed": 0}
 
@@ -95,7 +104,7 @@ async def test_a_guardrailed_send_never_becomes_evidence_or_a_warm_start(
 
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       channel="sms", routing="guardrail", returned_7d=True),
+                       channel="sms", routing="guardrail", **RETURNED_WITHIN_7D),
     ])
     assert result == {"stored": 1, "unattributed": 1}
 
@@ -116,7 +125,7 @@ async def test_unknown_routing_is_disqualified_too(db_session_factory) -> None:
 
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       returned_7d=True),
+                       **RETURNED_WITHIN_7D),
     ])
     assert result == {"stored": 1, "unattributed": 1}
     async with db_session_factory() as session:
@@ -169,7 +178,7 @@ async def test_a_later_guardrail_submission_cannot_launder_a_clean_row(
     ])
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="guardrail", returned_7d=True),
+                       routing="guardrail", **RETURNED_WITHIN_7D),
     ])
     assert result == {"stored": 1, "unattributed": 1}
 
@@ -189,7 +198,7 @@ async def test_a_later_real_send_cannot_promote_a_guardrailed_return(
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="guardrail", returned_7d=True),
+                       routing="guardrail", **RETURNED_WITHIN_7D),
     ])
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
@@ -210,7 +219,7 @@ async def test_mixed_routing_within_one_batch_fails_closed(db_session_factory) -
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
                        routing="route-to-pro", delivered=True),
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="guardrail", returned_7d=True),
+                       routing="guardrail", **RETURNED_WITHIN_7D),
     ])
     assert result["unattributed"] == 1
     async with db_session_factory() as session:
@@ -227,11 +236,12 @@ async def test_the_horizon_sweep_does_not_demote_a_proven_real_send(
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="route-to-pro", channel="sms", delivered=True),
+                       routing="route-to-pro", channel="sms", delivered=True,
+                       send_status="confirmed", sent_at=SENT),
     ])
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       returned_7d=True),  # no routing claim
+                       first_return_at=SENT + timedelta(days=3)),  # no routing claim
     ])
     assert result == {"stored": 1, "unattributed": 0}
 
@@ -252,7 +262,7 @@ async def test_a_late_winner_still_re_attributes_on_the_id_path(
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(recommendation_id="not-yet", source="iterable_n8n",
-                       routing="route-to-pro", returned_7d=True),
+                       routing="route-to-pro", **RETURNED_WITHIN_7D),
     ])
     async with db_session_factory() as session:
         row = (await session.execute(select(TouchOutcomeRow))).scalar_one()
@@ -260,7 +270,7 @@ async def test_a_late_winner_still_re_attributes_on_the_id_path(
 
     result = await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(recommendation_id=winner.id, source="iterable_n8n",
-                       routing="route-to-pro", returned_7d=True),
+                       routing="route-to-pro", **RETURNED_WITHIN_7D),
     ])
     assert result == {"stored": 1, "unattributed": 0}
 
@@ -328,7 +338,7 @@ async def test_a_later_disqualification_revokes_an_earlier_warm_start(
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="route-to-pro", returned_7d=True),
+                       routing="route-to-pro", **RETURNED_WITHIN_7D),
     ])
     async with db_session_factory() as session:
         assert (await session.get(WinnerRow, winner.id)).warm_start_eligible is True
@@ -353,7 +363,7 @@ async def test_revocation_also_happens_within_one_batch(db_session_factory) -> N
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
-                       routing="route-to-pro", returned_7d=True),
+                       routing="route-to-pro", **RETURNED_WITHIN_7D),
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="iterable_n8n",
                        routing="guardrail", delivered=True),
     ])
@@ -371,9 +381,9 @@ async def test_a_second_clean_source_still_holds_eligibility_up(
 
     await _ingest_with_new_session(db_session_factory, [
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="src_clean",
-                       routing="route-to-pro", returned_7d=True),
+                       routing="route-to-pro", **RETURNED_WITHIN_7D),
         TouchOutcomeIn(run_id=run.id, pro_id="pro_1", source="src_dirty",
-                       routing="guardrail", returned_7d=True),
+                       routing="guardrail", **RETURNED_WITHIN_7D),
     ])
     async with db_session_factory() as session:
         still = await session.get(WinnerRow, winner.id)
