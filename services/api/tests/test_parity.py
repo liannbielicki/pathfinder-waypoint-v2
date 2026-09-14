@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.handoff import LCMClient, ready_rows
-from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
+from waypoint.measurement import METRIC_CATALOG, select_indicators
 from waypoint.models import MeasurementPlan
 from waypoint.pipeline import run_job
 from waypoint.queue import enqueue
@@ -53,9 +53,8 @@ class ProductionStack:
 
     async def run(self, pro_id: str) -> ParityResult:
         deps = FakeDeps(self.session)
-        deps.create_plan = create_measurement_plan
+        deps.create_plan = select_indicators
         deps.metric_catalog = METRIC_CATALOG
-        deps.gateway.responses["measure"] = json.dumps({"indicators": [{"key": "invoices_sent"}]})
         run = RunRow(
             pro_ids=[pro_id],
             audience_query="audience_v7",

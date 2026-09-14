@@ -11,13 +11,22 @@ SQL GROUP BY if touch_outcomes outgrows the LIMIT.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.tables import TouchOutcomeRow
 
-_HORIZONS = ("7d", "14d", "30d", "90d")
+# Suppression is steering, not a life sentence: only failures inside this
+# window gate new candidates for a pro.
+FAILED_MECHANISM_WINDOW_DAYS = 90
+
+# V3 checkpoints: Day 1 and Day 7 drive learning; Day 30 is diagnostic only
+# (reported, never used to suppress or promote).
+_LEARNING_HORIZONS = ("1d", "7d")
+_DIAGNOSTIC_HORIZONS = ("30d",)
+_HORIZONS = _LEARNING_HORIZONS + _DIAGNOSTIC_HORIZONS
 
 # Journey windows that are ONE evidence corpus: they optimize for the same
 # thing, so a touch that worked in one is real evidence for the other. Reads are
@@ -41,6 +50,9 @@ class PatternEvidence:
     sent: int
     returned: dict[str, tuple[int, int]]  # horizon -> (returned_true, measured)
     unsubscribed: int
+    item_id: str | None = None
+    item_version: str | None = None
+    arm_counts: dict[str, int] | None = None
 
 
 async def pattern_summaries(
@@ -60,21 +72,38 @@ async def pattern_summaries(
     ).scalars().all()
     grouped: dict[tuple[str, str], list[TouchOutcomeRow]] = {}
     for row in rows:
-        grouped.setdefault((row.channel, row.mechanism), []).append(row)
+        # V3 learns at canonical (item, version) level — a drifted concept is
+        # not pooled with its predecessor; legacy rows fall back to mechanism.
+        item_key = f"{row.item_id}:{row.item_version}" if row.item_id else row.mechanism
+        grouped.setdefault((row.channel, item_key), []).append(row)
     patterns = []
-    for (channel, mechanism), group in sorted(grouped.items()):
+    for (channel, _item_key), group in sorted(grouped.items()):
+        # Control (arm B) rows exist for the causal comparison, not the
+        # treatment rate — pooling them would dilute every return rate.
+        treated = [r for r in group if r.arm != "B"]
+        if not treated:
+            continue  # a pure control group is a comparison, not a pattern
         returned: dict[str, tuple[int, int]] = {}
         for horizon in _HORIZONS:
-            values = [getattr(r, f"returned_{horizon}") for r in group]
+            values = [getattr(r, f"returned_{horizon}") for r in treated]
             measured = [v for v in values if v is not None]
             returned[horizon] = (sum(1 for v in measured if v), len(measured))
         patterns.append(
             PatternEvidence(
                 channel=channel,
-                mechanism=mechanism,
-                sent=len(group),
+                # Labels come from treated rows: group[0] is the NEWEST row,
+                # often a sweep-synthesized control carrying mechanism="".
+                mechanism=next((r.mechanism for r in treated if r.mechanism), ""),
+                sent=len(treated),
                 returned=returned,
-                unsubscribed=sum(1 for r in group if r.unsubscribed),
+                unsubscribed=sum(1 for r in treated if r.unsubscribed),
+                item_id=treated[0].item_id,
+                item_version=treated[0].item_version,
+                arm_counts={
+                    arm: sum(1 for r in group if r.arm == arm)
+                    for arm in ("A", "B")
+                    if any(r.arm == arm for r in group)
+                } or None,
             )
         )
     return patterns
@@ -82,10 +111,15 @@ async def pattern_summaries(
 
 async def failed_mechanisms(session: AsyncSession, pro_id: str) -> list[str]:
     """Mechanisms that recently failed FOR THIS PRO: an unsubscribe, or a
-    measured 30-day no-return. Spec gate: a new candidate must be materially
+    measured 7-day no-return. Spec gate: a new candidate must be materially
     different from recent failed touches — same mechanism is not different.
-    Reduced in SQL (DISTINCT + the failure predicate) instead of loading
-    every full row into Python just to throw most of it away."""
+    V3: the failure signal is the Day-7 learning checkpoint (the obsolete
+    30-day suppression is gone; Day 30 is diagnostic only). Control (arm B)
+    rows never count — an untouched control must not veto the mechanism it
+    benchmarks — and only the recent window suppresses, so a Day-7 miss is a
+    steering signal, not a permanent ban. Reduced in SQL (DISTINCT + the
+    failure predicate) instead of loading every full row into Python."""
+    cutoff = datetime.now(UTC) - timedelta(days=FAILED_MECHANISM_WINDOW_DAYS)
     rows = (
         await session.execute(
             select(TouchOutcomeRow.mechanism)
@@ -94,7 +128,9 @@ async def failed_mechanisms(session: AsyncSession, pro_id: str) -> list[str]:
                 TouchOutcomeRow.pro_id == pro_id,
                 TouchOutcomeRow.evidence_limitation.is_(None),
                 TouchOutcomeRow.mechanism != "",
-                (TouchOutcomeRow.unsubscribed.is_(True)) | (TouchOutcomeRow.returned_30d.is_(False)),
+                (TouchOutcomeRow.arm.is_(None)) | (TouchOutcomeRow.arm != "B"),
+                TouchOutcomeRow.created_at >= cutoff,
+                (TouchOutcomeRow.unsubscribed.is_(True)) | (TouchOutcomeRow.returned_7d.is_(False)),
             )
         )
     ).scalars().all()
@@ -112,11 +148,17 @@ def evidence_block(patterns: list[PatternEvidence]) -> str:
     lines = []
     for p in patterns:
         horizons = ", ".join(
-            f"{h} return {t}/{m}" for h, (t, m) in p.returned.items() if m > 0
+            f"{h} return {t}/{m}" + (" (diagnostic)" if h in _DIAGNOSTIC_HORIZONS else "")
+            for h, (t, m) in p.returned.items()
+            if m > 0
         ) or "no return horizons measured yet"
+        # Only a MEASURED unsubscribe count may render: not every live source
+        # writes the flag, and printing "0 unsubscribed" would assert an
+        # observation nothing made (label the limitation, never pretend) —
+        # same rule as the m > 0 horizon filter above.
         lines.append(
-            f"- {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}, "
-            f"{p.unsubscribed} unsubscribed"
+            f"- {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}"
+            + (f", {p.unsubscribed} unsubscribed" if p.unsubscribed else "")
         )
     return "Observed outcomes for similar pros (returns to the app are the goal):\n" + "\n".join(
         lines
