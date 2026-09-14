@@ -34,6 +34,8 @@ A feature gets a row when all of these hold:
 2. A Pro can adopt or activate it because of an outreach message.
 3. It is not already covered by an existing row. Sub-features go in `aliases`.
 
+Core objects every Pro touches (`jobs`, `customers`, `employees`) are included because the brief carries activity bands for them and the authoring lab needs a key to map those variables to.
+
 Nothing here about permissions toggles (`rbac_*`), nav promotions (`promote_*`), internal tooling, or deprecated keys.
 
 ## Adding a row
@@ -45,7 +47,7 @@ Nothing here about permissions toggles (`rbac_*`), nav promotions (`promote_*`),
 
 ## Known gaps
 
-- **No QA'd links for the five newest features.** `price_book`, `csr_phone`, `estimates`, `marketing_health_score`, and `job_costing` ship as `no_cta`. Someone with a Pro login should add a URL row for each, following the `online_booking` pattern of a primary row plus confirmed replacement.
+- **No QA'd links for the eight newest features.** `price_book`, `csr_phone`, `estimates`, `marketing_health_score`, `job_costing`, `jobs`, `customers`, and `employees` ship as `no_cta`. Someone with a Pro login should add a URL row for each, following the `online_booking` pattern of a primary row plus confirmed replacement.
 - **`why_it_matters` is blank for `invoicing`, `payment_processing`, and `instapay`.** The OCL sheet has no value statement for them. The `online_payments` entry describes a navigation toggle, not a benefit.
 - **`hcp_assist` was previously described as an AI drafting tool.** It is the 24/7 human call-answering service. CSR AI is `csr_phone`. If `feature_hcp_assist_state` in Snowflake actually tracks CSR AI, move the brief field name from `hcp_assist` aliases to `csr_phone` aliases.
 - **n8n display names are unverified.** Aliases come from the brief fields, OCL slugs, and sheet display names. If the live n8n flow emits a different string for a feature, add it to `aliases`.
