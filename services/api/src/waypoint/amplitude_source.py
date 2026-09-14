@@ -242,16 +242,21 @@ async def poll(
             continue
         if calls >= CALL_BUDGET:
             break
-        assert all(e.sent_at is not None for e in exposures)
-        oldest_needed = min(e.sent_at for e in exposures)  # type: ignore[type-var]
+        # _due_exposures filters sent_at IS NOT NULL in SQL, so every row here
+        # has one. Bind it to a local: the type narrows once, where an assert
+        # could not carry the fact into the comparisons below.
+        dated = [(e, e.sent_at) for e in exposures if e.sent_at is not None]
+        if not dated:
+            continue
+        oldest_needed = min(sent_at for _, sent_at in dated)
         returns, spent, covered = await _return_times(
             client, amplitude_id, oldest_needed, settings.amplitude_return_events
         )
         calls += spent
         outcomes = []
-        for exposure in exposures:
+        for exposure, sent_at in dated:
             first = next(
-                (m for m in returns if exposure.sent_at <= m <= exposure.sent_at + WINDOW),
+                (m for m in returns if sent_at <= m <= sent_at + WINDOW),
                 None,
             )
             if first is not None:
