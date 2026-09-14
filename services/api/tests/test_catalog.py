@@ -67,3 +67,68 @@ def test_feasibility_suffix_omits_sentinel_works_on():
     assert "payment_processing" in on
     payment_line = next(line for line in on.splitlines() if line.startswith("- payment_processing"))
     assert "reachable on" not in payment_line
+
+
+# --- catalog v2 shape guards -------------------------------------------------
+import csv
+
+from waypoint.catalog import CATALOG_PATH
+
+NEW_COLUMNS = ["display_name", "aliases", "why_it_matters", "related_features", "plans"]
+
+
+def _rows() -> list[dict[str, str]]:
+    with CATALOG_PATH.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _first_rows() -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for row in _rows():
+        out.setdefault(row["feature"], row)
+    return out
+
+
+def test_catalog_has_new_columns_in_order():
+    with CATALOG_PATH.open(newline="", encoding="utf-8") as handle:
+        header = next(csv.reader(handle))
+    assert header == ["feature", "description", "cta_id", "label", "url", "works_on", "notes", *NEW_COLUMNS]
+
+
+def test_every_brief_feature_state_resolves():
+    keys = {
+        name[len("feature_") : -len("_state")]
+        for name in OrgBrief.model_fields
+        if name.startswith("feature_") and name.endswith("_state")
+    } | {"wisetack"}
+    missing = keys - set(CATALOG)
+    assert not missing, f"brief features absent from catalog: {sorted(missing)}"
+
+
+def test_related_features_are_closed_set():
+    keys = set(_first_rows())
+    for feature, row in _first_rows().items():
+        related = [r for r in row["related_features"].split(";") if r]
+        assert len(related) <= 3, feature
+        assert set(related) <= keys, f"{feature}: {set(related) - keys}"
+        assert feature not in related, feature
+
+
+def test_aliases_do_not_collide_with_keys():
+    first = _first_rows()
+    keys = set(first)
+    seen: dict[str, str] = {}
+    for feature, row in first.items():
+        for alias in filter(None, row["aliases"].split(";")):
+            assert alias not in keys, f"{feature}: alias {alias} is also a primary key"
+            assert alias not in seen, f"alias {alias} on both {seen[alias]} and {feature}"
+            seen[alias] = feature
+
+
+def test_no_non_feature_rows_and_no_em_dashes():
+    first = _first_rows()
+    assert "top_unused_paid_feature" not in first
+    assert "generic_fallback" not in first
+    for row in _rows():
+        for column in ("description", "why_it_matters", "display_name"):
+            assert "—" not in row[column], f"em dash in {row['feature']}.{column}"
