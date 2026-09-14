@@ -1,0 +1,280 @@
+{
+  "name": "Pathfinder Daily Audience - DNC Filtered",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Denver",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [-880, 0],
+      "id": "daily-audience-schedule",
+      "name": "10:00 AM Daily"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "/* REPLACE THIS QUERY WITH YOUR AUDIENCE SQL. It must return one row per candidate with these columns: group_name, pro_uuid, selection_rank. The query should return only pro_ UUIDs, but the normalization node still validates them. */\nSELECT\n  group_name,\n  pro_uuid,\n  selection_rank\nFROM REPLACE_WITH_YOUR_AUDIENCE_QUERY\nWHERE 1 = 0"
+      },
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [-640, 0],
+      "id": "daily-audience-snowflake",
+      "name": "Snowflake - Build Audience",
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const seen = new Set();\nconst rows = [];\n\nfor (const item of $input.all()) {\n  const row = item.json || {};\n  const group = String(row.group_name || '').trim();\n  const rawUuid = String(row.pro_uuid || '').trim().toLowerCase();\n  const rank = Number(row.selection_rank);\n\n  if (!group) continue;\n  if (!/^pro_[0-9a-f]{32}$/.test(rawUuid)) continue;\n  if (seen.has(`${group}:${rawUuid}`)) continue;\n\n  seen.add(`${group}:${rawUuid}`);\n  rows.push({\n    group_name: group,\n    pro_uuid: rawUuid,\n    selection_rank: Number.isFinite(rank) ? rank : 999999999,\n  });\n}\n\nrows.sort((a, b) => a.group_name.localeCompare(b.group_name) || a.selection_rank - b.selection_rank || a.pro_uuid.localeCompare(b.pro_uuid));\nreturn rows.map(row => ({ json: row }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 0],
+      "id": "normalize-dedupe-audience",
+      "name": "Normalize + Deduplicate"
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_GOOGLE_SPREADSHEET_ID"
+        },
+        "sheetName": "History",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [-160, 0],
+      "id": "read-audience-history",
+      "name": "Google Sheets - Read History",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "zpYqTyJ8KrrVjwcT",
+          "name": "AIA - AI Analysts Sheets OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const historical = new Set();\nfor (const item of $input.all()) {\n  const value = String(item.json?.pro_uuid || '').trim().toLowerCase();\n  if (/^pro_[0-9a-f]{32}$/.test(value)) historical.add(value);\n}\n\nconst current = $('Normalize + Deduplicate').all().map(item => item.json);\nconst fresh = current.filter(row => !historical.has(row.pro_uuid));\n\nreturn fresh.map(row => ({\n  json: {\n    ...row,\n    historical_duplicate: false,\n  },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, -160],
+      "id": "exclude-historical-audience",
+      "name": "Exclude Historical Pro UUIDs"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "by": "userId",
+        "userId": "={{ $json.pro_uuid }}"
+      },
+      "type": "n8n-nodes-base.iterable",
+      "typeVersion": 1,
+      "position": [320, -160],
+      "id": "iterable-dnc-lookup",
+      "name": "Iterable - Check DNC",
+      "credentials": {
+        "iterableApi": {
+          "id": "lAFIVbrqEGAsmipE",
+          "name": "Iterable account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep the Snowflake identity alongside each Iterable response.\n// Confirm these field names against one real Iterable response before activating.\nconst responses = $input.all();\nconst candidates = $('Exclude Historical Pro UUIDs').all();\n\nreturn responses.map((item, index) => {\n  const response = item.json || {};\n  const source = candidates[index]?.json || {};\n  const data = response.dataFields && typeof response.dataFields === 'object' ? response.dataFields : {};\n  const values = [\n    response.emailSendDnc,\n    response.emailListUnsubscribed,\n    response.emailListUnsubscribe,\n    response.smsSendDnc,\n    data.emailSendDnc,\n    data.emailListUnsubscribed,\n    data.emailListUnsubscribe,\n    data.smsSendDnc,\n  ];\n\n  const normalized = values\n    .filter(value => value !== undefined && value !== null)\n    .map(value => typeof value === 'string' ? value.toLowerCase() === 'true' : Boolean(value));\n  const hasKnownDncValue = normalized.length > 0;\n  const isDnc = normalized.some(Boolean);\n\n  return {\n    json: {\n      ...source,\n      iterable_user_found: Object.keys(response).length > 0,\n      dnc_status_known: hasKnownDncValue,\n      is_dnc: isDnc,\n      dnc_exclusion_reason: isDnc ? 'iterable_dnc' : (!hasKnownDncValue ? 'dnc_status_unknown' : null),\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [320, 0],
+      "id": "interpret-dnc-status",
+      "name": "Interpret DNC Status"
+    },
+    {
+      "parameters": {
+        "jsCode": "const perGroup = new Map();\nconst excluded = [];\nconst selected = [];\n\nfor (const item of $input.all()) {\n  const row = item.json;\n  const group = row.group_name;\n  if (!perGroup.has(group)) perGroup.set(group, { candidates: 0, selected: 0, dnc: 0, unknown: 0 });\n  const stats = perGroup.get(group);\n  stats.candidates++;\n\n  if (row.is_dnc === true) {\n    stats.dnc++;\n    excluded.push(row);\n    continue;\n  }\n  if (row.dnc_status_known !== true) {\n    stats.unknown++;\n    excluded.push(row);\n    continue;\n  }\n  if (stats.selected >= 60) continue;\n\n  stats.selected++;\n  selected.push({\n    ...row,\n    run_date: new Date().toISOString().slice(0, 10),\n  });\n}\n\nconst runDate = new Date().toISOString().slice(0, 10);\nconst groups = [...perGroup.entries()].map(([group_name, stats]) => ({ group_name, ...stats }));\nconst lines = [`Pathfinder audience run: ${runDate}`, ''];\nfor (const group of groups) {\n  lines.push(`${group.group_name}: ${group.selected} selected | ${group.dnc} DNC | ${group.unknown} unknown/excluded`);\n  for (const row of selected.filter(item => item.group_name === group.group_name)) lines.push(`- ${row.pro_uuid}`);\n  lines.push('');\n}\nlines.push('Unknown DNC status is excluded fail-closed.');\n\nreturn [{\n  json: {\n    run_date: runDate,\n    sheet_name: `audience_${runDate}`,\n    selected_rows: selected,\n    excluded_rows: excluded,\n    group_stats: groups,\n    slack_text: lines.join('\\n'),\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 0],
+      "id": "select-audience-groups",
+      "name": "Select 60 Per Group"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channelId": "REPLACE_WITH_SLACK_CHANNEL_ID",
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [800, -160],
+      "id": "send-audience-slack",
+      "name": "Slack - Send Audience"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_GOOGLE_SPREADSHEET_ID"
+        },
+        "title": "={{ $json.sheet_name }}"
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [800, 80],
+      "id": "create-daily-audience-tab",
+      "name": "Google Sheets - Create Daily Tab",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "zpYqTyJ8KrrVjwcT",
+          "name": "AIA - AI Analysts Sheets OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const run = $('Select 60 Per Group').first().json;\nreturn run.selected_rows.map(row => ({\n  json: {\n    run_date: run.run_date,\n    group_name: row.group_name,\n    pro_uuid: row.pro_uuid,\n    selection_rank: row.selection_rank,\n    dnc_status_known: row.dnc_status_known,\n    is_dnc: row.is_dnc,\n  },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 80],
+      "id": "expand-sheet-rows",
+      "name": "Prepare Sheet Rows"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_GOOGLE_SPREADSHEET_ID"
+        },
+        "sheetName": "={{ $('Select 60 Per Group').first().json.sheet_name }}",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "useAppend": true
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1280, 80],
+      "id": "append-daily-audience-rows",
+      "name": "Google Sheets - Record Audience",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "zpYqTyJ8KrrVjwcT",
+          "name": "AIA - AI Analysts Sheets OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_GOOGLE_SPREADSHEET_ID"
+        },
+        "sheetName": "History",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "useAppend": true
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1280, 240],
+      "id": "append-audience-history",
+      "name": "Google Sheets - Append History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "zpYqTyJ8KrrVjwcT",
+          "name": "AIA - AI Analysts Sheets OAuth"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "10:00 AM Daily": {
+      "main": [[{"node": "Snowflake - Build Audience", "type": "main", "index": 0}]]
+    },
+    "Snowflake - Build Audience": {
+      "main": [[{"node": "Normalize + Deduplicate", "type": "main", "index": 0}]]
+    },
+    "Normalize + Deduplicate": {
+      "main": [[{"node": "Google Sheets - Read History", "type": "main", "index": 0}]]
+    },
+    "Google Sheets - Read History": {
+      "main": [[{"node": "Exclude Historical Pro UUIDs", "type": "main", "index": 0}]]
+    },
+    "Exclude Historical Pro UUIDs": {
+      "main": [[{"node": "Iterable - Check DNC", "type": "main", "index": 0}]]
+    },
+    "Iterable - Check DNC": {
+      "main": [[{"node": "Interpret DNC Status", "type": "main", "index": 0}]]
+    },
+    "Interpret DNC Status": {
+      "main": [[{"node": "Select 60 Per Group", "type": "main", "index": 0}]]
+    },
+    "Select 60 Per Group": {
+      "main": [
+        [
+          {"node": "Slack - Send Audience", "type": "main", "index": 0},
+          {"node": "Google Sheets - Create Daily Tab", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "Google Sheets - Create Daily Tab": {
+      "main": [[{"node": "Prepare Sheet Rows", "type": "main", "index": 0}]]
+    },
+    "Prepare Sheet Rows": {
+      "main": [[
+        {"node": "Google Sheets - Record Audience", "type": "main", "index": 0},
+        {"node": "Google Sheets - Append History", "type": "main", "index": 0}
+      ]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

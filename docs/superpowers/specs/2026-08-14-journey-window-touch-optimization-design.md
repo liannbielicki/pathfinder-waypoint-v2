@@ -718,15 +718,51 @@ These are the only questions that still need product/data/integration answers:
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 1 | CLEAR | HOLD SCOPE; recommendation-only boundary preserved |
 | Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | Skipped |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | DONE_WITH_CONCERNS | 10 issues, 0 critical gaps; all first-slice decisions resolved |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 25 decisions, 0 critical gaps; ranking and warm-start plan locked |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | Not needed for backend-first slice |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | Not run |
 
-**VERDICT:** CEO + ENG CLEARED for implementation with one documented measurement
-dependency: canonical Amplitude active-use event set and filters. The n8n
-identity behavior is documented, and the LCM recommendation ID remains a
-follow-up.
+**VERDICT:** CEO + ENG CLEARED for implementation of ideas 1 and 2. The plan
+reuses the existing loop, outcome, evidence, n8n, cost, and kill-switch paths.
+The canonical Amplitude active-use event contract and stable LCM attribution
+remain existing measurement dependencies, not newly reopened loop decisions.
 
-**UNRESOLVED DECISIONS:**
+**NOT in scope:**
 
-- Confirm the exact Amplitude event/event-set, filters, identity handling, and horizon rules before finalizing the outcome adapter.
+- RAG/vector retrieval in this implementation; revisit after retrieval telemetry
+  shows bounded structured retrieval is insufficient.
+- Automatic tuning of thresholds, weights, tie margins, or ranker policy; tune
+  after attributable 7/14/30/90-day outcomes accumulate.
+- Monte Carlo simulation, multi-touch sequence generation, Iterable writes, or
+  autonomous sending.
+
+**What already exists:**
+
+- `loop.py` provides editable loop configuration, replay, stop policy, and
+  durable round semantics.
+- `pipeline.py` and `llm_calls` provide retry-safe paid calls, cost tracking,
+  kill-switch checks, persona caching, and recommendation handoff boundaries.
+- `CandidateRow` and `EvolveRoundRow` provide the candidate and authoritative
+  round ledger model; the plan extends their use rather than adding a batch
+  service.
+- `evidence.py`, `TouchOutcomeRow`, n8n’s allowlisted context, and outcome
+  ingestion provide the evidence and identity foundations.
+
+**Implementation Tasks:**
+
+- [ ] **T1 (P1)** — Implement batched candidates while keeping one authoritative
+  `EvolveRoundRow` decision per round; preserve deterministic replay.
+- [ ] **T2 (P1)** — Add durable batched generation, critic, and strict ranker
+  stages through the existing paid-call path.
+- [ ] **T3 (P1)** — Add typed editable candidate-count, ranker, tie, similarity,
+  and warm-start settings with safety validation.
+- [ ] **T4 (P1)** — Persist versioned allowlisted winner fingerprints and promote
+  eligibility from idempotent 7-day outcome ingestion.
+- [ ] **T5 (P1)** — Reserve and reconcile worst-case batch cost before paid work.
+- [ ] **T6 (P1)** — Add batch, replay, prompt, cross-org isolation, cost, and
+  kill-switch tests plus the LLM eval suite.
+- [ ] **T7 (P2)** — Add retrieval/replay indexes and warm-start telemetry.
+- [ ] **T8 (P2)** — Evaluate tied finalists concurrently through the existing
+  in-flight limiter.
+
+NO UNRESOLVED DECISIONS
