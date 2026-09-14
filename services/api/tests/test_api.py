@@ -27,6 +27,12 @@ RUN_REQUEST = {
 
 
 
+async def test_run_api_rejects_unknown_channel(client: httpx.AsyncClient) -> None:
+    await client.post("/api/auth/login", json={"password": "operator-password"})
+    bad = {**RUN_REQUEST, "channels": ["fax"]}
+    assert (await client.post("/api/runs", json=bad)).status_code == 422
+
+
 async def test_run_api_requires_session(client: httpx.AsyncClient) -> None:
     assert (await client.post("/api/runs", json=RUN_REQUEST)).status_code == 401
 

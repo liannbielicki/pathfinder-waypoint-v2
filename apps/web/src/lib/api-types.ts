@@ -21,6 +21,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/exposures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest Exposures
+         * @description Canonical exposure registration, including neutral/control (arm B)
+         *     exposures with no WinnerRow. Winner-linked identity is derived from
+         *     the winner; identity is immutable after registration.
+         */
+        post: operations["ingest_exposures_api_exposures_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/fleet/settings": {
         parameters: {
             query?: never;
@@ -94,8 +116,9 @@ export interface paths {
         put?: never;
         /**
          * Ingest Outcomes
-         * @description Observed messaging/app-usage outcomes, keyed by recommendation_id.
-         *     See waypoint.outcomes for the attribution/backfill/idempotency logic.
+         * @description Observed outcomes keyed by a canonical winner or neutral exposure id.
+         *     LCM Personalization intake acknowledgement is not send confirmation;
+         *     see waypoint.outcomes for attribution and idempotency rules.
          */
         post: operations["ingest_outcomes_api_outcomes_post"];
         delete?: never;
@@ -193,6 +216,53 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ExposureIn
+         * @description One exposure registration. Arm "A" is the treated recommendation; arm
+         *     "B" is the control/neutral exposure (no WinnerRow required). A
+         *     winner-linked item derives identity from the winner — caller identity
+         *     fields are ignored there.
+         */
+        ExposureIn: {
+            /** Arm */
+            arm?: ("A" | "B") | null;
+            /**
+             * Channel
+             * @default
+             */
+            channel: string;
+            /** Exposure Id */
+            exposure_id: string;
+            /** Item Id */
+            item_id?: string | null;
+            /** Item Version */
+            item_version?: string | null;
+            /**
+             * Org Id
+             * @default
+             */
+            org_id: string;
+            /**
+             * Pro Id
+             * @default
+             */
+            pro_id: string;
+            /** Recommendation Id */
+            recommendation_id?: string | null;
+            /**
+             * Routing
+             * @default
+             */
+            routing: string;
+            /**
+             * Send Status
+             * @default unknown
+             * @enum {string}
+             */
+            send_status: "unknown" | "pending" | "confirmed" | "failed";
+            /** Sent At */
+            sent_at?: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -227,7 +297,7 @@ export interface components {
             /** Audience Run */
             audience_run: string;
             /** Channels */
-            channels: string[];
+            channels: ("sms" | "email" | "call")[];
             /**
              * Journey Window
              * @default churn_risk
@@ -346,10 +416,11 @@ export interface components {
          * @description One observed-outcome record from an outcome source (n8n Iterable/Amplitude
          *     flow, or manual backfill).
          *
-         *     TWO ways to name the touch, either is enough:
+         *     THREE ways to name the touch, any one is enough:
          *
-         *     * `recommendation_id` — the Waypoint winner_id, echoed back under either
-         *       spelling (`recommendation_id` or `row_id`).
+         *     * `recommendation_id` — the Waypoint winner_id (or an exposure id), echoed
+         *       back under either spelling (`recommendation_id` or `row_id`).
+         *     * `exposure_id` — the exposure-level unit; alone it also keys the record.
          *     * `run_id` + `pro_id` — the NATURAL key, and the one that needs nothing
          *       stamped into a message: `uq_winners_run_pro` makes one run plus one pro
          *       exactly one winner. Both halves already cross the boundary on their own
@@ -359,7 +430,14 @@ export interface components {
          *
          *     `routing` is how a REAL send is told apart from a guardrailed test send that
          *     merely carries a real Pro's context. It must be `route-to-pro` for the
-         *     record to count as evidence — see waypoint.outcomes.
+         *     record to count as evidence — see waypoint.outcomes. Where an exposure
+         *     exists, ITS routing is authoritative and the caller claim is ignored.
+         *
+         *     V3 authority rules: attribution identity (pro, org, item, arm) comes ONLY
+         *     from the winner/exposure records — caller identity is observational, and
+         *     returned_* horizon fields are not part of the wire contract at all. Return
+         *     horizons are derived from first_return_at against a confirmed send, or
+         *     resolved by the checkpoint sweep — never asserted by a caller.
          */
         TouchOutcomeIn: {
             /**
@@ -371,6 +449,10 @@ export interface components {
             clicked?: boolean | null;
             /** Delivered */
             delivered?: boolean | null;
+            /** Exposure Id */
+            exposure_id?: string | null;
+            /** First Return At */
+            first_return_at?: string | null;
             /**
              * Org Id
              * @default
@@ -388,14 +470,6 @@ export interface components {
             recommendation_id: string;
             /** Replied */
             replied?: boolean | null;
-            /** Returned 14D */
-            returned_14d?: boolean | null;
-            /** Returned 30D */
-            returned_30d?: boolean | null;
-            /** Returned 7D */
-            returned_7d?: boolean | null;
-            /** Returned 90D */
-            returned_90d?: boolean | null;
             /**
              * Routing
              * @default
@@ -406,6 +480,14 @@ export interface components {
              * @default
              */
             run_id: string;
+            /** Send Confirmed At */
+            send_confirmed_at?: string | null;
+            /**
+             * Send Status
+             * @default unknown
+             * @enum {string}
+             */
+            send_status: "unknown" | "pending" | "confirmed" | "failed";
             /** Sent At */
             sent_at?: string | null;
             /** Source */
@@ -456,6 +538,41 @@ export interface operations {
                 content: {
                     "application/json": {
                         [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingest_exposures_api_exposures_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExposureIn"][];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
                     };
                 };
             };

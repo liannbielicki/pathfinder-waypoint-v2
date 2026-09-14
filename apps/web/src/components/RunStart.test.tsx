@@ -97,7 +97,7 @@ describe("RunStart", () => {
       expect(screen.getByLabelText(/max rounds per pro/i)).toBeInTheDocument(),
     );
     for (const label of [
-      /pro ids/i, /audience run/i, /channel/i,
+      /pro ids/i, /audience run/i, /channel: sms/i, /channel: email/i, /channel: call/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
       /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
@@ -210,6 +210,20 @@ describe("RunStart", () => {
     expect(alert).toHaveTextContent(/audience rejected/);
     expect(screen.getByLabelText(/pro ids/i)).toHaveValue("pro_1");
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
+  });
+
+  it("sends every channel by default and drops an unchecked one", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByLabelText(/channel: call/i));
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ channels: ["sms", "email"] }),
+    );
   });
 
   it("sends the selected journey window", async () => {

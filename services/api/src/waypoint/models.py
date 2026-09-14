@@ -6,6 +6,11 @@ from typing import Literal
 
 from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, model_validator
 
+# The outreach channels Waypoint may recommend. Delivery is downstream (LCM /
+# a human caller); Waypoint only decides which one fits this Pro and idea.
+CHANNELS: tuple[str, ...] = ("sms", "email", "call")
+Channel = Literal["sms", "email", "call"]
+
 RunStatus = Literal[
     "queued",
     "running",
@@ -41,7 +46,7 @@ class RunCreate(BaseModel):
     pro_ids: list[str] = Field(min_length=1)
     audience_query: str = Field(min_length=1)
     audience_run: str = Field(min_length=1)
-    channels: list[str] = Field(min_length=1)
+    channels: list[Channel] = Field(min_length=1)
     # Confirmed loop-control overrides, UPPER_CASE spec keys (e.g. MAX_ROUNDS).
     # The confirm-typing gate is a UI contract: the UI only sends confirmed
     # fields, and the server treats any supplied key as confirmed.
@@ -74,7 +79,7 @@ class Recommendation(BaseModel):
     actions: list[str] = Field(min_length=1)
     pro_facing_concept: str = Field(min_length=1)
     manager_rationale: str = Field(min_length=1)
-    channel: Literal["sms", "email", "none"]
+    channel: Literal["sms", "email", "call", "none"]
     risk: str = ""
 
 
@@ -222,7 +227,7 @@ class ExposureIn(BaseModel):
 
 class FollowUpBranch(BaseModel):
     action: str = Field(min_length=1)  # "stop" or ONE concrete next touch (seed, not copy)
-    channel: Literal["sms", "email", "none"] = "none"
+    channel: Literal["sms", "email", "call", "none"] = "none"
 
 
 class FollowUpPlan(BaseModel):

@@ -16,6 +16,7 @@ so this gate is belt-and-braces against contradictory briefs, not a re-filter.
 
 from dataclasses import dataclass
 
+from waypoint.models import CHANNELS
 from waypoint.n8n import OrgBrief
 
 # ponytail: literal negative-state vocabulary; extend when the n8n flow's real
@@ -42,7 +43,10 @@ class GateResult:
 
 
 def _consent_blocks(brief: OrgBrief, channel: str) -> bool:
-    state = getattr(brief, CONSENT_FIELD[channel], None)
+    field = CONSENT_FIELD.get(channel)
+    if field is None:  # no consent signal for this channel (call): fail open
+        return False
+    state = getattr(brief, field, None)
     return state is not None and state.strip().lower() in NEGATIVE_CONSENT
 
 
@@ -70,11 +74,7 @@ def gate_pro(brief: OrgBrief, run_channels: list[str], journey_window: str) -> G
     conflict = window_conflict(brief, journey_window)
     if conflict is not None:
         return GateResult((), True, f"journey_window_mismatch: {conflict}")
-    allowed = tuple(
-        c for c in run_channels if c in CONSENT_FIELD and not _consent_blocks(brief, c)
-    )
+    allowed = tuple(c for c in run_channels if c in CHANNELS and not _consent_blocks(brief, c))
     if not allowed:
-        return GateResult(
-            (), True, "no_contactable_channel: consent blocks every run channel"
-        )
+        return GateResult((), True, "no_contactable_channel: consent blocks every run channel")
     return GateResult(allowed, False, None)

@@ -49,7 +49,7 @@ export function RetryPanel({ run }: { run: RunDetail }) {
         pro_ids: retries.map((r) => r.proId),
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: run.audience_run,
-        channels: run.channels,
+        channels: run.channels as RunCreateInput["channels"],
         loop_config: run.loop_config,
         // RunDetail types the window as plain string; the server validates it.
         journey_window: run.journey_window as RunCreateInput["journey_window"],

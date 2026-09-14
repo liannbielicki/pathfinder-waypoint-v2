@@ -38,6 +38,10 @@ const LOOP_FIELDS: LoopField[] = [
     min: 0 },
 ];
 
+// Same vocabulary as waypoint.models.CHANNELS; the API rejects anything else.
+const CHANNELS = ["sms", "email", "call"] as const;
+type Channel = (typeof CHANNELS)[number];
+
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [proIds, setProIds] = useState("");
   // Autofilled with "now" (second precision, UTC) — the operator can overwrite
@@ -45,7 +49,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [audienceRun, setAudienceRun] = useState(
     () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   );
-  const [channel, setChannel] = useState("sms");
+  const [channels, setChannels] = useState<Channel[]>([...CHANNELS]);
   const [journeyWindow, setJourneyWindow] = useState("churn_risk");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -141,7 +145,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         // the run; the pipeline overwrites it with the authoritative value.
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
-        channels: [channel],
+        channels,
         journey_window: journeyWindow as RunCreateInput["journey_window"],
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
@@ -182,11 +186,24 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           placeholder="2026-08-06T18:00:00Z"
           required
         />
-        <label htmlFor="channel">Channel</label>
-        <select id="channel" value={channel} onChange={(e) => setChannel(e.target.value)}>
-          <option value="sms">sms</option>
-          <option value="email">email</option>
-        </select>
+        <div>
+          <span>Channels (Waypoint picks per idea)</span>
+          {CHANNELS.map((c) => (
+            <label key={c} htmlFor={`channel-${c}`}>
+              <input
+                id={`channel-${c}`}
+                type="checkbox"
+                checked={channels.includes(c)}
+                onChange={(e) =>
+                  setChannels(e.target.checked
+                    ? CHANNELS.filter((x) => x === c || channels.includes(x))
+                    : channels.filter((x) => x !== c))
+                }
+              />
+              Channel: {c}
+            </label>
+          ))}
+        </div>
         <label htmlFor="journey-window">Journey window</label>
         <select
           id="journey-window"

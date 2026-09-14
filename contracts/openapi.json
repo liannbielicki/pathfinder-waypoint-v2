@@ -191,6 +191,11 @@
           },
           "channels": {
             "items": {
+              "enum": [
+                "sms",
+                "email",
+                "call"
+              ],
               "type": "string"
             },
             "minItems": 1,
