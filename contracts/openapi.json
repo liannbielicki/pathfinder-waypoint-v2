@@ -1,6 +1,112 @@
 {
   "components": {
     "schemas": {
+      "ExposureIn": {
+        "description": "One exposure registration. Arm \"A\" is the treated recommendation; arm\n\"B\" is the control/neutral exposure (no WinnerRow required). A\nwinner-linked item derives identity from the winner \u2014 caller identity\nfields are ignored there.",
+        "properties": {
+          "arm": {
+            "anyOf": [
+              {
+                "enum": [
+                  "A",
+                  "B"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm"
+          },
+          "channel": {
+            "default": "",
+            "title": "Channel",
+            "type": "string"
+          },
+          "exposure_id": {
+            "minLength": 1,
+            "title": "Exposure Id",
+            "type": "string"
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "item_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Version"
+          },
+          "org_id": {
+            "default": "",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_id": {
+            "default": "",
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "recommendation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation Id"
+          },
+          "routing": {
+            "default": "",
+            "title": "Routing",
+            "type": "string"
+          },
+          "send_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "title": "Send Status",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          }
+        },
+        "required": [
+          "exposure_id"
+        ],
+        "title": "ExposureIn",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -392,7 +498,7 @@
         "type": "object"
       },
       "TouchOutcomeIn": {
-        "description": "One observed-outcome record from an outcome source (n8n Iterable/Amplitude\nflow, or manual backfill).\n\nTWO ways to name the touch, either is enough:\n\n* `recommendation_id` \u2014 the Waypoint winner_id, echoed back under either\n  spelling (`recommendation_id` or `row_id`).\n* `run_id` + `pro_id` \u2014 the NATURAL key, and the one that needs nothing\n  stamped into a message: `uq_winners_run_pro` makes one run plus one pro\n  exactly one winner. Both halves already cross the boundary on their own\n  (the LCM intake batch IS the run id, and the Iterable recipient IS the\n  pro_uuid), so an outcome is attributable without Waypoint ids ever\n  entering Iterable.\n\n`routing` is how a REAL send is told apart from a guardrailed test send that\nmerely carries a real Pro's context. It must be `route-to-pro` for the\nrecord to count as evidence \u2014 see waypoint.outcomes.",
+        "description": "One observed-outcome record from an outcome source (n8n Iterable/Amplitude\nflow, or manual backfill).\n\nTHREE ways to name the touch, any one is enough:\n\n* `recommendation_id` \u2014 the Waypoint winner_id (or an exposure id), echoed\n  back under either spelling (`recommendation_id` or `row_id`).\n* `exposure_id` \u2014 the exposure-level unit; alone it also keys the record.\n* `run_id` + `pro_id` \u2014 the NATURAL key, and the one that needs nothing\n  stamped into a message: `uq_winners_run_pro` makes one run plus one pro\n  exactly one winner. Both halves already cross the boundary on their own\n  (the LCM intake batch IS the run id, and the Iterable recipient IS the\n  pro_uuid), so an outcome is attributable without Waypoint ids ever\n  entering Iterable.\n\n`routing` is how a REAL send is told apart from a guardrailed test send that\nmerely carries a real Pro's context. It must be `route-to-pro` for the\nrecord to count as evidence \u2014 see waypoint.outcomes. Where an exposure\nexists, ITS routing is authoritative and the caller claim is ignored.\n\nV3 authority rules: attribution identity (pro, org, item, arm) comes ONLY\nfrom the winner/exposure records \u2014 caller identity is observational, and\nreturned_* horizon fields are not part of the wire contract at all. Return\nhorizons are derived from first_return_at against a confirmed send, or\nresolved by the checkpoint sweep \u2014 never asserted by a caller.",
         "properties": {
           "channel": {
             "default": "",
@@ -421,6 +527,29 @@
             ],
             "title": "Delivered"
           },
+          "exposure_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exposure Id"
+          },
+          "first_return_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Return At"
+          },
           "org_id": {
             "default": "",
             "title": "Org Id",
@@ -447,50 +576,6 @@
             ],
             "title": "Replied"
           },
-          "returned_14d": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Returned 14D"
-          },
-          "returned_30d": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Returned 30D"
-          },
-          "returned_7d": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Returned 7D"
-          },
-          "returned_90d": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Returned 90D"
-          },
           "routing": {
             "default": "",
             "title": "Routing",
@@ -499,6 +584,29 @@
           "run_id": {
             "default": "",
             "title": "Run Id",
+            "type": "string"
+          },
+          "send_confirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Confirmed At"
+          },
+          "send_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "title": "Send Status",
             "type": "string"
           },
           "sent_at": {
@@ -626,6 +734,53 @@
         "summary": "Login"
       }
     },
+    "/api/exposures": {
+      "post": {
+        "description": "Canonical exposure registration, including neutral/control (arm B)\nexposures with no WinnerRow. Winner-linked identity is derived from\nthe winner; identity is immutable after registration.",
+        "operationId": "ingest_exposures_api_exposures_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/ExposureIn"
+                },
+                "title": "Body",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Ingest Exposures Api Exposures Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Exposures"
+      }
+    },
     "/api/fleet/settings": {
       "get": {
         "operationId": "fleet_settings_api_fleet_settings_get",
@@ -744,7 +899,7 @@
     },
     "/api/outcomes": {
       "post": {
-        "description": "Observed messaging/app-usage outcomes, keyed by recommendation_id.\nSee waypoint.outcomes for the attribution/backfill/idempotency logic.",
+        "description": "Observed outcomes keyed by a canonical winner or neutral exposure id.\nLCM Personalization intake acknowledgement is not send confirmation;\nsee waypoint.outcomes for attribution and idempotency rules.",
         "operationId": "ingest_outcomes_api_outcomes_post",
         "requestBody": {
           "content": {

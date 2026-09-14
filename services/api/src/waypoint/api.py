@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from waypoint import auth, queue
 from waypoint import funnel as funnel_report
 from waypoint.db import make_engine, make_session_factory
+from waypoint.exposures import register as register_exposures_batch
 from waypoint.handoff import (
     AudienceLineageUnresolved,
     HandoffUnavailable,
@@ -26,6 +27,7 @@ from waypoint.handoff import (
 from waypoint.loop import LoopConfig
 from waypoint.models import (
     TERMINAL_RUN_STATUSES,
+    ExposureIn,
     HandoffReceipt,
     RunCreate,
     RunView,
@@ -121,19 +123,22 @@ OutcomeAuthDep = Annotated[None, Depends(auth.require_session_or_outcomes_token)
 
 
 async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
-    """The KILL_SWITCH env value is authoritative — it must engage (and clear)
-    the shared kill state on the existing row, not just at first creation."""
+    """The KILL_SWITCH / LEARNING_KILL_SWITCH env values are authoritative —
+    they must engage (and clear) the shared kill state on the existing row,
+    not just at first creation. The two switches are independent."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is None:
         session.add(
             FleetControlRow(
                 id=1,
                 killed=settings.KILL_SWITCH,
+                learning_killed=settings.LEARNING_KILL_SWITCH,
                 day_cost_limit=settings.DAY_COST_USD,
             )
         )
     else:
         fleet.killed = settings.KILL_SWITCH
+        fleet.learning_killed = settings.LEARNING_KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
 
 
@@ -381,9 +386,19 @@ def create_app(
     async def ingest_outcomes(
         body: list[TouchOutcomeIn], session: SessionDep, _: OutcomeAuthDep
     ) -> dict[str, int]:
-        """Observed messaging/app-usage outcomes, keyed by recommendation_id.
-        See waypoint.outcomes for the attribution/backfill/idempotency logic."""
+        """Observed outcomes keyed by a canonical winner or neutral exposure id.
+        LCM Personalization intake acknowledgement is not send confirmation;
+        see waypoint.outcomes for attribution and idempotency rules."""
         return await ingest_outcomes_batch(session, body)
+
+    @app.post("/api/exposures", status_code=202)
+    async def ingest_exposures(
+        body: list[ExposureIn], session: SessionDep, _: AuthDep
+    ) -> dict[str, int]:
+        """Canonical exposure registration, including neutral/control (arm B)
+        exposures with no WinnerRow. Winner-linked identity is derived from
+        the winner; identity is immutable after registration."""
+        return await register_exposures_batch(session, body)
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(

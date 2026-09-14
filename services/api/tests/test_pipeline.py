@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
-from waypoint.measurement import UnmeasurableWinner
 from waypoint.models import PENDING_AUDIENCE_QUERY
 from waypoint.personas import PanelItem, PanelSelection
 from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
@@ -18,7 +17,6 @@ from waypoint.tables import (
     EvolveRoundRow,
     FleetControlRow,
     JobRow,
-    LlmCallRow,
     MeasurementRow,
     PersonaEvalRow,
     RunRow,
@@ -125,6 +123,24 @@ async def test_happy_path_completes_with_champion_and_measurement(
     tiers = {(c["stage"], c["tier"]) for c in deps.gateway.calls}
     assert ("screen", "fast") in tiers
     assert ("final", "deep") in tiers
+
+
+async def test_winner_carries_canonical_item_identity(deps: FakeDeps, seeded_job) -> None:
+    """V3: every fresh winner resolves to a canonical corpus item at creation."""
+    from waypoint.tables import ItemRow
+
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"
+    assert winner.item_id is not None
+    assert winner.item_version == "v1"
+    assert winner.legacy_unresolved is False
+    item = await deps.db.get(ItemRow, winner.item_id)
+    assert item is not None
+    candidate = await deps.db.get(CandidateRow, winner.candidate_id)
+    assert item.mechanism == candidate.recommendation["mechanism"]
 
 
 async def test_evaluation_calls_run_at_temperature_zero(deps: FakeDeps, seeded_job) -> None:
@@ -706,46 +722,23 @@ async def test_missing_context_pro_abstains_and_run_degrades(
 # --- measurement ---------------------------------------------------------------
 
 
-async def test_measurement_call_is_recorded_and_keyed(deps: FakeDeps, seeded_job) -> None:
+async def test_measurement_needs_no_paid_call_and_is_idempotent(deps: FakeDeps, seeded_job) -> None:
     await run_job(seeded_job.id, deps)
-    key = f"{seeded_job.run_id}:{seeded_job.pro_id}:measure"
-    row = (await deps.db.execute(select(LlmCallRow).where(LlmCallRow.call_key == key))).scalar_one()
-    assert row.status == "reconciled"
-    calls_before = deps.gateway.calls_for("measure")
-    await run_job(seeded_job.id, deps)  # terminal → no-op, no second measure call
-    assert deps.gateway.calls_for("measure") == calls_before
-
-
-async def test_unmeasurable_winner_abstains(deps: FakeDeps, seeded_job) -> None:
-    async def unmeasurable(winner, llm, catalog):
-        raise UnmeasurableWinner("unknown metric: imaginary")
-
-    deps.create_plan = unmeasurable
-    await run_job(seeded_job.id, deps)
-    winner = (
-        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
-    ).scalar_one()
-    assert winner.kind == "abstained"
-    assert "unmeasurable" in winner.rationale
-
-
-async def test_transient_measure_failure_retries_instead_of_abstaining(
-    deps: FakeDeps,
-    seeded_job,
-) -> None:
-    async def flaky(winner, llm, catalog):
-        raise RateLimitExhausted("429 storm")
-
-    deps.create_plan = flaky
-    await run_job(seeded_job.id, deps)  # honest requeue, not a crash
-    job = await deps.db.get(JobRow, seeded_job.id)
-    await deps.db.refresh(job)
-    assert job.status == "queued"  # retriable: measure re-runs on the next claim
-    winner = (
-        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
-    ).scalar_one()
-    assert winner.kind == "winner"  # a validated winner survives a 429 storm
-    assert await run_status(deps.db, seeded_job.run_id) not in ("abstained", "failed")
+    assert deps.gateway.calls_for("measure") == 0  # V3: deterministic selection
+    measurements = (
+        await deps.db.execute(
+            select(MeasurementRow).where(MeasurementRow.run_id == seeded_job.run_id)
+        )
+    ).scalars().all()
+    assert len(measurements) == 1
+    assert [i["key"] for i in measurements[0].indicators] == ["invoices_sent", "app_return"]
+    await run_job(seeded_job.id, deps)  # terminal -> no-op, no duplicate plan
+    measurements = (
+        await deps.db.execute(
+            select(MeasurementRow).where(MeasurementRow.run_id == seeded_job.run_id)
+        )
+    ).scalars().all()
+    assert len(measurements) == 1
 
 
 async def test_deep_final_failure_falls_back_to_fast_tier(deps: FakeDeps, seeded_job) -> None:

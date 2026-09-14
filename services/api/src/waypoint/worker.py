@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,9 @@ import httpx
 from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from waypoint import queue
+from waypoint import amplitude_source, iterable_source, queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
+from waypoint.checkpoints import sweep_if_enabled
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
@@ -46,18 +48,21 @@ CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibrat
 
 
 async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> None:
-    """KILL_SWITCH and DAY_COST_USD are env-owned; apply them on startup."""
+    """KILL_SWITCH, LEARNING_KILL_SWITCH, and DAY_COST_USD are env-owned;
+    apply them on startup. The two kill switches are independent."""
     fleet = await session.get(FleetControlRow, 1)
     if fleet is None:
         session.add(
             FleetControlRow(
                 id=1,
                 killed=settings.KILL_SWITCH,
+                learning_killed=settings.LEARNING_KILL_SWITCH,
                 day_cost_limit=settings.DAY_COST_USD,
             )
         )
     else:
         fleet.killed = settings.KILL_SWITCH
+        fleet.learning_killed = settings.LEARNING_KILL_SWITCH
         fleet.day_cost_limit = settings.DAY_COST_USD
     await session.commit()
 
@@ -146,6 +151,24 @@ def make_pricing(settings: Settings) -> Pricing:
             "rank": settings.MODEL_RANKER or settings.MODEL_FAST,
         }
     )
+
+
+def poller_specs(settings: Settings) -> list[tuple[str, Any, Any]]:
+    """(name, make_client, poll) for each outcome poller whose keys are
+    configured. A missing key disables that poller with one startup log line;
+    the worker runs fine with zero keys configured."""
+    specs: list[tuple[str, Any, Any]] = []
+    if settings.ITERABLE_API_KEY is not None:
+        specs.append(("iterable", iterable_source.make_client, iterable_source.poll_if_enabled))
+    else:
+        log.info("ITERABLE_API_KEY unset; iterable outcome poller disabled")
+    if settings.AMPLITUDE_API_KEY is not None and settings.AMPLITUDE_SECRET_KEY is not None:
+        specs.append(
+            ("amplitude", amplitude_source.make_client, amplitude_source.poll_if_enabled)
+        )
+    else:
+        log.info("AMPLITUDE_API_KEY/AMPLITUDE_SECRET_KEY unset; amplitude poller disabled")
+    return specs
 
 
 LLMStacks = Callable[[], AbstractAsyncContextManager[tuple[MeteredLLM, AsyncSession]]]
@@ -292,7 +315,7 @@ async def _worker_loop(
 
 
 async def main() -> None:
-    from waypoint.measurement import METRIC_CATALOG, create_measurement_plan
+    from waypoint.measurement import METRIC_CATALOG, select_indicators
 
     logging.basicConfig(level="INFO")
     settings = Settings.load()
@@ -352,7 +375,7 @@ async def main() -> None:
                 pricing=pricing,
                 persona_source=persona_source,
                 calibration=calibration,
-                create_plan=create_measurement_plan,
+                create_plan=select_indicators,
                 metric_catalog=METRIC_CATALOG,
                 maintenance=(index == 0),
                 settings=settings,
@@ -361,8 +384,50 @@ async def main() -> None:
         finally:
             await slots_connection.close()
 
+    async def checkpoint_loop() -> None:
+        # Timed cadence, deliberately NOT tied to worker idleness: a saturated
+        # queue must not starve checkpoint resolution. Bounded per sweep;
+        # failures log and the next tick retries the same rows.
+        while True:
+            await asyncio.sleep(settings.CHECKPOINT_SECONDS)
+            try:
+                async with factory() as session:
+                    result = await sweep_if_enabled(
+                        session,
+                        now=datetime.now(UTC),
+                        limit=settings.CHECKPOINT_LIMIT,
+                    )
+                if result and (result["resolved"] or result["synthesized"]):
+                    log.info(
+                        "checkpoint sweep resolved=%d synthesized=%d",
+                        result["resolved"], result["synthesized"],
+                    )
+            except Exception:
+                log.warning("checkpoint sweep failed; next tick retries", exc_info=True)
+
+    async def poller_loop(name: str, client: httpx.AsyncClient, poll: Any) -> None:
+        # Same shape as checkpoint_loop: timed cadence, session-per-tick,
+        # gated by the learning kill switch, failures log and the next tick
+        # retries the same window (the cursor only advances on success).
+        while True:
+            await asyncio.sleep(settings.POLL_SECONDS)
+            try:
+                async with factory() as session:
+                    result = await poll(session, client, settings, datetime.now(UTC))
+                if result and any(result.values()):
+                    log.info("%s poll: %s", name, result)
+            except Exception:
+                log.warning("%s poll failed; next tick retries", name, exc_info=True)
+
+    pollers = [
+        poller_loop(name, make_client(settings), poll)
+        for name, make_client, poll in poller_specs(settings)
+    ]
+
     log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
-    await asyncio.gather(*(spawn(i) for i in range(settings.WORKER_COUNT)))
+    await asyncio.gather(
+        checkpoint_loop(), *pollers, *(spawn(i) for i in range(settings.WORKER_COUNT))
+    )
 
 
 if __name__ == "__main__":
