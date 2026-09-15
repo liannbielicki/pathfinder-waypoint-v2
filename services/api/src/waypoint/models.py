@@ -225,6 +225,29 @@ class ExposureIn(BaseModel):
     sent_at: AwareDatetime | None = None
 
 
+class CallItem(BaseModel):
+    """One call-channel winner as an operator to-do (see waypoint.call_todos)."""
+
+    winner_id: str
+    run_id: str
+    pro_id: str
+    org_id: str
+    title: str
+    mechanism: str
+    pro_facing_concept: str
+    manager_rationale: str
+    actions: list[str]
+    created_at: datetime
+    status: Literal["todo", "done"]
+    note: str
+    updated_at: datetime | None
+
+
+class CallUpdate(BaseModel):
+    status: Literal["todo", "done"]
+    note: str = ""
+
+
 class FollowUpBranch(BaseModel):
     action: str = Field(min_length=1)  # "stop" or ONE concrete next touch (seed, not copy)
     channel: Literal["sms", "email", "call", "none"] = "none"

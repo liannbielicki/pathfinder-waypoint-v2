@@ -702,3 +702,42 @@ async def test_a_bearer_header_with_no_token_configured_is_refused(
         "/api/outcomes", json=[OUTCOME], headers={"authorization": "Bearer anything"}
     )
     assert response.status_code == 401
+
+
+async def test_calls_panel_lists_call_winners_and_tracks_done(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    run_id = created["id"]
+    winners = []
+    for channel in ("call", "sms"):
+        candidate = CandidateRow(
+            run_id=run_id, pro_id=f"pro_{channel}",
+            recommendation={"title": f"T-{channel}", "mechanism": "onboarding_call",
+                            "pro_facing_concept": "C", "manager_rationale": "R",
+                            "actions": ["a"], "channel": channel},
+        )
+        db_session.add(candidate)
+        await db_session.flush()
+        winner = WinnerRow(run_id=run_id, pro_id=f"pro_{channel}", kind="winner",
+                           candidate_id=candidate.id, evidence={"org_id": "org_1"})
+        db_session.add(winner)
+        await db_session.flush()
+        winners.append(winner)
+    await db_session.commit()
+    call_winner, sms_winner = winners
+
+    listed = (await auth_client.get("/api/calls")).json()
+    assert [c["winner_id"] for c in listed] == [call_winner.id]
+    assert listed[0]["status"] == "todo" and listed[0]["title"] == "T-call"
+
+    patched = await auth_client.patch(
+        f"/api/calls/{call_winner.id}", json={"status": "done", "note": "left voicemail"}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "done" and patched.json()["note"] == "left voicemail"
+    assert (await auth_client.get("/api/calls")).json()[0]["status"] == "done"
+    # An sms winner is not a call: the panel refuses to log it.
+    assert (
+        await auth_client.patch(f"/api/calls/{sms_winner.id}", json={"status": "done"})
+    ).status_code == 404

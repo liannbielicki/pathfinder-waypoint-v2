@@ -191,6 +191,17 @@ class MeasurementRow(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class CallLogRow(Base):
+    """Operator to-do state for a winner recommended over the call channel.
+    Calls never go to LCM; Pathfinder operators work them from /calls."""
+
+    __tablename__ = "call_logs"
+    winner_id: Mapped[str] = mapped_column(ForeignKey("winners.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(default="todo")  # todo | done
+    note: Mapped[str] = mapped_column(default="")
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
 class HandoffRow(Base):
     __tablename__ = "handoffs"
     __table_args__ = (UniqueConstraint("idempotency_key", name="uq_handoffs_key"),)

@@ -1,6 +1,118 @@
 {
   "components": {
     "schemas": {
+      "CallItem": {
+        "description": "One call-channel winner as an operator to-do (see waypoint.call_todos).",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "manager_rationale": {
+            "title": "Manager Rationale",
+            "type": "string"
+          },
+          "mechanism": {
+            "title": "Mechanism",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "org_id": {
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_facing_concept": {
+            "title": "Pro Facing Concept",
+            "type": "string"
+          },
+          "pro_id": {
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "todo",
+              "done"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "winner_id": {
+            "title": "Winner Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "winner_id",
+          "run_id",
+          "pro_id",
+          "org_id",
+          "title",
+          "mechanism",
+          "pro_facing_concept",
+          "manager_rationale",
+          "actions",
+          "created_at",
+          "status",
+          "note",
+          "updated_at"
+        ],
+        "title": "CallItem",
+        "type": "object"
+      },
+      "CallUpdate": {
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "todo",
+              "done"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "CallUpdate",
+        "type": "object"
+      },
       "ExposureIn": {
         "description": "One exposure registration. Arm \"A\" is the treated recommendation; arm\n\"B\" is the control/neutral exposure (no WinnerRow required). A\nwinner-linked item derives identity from the winner \u2014 caller identity\nfields are ignored there.",
         "properties": {
@@ -737,6 +849,78 @@
           }
         },
         "summary": "Login"
+      }
+    },
+    "/api/calls": {
+      "get": {
+        "description": "Call-channel winners across runs: the operators' own work list.\nThese never reach LCM; Pathfinder staff place the calls.",
+        "operationId": "calls_api_calls_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CallItem"
+                  },
+                  "title": "Response Calls Api Calls Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Calls"
+      }
+    },
+    "/api/calls/{winner_id}": {
+      "patch": {
+        "operationId": "patch_call_api_calls__winner_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "winner_id",
+            "required": true,
+            "schema": {
+              "title": "Winner Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallItem"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Call"
       }
     },
     "/api/exposures": {

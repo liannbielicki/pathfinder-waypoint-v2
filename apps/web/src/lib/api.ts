@@ -3,6 +3,8 @@ import type { components } from "./api-types";
 export type RunView = components["schemas"]["RunView"];
 export type RunCreate = components["schemas"]["RunCreate"];
 export type HandoffResponse = components["schemas"]["HandoffResponse"];
+export type CallItem = components["schemas"]["CallItem"];
+export type CallUpdate = components["schemas"]["CallUpdate"];
 
 // The evidence payloads are JSONB on the wire; these shapes mirror what the
 // pipeline persists (see services/api/src/waypoint/pipeline.py).
@@ -141,3 +143,9 @@ export const killRun = (id: string) =>
 
 export const createHandoff = (id: string) =>
   api<HandoffResponse>(`/runs/${id}/handoff`, { method: "POST" });
+
+// Call-channel winners are worked by operators, never sent to LCM.
+export const getCalls = () => api<CallItem[]>("/calls");
+
+export const updateCall = (winnerId: string, body: CallUpdate) =>
+  api<CallItem>(`/calls/${winnerId}`, { method: "PATCH", body: JSON.stringify(body) });

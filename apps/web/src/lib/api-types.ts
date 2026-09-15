@@ -21,6 +21,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls
+         * @description Call-channel winners across runs: the operators' own work list.
+         *     These never reach LCM; Pathfinder staff place the calls.
+         */
+        get: operations["calls_api_calls_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{winner_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Patch Call */
+        patch: operations["patch_call_api_calls__winner_id__patch"];
+        trace?: never;
+    };
     "/api/exposures": {
         parameters: {
             query?: never;
@@ -216,6 +254,57 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * CallItem
+         * @description One call-channel winner as an operator to-do (see waypoint.call_todos).
+         */
+        CallItem: {
+            /** Actions */
+            actions: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Manager Rationale */
+            manager_rationale: string;
+            /** Mechanism */
+            mechanism: string;
+            /** Note */
+            note: string;
+            /** Org Id */
+            org_id: string;
+            /** Pro Facing Concept */
+            pro_facing_concept: string;
+            /** Pro Id */
+            pro_id: string;
+            /** Run Id */
+            run_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "todo" | "done";
+            /** Title */
+            title: string;
+            /** Updated At */
+            updated_at: string | null;
+            /** Winner Id */
+            winner_id: string;
+        };
+        /** CallUpdate */
+        CallUpdate: {
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "todo" | "done";
+        };
         /**
          * ExposureIn
          * @description One exposure registration. Arm "A" is the treated recommendation; arm
@@ -539,6 +628,61 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    calls_api_calls_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallItem"][];
+                };
+            };
+        };
+    };
+    patch_call_api_calls__winner_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                winner_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CallUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallItem"];
                 };
             };
             /** @description Validation Error */

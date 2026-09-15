@@ -243,6 +243,8 @@ async def ready_rows(
     rows: list[dict[str, Any]] = []
     for winner in winners:
         candidate = candidates_by_id.get(winner.candidate_id) if winner.candidate_id else None
+        if candidate is not None and candidate.recommendation.get("channel") == "call":
+            continue  # worked by Pathfinder operators from /api/calls, never sent to LCM
         if winner.id in measured_winner_ids and candidate is not None:
             rows.append(
                 {

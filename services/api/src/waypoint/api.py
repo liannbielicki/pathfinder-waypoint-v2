@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
 from waypoint import funnel as funnel_report
+from waypoint.call_todos import list_calls, update_call
 from waypoint.db import make_engine, make_session_factory
 from waypoint.exposures import register as register_exposures_batch
 from waypoint.handoff import (
@@ -27,6 +28,8 @@ from waypoint.handoff import (
 from waypoint.loop import LoopConfig
 from waypoint.models import (
     TERMINAL_RUN_STATUSES,
+    CallItem,
+    CallUpdate,
     ExposureIn,
     HandoffReceipt,
     RunCreate,
@@ -399,6 +402,20 @@ def create_app(
         exposures with no WinnerRow. Winner-linked identity is derived from
         the winner; identity is immutable after registration."""
         return await register_exposures_batch(session, body)
+
+    @app.get("/api/calls", response_model=list[CallItem])
+    async def calls(session: SessionDep, _: AuthDep) -> list[CallItem]:
+        """Call-channel winners across runs: the operators' own work list.
+        These never reach LCM; Pathfinder staff place the calls."""
+        return await list_calls(session)
+
+    @app.patch("/api/calls/{winner_id}", response_model=CallItem)
+    async def patch_call(
+        winner_id: str, body: CallUpdate, session: SessionDep, _: AuthDep
+    ) -> CallItem:
+        if await update_call(session, winner_id, body.status, body.note) is None:
+            raise HTTPException(status_code=404, detail="No call-channel winner with that id")
+        return next(c for c in await list_calls(session) if c.winner_id == winner_id)
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(

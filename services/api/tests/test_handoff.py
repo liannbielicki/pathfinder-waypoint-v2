@@ -309,3 +309,25 @@ async def test_duplicate_row_id_in_one_call_collapses_to_one_row(
     assert receipts[0].idempotency_key == receipts[1].idempotency_key
     assert receipts[0].status == receipts[1].status == "accepted"
     assert await handoff_count(db_session, receipts[0].idempotency_key) == 1
+
+
+async def test_call_winners_are_never_handed_to_lcm(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={"title": "Setup call", "mechanism": "onboarding_call",
+                        "pro_facing_concept": "walk through setup", "manager_rationale": "r",
+                        "actions": ["call"], "channel": "call"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+    assert await ready_rows(db_session, "run-1") == []
