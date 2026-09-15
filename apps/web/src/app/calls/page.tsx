@@ -68,6 +68,25 @@ export default function CallsPage() {
             <ul>{call.actions.map((a, i) => <li key={i}>{a}</li>)}</ul>
           )}
           <p className="helper">{call.manager_rationale}</p>
+          {call.alternatives.length > 0 && (
+            <details>
+              <summary>Other ideas for this Pro ({call.alternatives.length})</summary>
+              <ol>
+                {call.alternatives.map((alt, i) => (
+                  <li key={i}>
+                    <strong>{alt.title}</strong>
+                    {alt.score_pp != null && <small> · {alt.score_pp.toFixed(1)} pp</small>}
+                    {alt.channel && alt.channel !== "call" && <small> · {alt.channel}</small>}
+                    <br />
+                    {alt.pro_facing_concept}
+                    {alt.actions.length > 0 && (
+                      <ul>{alt.actions.map((a, j) => <li key={j}>{a}</li>)}</ul>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
           <label htmlFor={`note-${call.winner_id}`}>Note</label>
           <input
             id={`note-${call.winner_id}`}

@@ -225,6 +225,17 @@ class ExposureIn(BaseModel):
     sent_at: AwareDatetime | None = None
 
 
+class CallAlternative(BaseModel):
+    """A runner-up idea for the same Pro, in case the winner does not fit on the call."""
+
+    title: str
+    mechanism: str
+    channel: str
+    pro_facing_concept: str
+    actions: list[str]
+    score_pp: float | None
+
+
 class CallItem(BaseModel):
     """One call-channel winner as an operator to-do (see waypoint.call_todos)."""
 
@@ -241,6 +252,7 @@ class CallItem(BaseModel):
     status: Literal["todo", "done"]
     note: str
     updated_at: datetime | None
+    alternatives: list[CallAlternative] = []
 
 
 class CallUpdate(BaseModel):

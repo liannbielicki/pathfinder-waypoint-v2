@@ -724,12 +724,28 @@ async def test_calls_panel_lists_call_winners_and_tracks_done(
         db_session.add(winner)
         await db_session.flush()
         winners.append(winner)
-    await db_session.commit()
     call_winner, sms_winner = winners
+    # Mark the call winner's candidate as champion with a final score, and add
+    # ranked runner-ups plus a suppressed idea that must never surface.
+    champion = await db_session.get(CandidateRow, call_winner.candidate_id)
+    assert champion is not None
+    champion.status = "champion"
+    champion.score = {"final": {"reduction_pp": 5.0}}
+    for title, pp, status in (("second", 3.0, "discarded"), ("third", 2.0, "discarded"),
+                              ("fourth", 1.0, "discarded"), ("blocked", 9.0, "suppressed")):
+        db_session.add(CandidateRow(
+            run_id=run_id, pro_id="pro_call", status=status,
+            score={"screen": {"reduction_pp": pp}},
+            recommendation={"title": title, "mechanism": "m", "pro_facing_concept": "c",
+                            "manager_rationale": "r", "actions": ["a"], "channel": "call"},
+        ))
+    await db_session.commit()
 
     listed = (await auth_client.get("/api/calls")).json()
     assert [c["winner_id"] for c in listed] == [call_winner.id]
     assert listed[0]["status"] == "todo" and listed[0]["title"] == "T-call"
+    assert [a["title"] for a in listed[0]["alternatives"]] == ["second", "third"]
+    assert listed[0]["alternatives"][0]["score_pp"] == 3.0
 
     patched = await auth_client.patch(
         f"/api/calls/{call_winner.id}", json={"status": "done", "note": "left voicemail"}

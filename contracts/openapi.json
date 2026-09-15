@@ -1,6 +1,55 @@
 {
   "components": {
     "schemas": {
+      "CallAlternative": {
+        "description": "A runner-up idea for the same Pro, in case the winner does not fit on the call.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "mechanism": {
+            "title": "Mechanism",
+            "type": "string"
+          },
+          "pro_facing_concept": {
+            "title": "Pro Facing Concept",
+            "type": "string"
+          },
+          "score_pp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Pp"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "mechanism",
+          "channel",
+          "pro_facing_concept",
+          "actions",
+          "score_pp"
+        ],
+        "title": "CallAlternative",
+        "type": "object"
+      },
       "CallItem": {
         "description": "One call-channel winner as an operator to-do (see waypoint.call_todos).",
         "properties": {
@@ -9,6 +58,14 @@
               "type": "string"
             },
             "title": "Actions",
+            "type": "array"
+          },
+          "alternatives": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CallAlternative"
+            },
+            "title": "Alternatives",
             "type": "array"
           },
           "created_at": {

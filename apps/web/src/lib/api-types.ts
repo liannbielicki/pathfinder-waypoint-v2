@@ -255,12 +255,35 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * CallAlternative
+         * @description A runner-up idea for the same Pro, in case the winner does not fit on the call.
+         */
+        CallAlternative: {
+            /** Actions */
+            actions: string[];
+            /** Channel */
+            channel: string;
+            /** Mechanism */
+            mechanism: string;
+            /** Pro Facing Concept */
+            pro_facing_concept: string;
+            /** Score Pp */
+            score_pp: number | null;
+            /** Title */
+            title: string;
+        };
+        /**
          * CallItem
          * @description One call-channel winner as an operator to-do (see waypoint.call_todos).
          */
         CallItem: {
             /** Actions */
             actions: string[];
+            /**
+             * Alternatives
+             * @default []
+             */
+            alternatives: components["schemas"]["CallAlternative"][];
             /**
              * Created At
              * Format: date-time

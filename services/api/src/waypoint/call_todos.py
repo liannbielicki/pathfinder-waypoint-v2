@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from waypoint.models import CallItem
+from waypoint.models import CallAlternative, CallItem
 from waypoint.tables import CallLogRow, CandidateRow, WinnerRow
 
 CALL_STATUSES = ("todo", "done")
@@ -50,7 +50,58 @@ async def list_calls(session: AsyncSession, limit: int = 500) -> list[CallItem]:
                 updated_at=log.updated_at if log else None,
             )
         )
+    if items:
+        alts = await _alternatives(session, items)
+        for item in items:
+            item.alternatives = alts.get((item.run_id, item.pro_id), [])
     return items
+
+
+def _score_pp(candidate: CandidateRow) -> float | None:
+    score = candidate.score or {}
+    for stage in ("final", "screen"):
+        value = (score.get(stage) or {}).get("reduction_pp")
+        if value is not None:
+            return float(value)
+    return None
+
+
+async def _alternatives(
+    session: AsyncSession, items: list[CallItem], top: int = 2
+) -> dict[tuple[str, str], list[CallAlternative]]:
+    """The next-best panel-scored ideas per (run, pro), winner and critic-
+    suppressed ideas excluded. ponytail: one query over every listed run;
+    narrow by pro if the calls list ever grows past a few hundred rows."""
+    winner_candidates = {(i.run_id, i.pro_id) for i in items}
+    rows = (
+        await session.execute(
+            select(CandidateRow).where(
+                CandidateRow.run_id.in_({r for r, _ in winner_candidates}),
+                CandidateRow.status.in_(("discarded", "champion")),
+            )
+        )
+    ).scalars()
+    grouped: dict[tuple[str, str], list[CandidateRow]] = {}
+    for c in rows:
+        key = (c.run_id, c.pro_id)
+        if key in winner_candidates and _score_pp(c) is not None:
+            grouped.setdefault(key, []).append(c)
+    out: dict[tuple[str, str], list[CallAlternative]] = {}
+    for key, cands in grouped.items():
+        ranked = sorted(cands, key=lambda c: _score_pp(c) or 0.0, reverse=True)
+        # The winner is the top-scored champion; everything after it is a runner-up.
+        out[key] = [
+            CallAlternative(
+                title=str(c.recommendation.get("title", "")),
+                mechanism=str(c.recommendation.get("mechanism", "")),
+                channel=str(c.recommendation.get("channel", "")),
+                pro_facing_concept=str(c.recommendation.get("pro_facing_concept", "")),
+                actions=[str(a) for a in c.recommendation.get("actions", [])],
+                score_pp=_score_pp(c),
+            )
+            for c in ranked[1 : top + 1]
+        ]
+    return out
 
 
 async def update_call(
