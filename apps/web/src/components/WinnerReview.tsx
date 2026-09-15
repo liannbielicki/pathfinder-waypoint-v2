@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { Candidate, RunDetail, Winner } from "@/lib/api";
 
 function ScoreBlock({ score }: { score: Record<string, unknown> }) {
@@ -186,7 +187,12 @@ function WinnerCard({
   const finalScore = candidate?.score?.final;
   return (
     <div className="card">
-      <h4>{String(rec?.title ?? "Winner")}</h4>
+      <h4>
+        {String(rec?.title ?? "Winner")}
+        <span className={`pill channel-${String(rec?.channel ?? "none")}`}>
+          {String(rec?.channel ?? "none").toUpperCase()}
+        </span>
+      </h4>
       <p>{String(rec?.pro_facing_concept ?? "")}</p>
       <p>
         <small>
@@ -243,6 +249,7 @@ export function WinnerReview({
   handingOff: boolean;
 }) {
   const winners = run.winners ?? [];
+  const [filter, setFilter] = useState("all");
   const measuredWinnerIds = new Set(run.measurements.map((m) => m.winner_id));
   const ready = winners.filter(
     (w) => w.kind === "winner" && measuredWinnerIds.has(w.id),
@@ -258,11 +265,35 @@ export function WinnerReview({
     candidatesByPro.set(c.pro_id, list);
   }
 
+  // Filter key per winner: its recommended channel, or the non-winner kind.
+  const keyOf = (w: Winner) =>
+    w.kind === "winner"
+      ? String((w.candidate_id && candidateById.get(w.candidate_id)?.recommendation?.channel) ?? "none")
+      : w.kind;
+  const counts = new Map<string, number>();
+  for (const w of winners) counts.set(keyOf(w), (counts.get(keyOf(w)) ?? 0) + 1);
+  const shown = filter === "all" ? winners : winners.filter((w) => keyOf(w) === filter);
+
   return (
     <section className="panel" aria-label="Winner review">
       <h2>Decision evidence</h2>
       {winners.length === 0 && <p>No decision yet — the run has not reached scoring.</p>}
-      {winners.map((winner) => (
+      {winners.length > 0 && (
+        <div role="group" aria-label="Filter by channel" className="filter-bar">
+          {[["all", winners.length], ...[...counts.entries()].sort()].map(([key, n]) => (
+            <button
+              key={key}
+              type="button"
+              className={`pill${filter === key ? " pill-active" : ""}`}
+              aria-pressed={filter === key}
+              onClick={() => setFilter(String(key))}
+            >
+              {String(key).replace("_", " ")} ({n})
+            </button>
+          ))}
+        </div>
+      )}
+      {shown.map((winner) => (
         <WinnerCard
           key={winner.id}
           winner={winner}

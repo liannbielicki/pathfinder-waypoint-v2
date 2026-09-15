@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { WinnerReview } from "./WinnerReview";
 import { RUN_FIXTURE } from "@/test/fixtures";
@@ -63,6 +64,29 @@ describe("WinnerReview", () => {
   it("enables handoff when winner and measurement plan are persisted", () => {
     render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
     expect(screen.getByRole("button", { name: /create lcm handoff/i })).toBeEnabled();
+  });
+
+  it("tags each winner with its channel and filters by it", async () => {
+    const two: RunDetail = {
+      ...WINNER_RUN,
+      candidates: [
+        WINNER_RUN.candidates[0],
+        { ...WINNER_RUN.candidates[0], id: "cand-2", pro_id: "pro_2",
+          recommendation: { ...WINNER_RUN.candidates[0].recommendation, title: "Email the recap", channel: "email" } },
+      ],
+      winners: [
+        WINNER_RUN.winners[0],
+        { ...WINNER_RUN.winners[0], id: "win-2", pro_id: "pro_2", candidate_id: "cand-2" },
+      ],
+    };
+    render(<WinnerReview run={two} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByRole("heading", { name: /open invoices reminder.*SMS/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Email the recap.*EMAIL/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "email (1)" }));
+    expect(screen.queryByRole("heading", { name: /open invoices reminder/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Email the recap/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "all (2)" }));
+    expect(screen.getAllByRole("heading", { level: 4 })).toHaveLength(2);
   });
 
   it("shows real persona labels, never fabricated identities", () => {

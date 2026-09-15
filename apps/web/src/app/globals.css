@@ -255,3 +255,10 @@ legend {
   margin: 0;
   text-align: right;
 }
+
+.filter-bar { display: flex; flex-wrap: wrap; gap: .25rem; margin: .5rem 0 1rem; }
+.filter-bar .pill { margin-left: 0; cursor: pointer; background: transparent; }
+.pill-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.channel-sms { border-color: var(--accent); color: var(--accent); }
+.channel-email { border-color: var(--ok); color: var(--ok); }
+.channel-call { border-color: var(--error); color: var(--error); }
