@@ -95,7 +95,7 @@ def test_context_layer_rejects_non_object_json():
         return httpx.Response(200, content=json.dumps(["not", "an", "object"]))
 
     client = ContextLayerClient(transport=httpx.MockTransport(handler))
-    with pytest.raises(ValueError, match="object"):
+    with pytest.raises(TypeError, match="object"):
         import asyncio
 
         asyncio.run(client.fetch("org-123", "https://context.test", "test-key"))
@@ -180,9 +180,11 @@ async def test_workbench_never_places_fixture_pii_in_prompt(monkeypatch):
         assert "Karla" not in prompt
         assert "LaPointe" not in prompt
         return (
-            '[{"title":"Try HCP AI","mechanism":"hcp_assist",'
-            '"actions":["show the capability"],"pro_facing_concept":"help",'
-            '"manager_rationale":"fit","channel":"email","risk":"low"}]',
+            (
+                '[{"title":"Try HCP AI","mechanism":"hcp_assist",'
+                '"actions":["show the capability"],"pro_facing_concept":"help",'
+                '"manager_rationale":"fit","channel":"email","risk":"low"}]'
+            ),
             {"model": model, "input_tokens": 10, "output_tokens": 20, "cost_usd": 0.01},
         )
 
@@ -191,7 +193,10 @@ async def test_workbench_never_places_fixture_pii_in_prompt(monkeypatch):
         return {"primary_contact_name": "Karla Bravo LaPointe", "features": [{"name": "hcp_assist"}]}
 
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
-    result = await execute_run(WorkbenchRunRequest(identifier="org-123", source_mode="context_layer", ai_api_key="test-key"))
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="org-123", source_mode="context_layer", ai_api_key="test-key",
+        context_base_url="https://context.example", context_api_key="test-context-key",
+    ))
     pii_stage = next(stage for stage in result["stages"] if stage["name"] == "pii_gate")
     assert pii_stage["data"]["removed_count"] >= 1
     assert all("Karla" not in json.dumps(stage) for stage in result["stages"])

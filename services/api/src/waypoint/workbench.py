@@ -6,7 +6,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -122,12 +122,12 @@ def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, 
                     output[str(key)] = result
             return output
         if isinstance(item, list):
-            output = []
+            kept: list[Any] = []
             for index, child in enumerate(item):
                 result = walk(child, f"{path}[{index}]", leaf)
                 if result is not _DROP:
-                    output.append(result)
-            return output
+                    kept.append(result)
+            return kept
         if isinstance(item, str):
             if leaf in _METADATA_KEYS:
                 return item
@@ -180,7 +180,7 @@ class ContextLayerClient:
             raise ValueError(f"Context Layer returned HTTP {response.status_code}")
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Context Layer response was not an object")
+            raise TypeError("Context Layer response was not an object")
         return payload
 
 
@@ -198,13 +198,13 @@ class N8NContextClient:
             raise ValueError(f"Snowflake/n8n returned HTTP {response.status_code}")
         payload = response.json()
         if not isinstance(payload, (dict, list)):
-            raise ValueError("Snowflake/n8n response was not an object or array")
+            raise TypeError("Snowflake/n8n response was not an object or array")
         return payload
 
 
-def unwrap_source_payload(source: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def unwrap_source_payload(source: str, payload: Mapping[str, Any] | list[Any]) -> dict[str, Any]:
     """Remove the n8n transport envelope before context normalization."""
-    if source == "snowflake" and isinstance(payload, list):
+    if isinstance(payload, list):  # only the n8n webhook ever returns an array
         return {"rows": payload}
     if source == "snowflake" and isinstance(payload.get("context"), Mapping):
         context = payload["context"]
@@ -222,7 +222,7 @@ def unwrap_source_payload(source: str, payload: Mapping[str, Any]) -> dict[str, 
 def load_fixture(path: Path = _FIXTURE_PATH) -> dict[str, Any]:
     payload = json.loads(path.read_text())
     if not isinstance(payload, dict):
-        raise ValueError("workbench fixture was not an object")
+        raise TypeError("workbench fixture was not an object")
     return payload
 
 
@@ -239,7 +239,7 @@ def build_product_index(catalog: Mapping[str, Mapping[str, Any]]) -> list[dict[s
 
 
 def resolve_product_cards(
-    candidates: list[Mapping[str, Any]], catalog: Mapping[str, Mapping[str, Any]]
+    candidates: Sequence[Mapping[str, Any]], catalog: Mapping[str, Mapping[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[str]]:
     cards: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -316,7 +316,7 @@ async def run_model(
     finally:
         await client.close()
     usage = response.usage
-    text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+    text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text")
     pricing = Pricing({"fast": model})
     metrics = {
         "stage": stage,
@@ -333,5 +333,5 @@ async def run_model(
 def parse_candidates(text: str) -> list[dict[str, Any]]:
     value = extract_json(text)
     if not isinstance(value, list):
-        raise ValueError("model response was not a candidate array")
+        raise TypeError("model response was not a candidate array")
     return [dict(item) for item in value if isinstance(item, Mapping)]

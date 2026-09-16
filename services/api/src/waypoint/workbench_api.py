@@ -9,15 +9,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
+from waypoint.llm import extract_json
 from waypoint.workbench import (
     ContextLayerClient,
     N8NContextClient,
     WorkbenchStage,
     build_evolve_prompt,
     build_prompt_context,
-    extract_json,
     load_catalog,
-    load_fixture,
     parse_candidates,
     redact,
     resolve_product_cards,
@@ -125,7 +124,7 @@ async def execute_run(body: WorkbenchRunRequest) -> dict[str, Any]:
 
     sources: dict[str, Any] = {}
     source_errors: dict[str, str] = {}
-    requests = []
+    requests: list[tuple[str, Any]] = []
     if body.source_mode in ("context_layer", "both"):
         requests.append(("context_layer", ContextLayerClient().fetch(body.identifier, context_base_url or "", context_api_key or "")))
     if body.source_mode in ("snowflake", "both"):
@@ -148,7 +147,7 @@ async def execute_run(body: WorkbenchRunRequest) -> dict[str, Any]:
     stages.append(_stage("raw_context", shape(raw), started, summary="structure only; raw values are intentionally withheld here; see scrubbed_context for retained non-PII values"))
 
     started = time.perf_counter()
-    normalized = {"source": "combined" if len(sources) > 1 else next(iter(sources)), "grain": "organization", "sources": {source: unwrap_source_payload(source, payload) for source, payload in sources.items()}}
+    normalized: dict[str, Any] = {"source": "combined" if len(sources) > 1 else next(iter(sources)), "grain": "organization", "sources": {source: unwrap_source_payload(source, payload) for source, payload in sources.items()}}
     stages.append(_stage("normalized_context", shape(normalized), started, summary="sources normalized into one trace; values remain withheld until after the PII gate"))
 
     started = time.perf_counter()
@@ -258,7 +257,7 @@ VARIABLE: {item}"""
                 if isinstance(draft, dict):
                     draft = next((draft[key] for key in ("entries", "catalog", "items") if isinstance(draft.get(key), list)), [draft])
                 if not isinstance(draft, list):
-                    raise ValueError("authoring response was not a catalog list")
+                    raise TypeError("authoring response was not a catalog list")
                 draft_entries.extend(draft)
                 returned_keys = {
                     str(item.get("key"))
@@ -271,7 +270,7 @@ VARIABLE: {item}"""
                     break
                 pending = [item for item in pending if item["key"] not in matched_keys]
             stages.append(WorkbenchStage(name="authoring_parse", data=draft_entries, summary="Draft catalog JSON parsed; not approved for runtime"))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any model-output failure is reported as a stage
             stages.append(WorkbenchStage(name="authoring_parse", status="failed", error=str(error), summary="AI draft was not valid JSON"))
         drafted_catalog = machine_catalog(draft_entries)
         drafted_keys = {
@@ -330,7 +329,7 @@ VARIABLE: {item}"""
             cards, card_warnings = resolve_product_cards(candidates, catalog)
             warnings.extend(f"{policy}:{warning}" for warning in card_warnings)
             outputs[policy] = {"candidates": candidates, "product_cards": cards}
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any model-output failure is reported as a stage
             stages.append(
                 WorkbenchStage(
                     name=f"{policy}_parse",
