@@ -2,16 +2,25 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from waypoint.workbench import (
     ContextLayerClient,
     N8NContextClient,
     WorkbenchStage,
+    build_audit_inventory,
     build_product_index,
+    compile_catalog_contract,
+    compile_context,
+    context_layer_coverage,
+    parse_feature_catalog_csv,
+    prioritize_review_exceptions,
     redact,
     resolve_product_cards,
     scrub_pii,
     unwrap_source_payload,
+    validate_catalog_entries,
 )
 
 
@@ -76,6 +85,41 @@ async def test_n8n_context_client_posts_organization_id_with_bearer_token():
     }
 
 
+def test_n8n_context_client_allows_four_minutes_for_a_response():
+    client = N8NContextClient()
+    assert client._timeout.read == 240.0
+
+
+@pytest.mark.asyncio
+async def test_n8n_context_client_reports_when_the_response_times_out():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TimeoutError, match="Snowflake/n8n timed out after 240 seconds"):
+        await client.fetch("889901", "https://n8n.test/webhook/context", "test-token")
+
+
+@pytest.mark.asyncio
+async def test_n8n_context_client_reports_connection_failures_without_the_webhook_url():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(ConnectionError, match=r"Snowflake/n8n connection failed \(ConnectError\)"):
+        await client.fetch("889901", "https://n8n.test/secret-webhook", "test-token")
+
+
+@pytest.mark.asyncio
+async def test_n8n_context_client_reports_invalid_json():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="Snowflake/n8n returned invalid JSON"):
+        await client.fetch("889901", "https://n8n.test/webhook/context", "test-token")
+
+
 def test_fixture_and_product_helpers_expose_candidates_without_raw_secret_fields():
     context = {"features": [{"name": "hcp_assist", "display_name": "HCP AI"}]}
     index = build_product_index({"hcp_assist": {"description": "AI assistance"}})
@@ -95,7 +139,7 @@ def test_context_layer_rejects_non_object_json():
         return httpx.Response(200, content=json.dumps(["not", "an", "object"]))
 
     client = ContextLayerClient(transport=httpx.MockTransport(handler))
-    with pytest.raises(ValueError, match="object"):
+    with pytest.raises(TypeError, match="object"):
         import asyncio
 
         asyncio.run(client.fetch("org-123", "https://context.test", "test-key"))
@@ -167,9 +211,582 @@ def test_pii_exclusion_preserves_uppercase_audit_keys_and_dates():
     assert ledger == []
 
 
+def test_pii_exclusion_drops_identity_variables_but_keeps_business_state_variables():
+    clean, ledger = scrub_pii({
+        "rows": [
+            {"VARIABLE_NAME": "ORG_UUID", "VALUE": "org-secret"},
+            {"VARIABLE_NAME": "FEATURE_VOIP_STATE", "VALUE": "attached_unused"},
+        ]
+    })
+    assert "VALUE" not in clean["rows"][0]
+    assert clean["rows"][1]["VALUE"] == "attached_unused"
+    assert len(ledger) == 1
+    inventory = build_audit_inventory({"snowflake": clean})
+    assert inventory[0]["observed_state"] == "removed_pii"
+    assert inventory[0]["observed_type"] == "unavailable"
+
+
+def test_pii_exclusion_drops_birth_dates_and_direct_identifier_variables():
+    clean, ledger = scrub_pii({
+        "date_of_birth": "1990-01-01",
+        "rows": [
+            {"VARIABLE_NAME": "DATE_OF_BIRTH", "VALUE": "1990-01-01"},
+            {"VARIABLE_NAME": "SSN_LAST_FOUR", "VALUE": "1234"},
+            {"VARIABLE_NAME": "BANK_ROUTING_NUMBER", "VALUE": "021000021"},
+            {"VARIABLE_NAME": "CUSTOMER_ID", "VALUE": "customer-123"},
+            {"VARIABLE_NAME": "EMPLOYEE_ID", "VALUE": "employee-123"},
+            {"VARIABLE_NAME": "ACCOUNT_KEY", "VALUE": "account-123"},
+            {"VARIABLE_NAME": "BIZDATE", "VALUE": "2026-09-09"},
+        ]
+    })
+
+    assert "VALUE" not in clean["rows"][0]
+    assert "VALUE" not in clean["rows"][1]
+    assert "VALUE" not in clean["rows"][2]
+    assert "VALUE" not in clean["rows"][3]
+    assert "VALUE" not in clean["rows"][4]
+    assert "VALUE" not in clean["rows"][5]
+    assert clean["rows"][6]["VALUE"] == "2026-09-09"
+    assert "date_of_birth" not in clean
+    assert len(ledger) == 7
+
+
 def test_unwraps_n8n_context_envelope_before_pii_projection():
     payload = {"context": {"context_row": {"SEGMENT_ACTUAL": "1A"}, "event_context": {"calls_total_count": 2}}}
     assert unwrap_source_payload("snowflake", payload) == {"SEGMENT_ACTUAL": "1A", "calls_total_count": 2}
+
+
+def test_audit_inventory_preserves_every_experimental_row_and_observed_evidence():
+    rows = [
+        {
+            "QUERY_NAME": f"query_{index % 4}",
+            "VARIABLE_NAME": f"VARIABLE_{index}",
+            "VALUE": None if index == 7 else index,
+            "METADATA": {"DATA_TYPE": "NUMBER"},
+        }
+        for index in range(650)
+    ]
+
+    inventory = build_audit_inventory({"snowflake": {"rows": rows}})
+
+    assert len(inventory) == 650
+    assert inventory[7] == {
+        "key": "VARIABLE_7",
+        "source": "snowflake",
+        "source_path": "rows[7].VALUE",
+        "source_query": "query_3",
+        "observed_state": "null",
+        "observed_type": "null",
+        "basis": "observed",
+    }
+
+
+def test_feature_catalog_csv_requires_unique_exact_feature_keys():
+    entries = parse_feature_catalog_csv(
+        'feature,description,display_name\nonline_booking,"Book, online",Online Booking\nvoip,Calls,Voice\n'
+    )
+    assert [entry["feature"] for entry in entries] == ["online_booking", "voip"]
+    assert entries[0]["description"] == "Book, online"
+
+    with pytest.raises(ValueError, match="duplicate feature key"):
+        parse_feature_catalog_csv("feature,description\nvoip,One\nvoip,Two\n")
+
+
+def test_feature_catalog_csv_accepts_display_name_and_preserves_duplicate_columns():
+    entries = parse_feature_catalog_csv(
+        "Display Name,Product Area,Engaged,Engaged\n"
+        "sms_number,SMS Text messaging,Activated,Sends messages\n"
+    )
+
+    assert entries == [
+        {
+            "feature": "sms_number",
+            "Display Name": "sms_number",
+            "Product Area": "SMS Text messaging",
+            "Engaged": "Activated",
+            "Engaged (2)": "Sends messages",
+        }
+    ]
+
+
+def test_context_layer_coverage_checks_every_catalog_feature():
+    coverage = context_layer_coverage(
+        {"features": [{"name": "voip"}, {"name": "unknown_live_key"}]},
+        ["online_booking", "voip", "hcp_assist"],
+    )
+    assert coverage == {
+        "total_catalog_features": 3,
+        "present_count": 1,
+        "absent_count": 2,
+        "present_features": ["voip"],
+        "absent_features": ["hcp_assist", "online_booking"],
+        "unmatched_response_features": ["unknown_live_key"],
+    }
+
+
+def test_context_layer_fields_are_auditable_and_compilable():
+    sources = {
+        "context_layer": {
+            "firmographics": {"industry": "HVAC", "budget_range": None},
+            "features": [{"name": "voip", "rank": 2, "adopted": False}],
+        }
+    }
+    inventory = build_audit_inventory(sources)
+    assert [item["key"] for item in inventory] == [
+        "context_layer.features.voip.adopted",
+        "context_layer.features.voip.rank",
+        "context_layer.firmographics.budget_range",
+        "context_layer.firmographics.industry",
+    ]
+    assert inventory[2]["observed_state"] == "null"
+    compiled = compile_context(
+        sources,
+        [{
+            "key": "context_layer.features.voip.rank",
+            "canonical_key": "voip_rank",
+            "related_features": ["voip"],
+            "disposition": "include",
+            "review_status": "reviewed",
+        }],
+        feature_catalog_version_id="features-v1",
+        context_catalog_version_id="context-v1",
+    )
+    assert compiled["context"] == {"v": {"voip_rank": 2}, "f": {"voip_rank": ["voip"]}}
+
+
+def test_catalog_validation_removes_unverified_features_and_normalizes_decisions():
+    entries, warnings = validate_catalog_entries(
+        [
+            {
+                "key": "JOBS_CREATED",
+                "canonical_key": "jobs_created",
+                "value_category": "activity",
+                "related_features": ["jobs", "invented"],
+                "usefulness_rank": 5,
+                "disposition": "include",
+                "aggregate_prompt": "Calculate cohort percentiles for comparable Pros.",
+            }
+        ],
+        {"jobs"},
+    )
+    assert entries[0]["related_features"] == ["jobs"]
+    assert entries[0]["review_status"] == "draft"
+    assert warnings == ["JOBS_CREATED: removed unverified feature key invented"]
+
+
+def test_catalog_validation_rejects_individual_aggregate_calculations():
+    entries, warnings = validate_catalog_entries(
+        [{
+            "key": "JOBS_CREATED",
+            "usefulness_rank": 5,
+            "aggregate_prompt": "Calculate this Pro's percentile from this value.",
+        }],
+        set(),
+    )
+    assert entries[0]["aggregate_prompt"] is None
+    assert warnings == ["JOBS_CREATED: removed aggregate prompt that was not cohort-level"]
+
+
+def _catalog_entry(key: str, *, confidence: float) -> dict[str, object]:
+    return {
+        "key": key,
+        "canonical_key": key.casefold(),
+        "value_category": "activity",
+        "related_features": [],
+        "usefulness_rank": 5,
+        "disposition": "include",
+        "aggregate_prompt": None,
+        "confidence": confidence,
+        "uncertainty_reason": "Variable name is ambiguous" if confidence < 0.8 else None,
+    }
+
+
+def test_catalog_validation_preserves_model_confidence_and_sets_approval():
+    entries, warnings = validate_catalog_entries(
+        [{
+            **_catalog_entry("SMS_SENT", confidence=0.91),
+            "canonical_key": "sms_sent",
+            "value_category": "communication",
+            "related_features": ["sms_number"],
+        }],
+        {"sms_number"},
+    )
+
+    assert warnings == []
+    assert entries[0]["confidence"] == 0.91
+    assert entries[0]["approval_status"] == "auto_approved"
+    assert entries[0]["uncertainty_reason"] is None
+
+
+def test_catalog_validation_promotes_approved_deprioritize_to_include():
+    entries, warnings = validate_catalog_entries(
+        [{
+            **_catalog_entry("CALLS", confidence=0.6),
+            "disposition": "deprioritize",
+            "approval_status": "human_approved",
+            "review_status": "reviewed",
+        }],
+        set(),
+    )
+
+    assert warnings == []
+    assert entries[0]["disposition"] == "include"
+    assert entries[0]["approval_status"] == "auto_approved"
+
+
+def test_prioritize_review_exceptions_keeps_every_deprioritized_variable():
+    entries, _ = validate_catalog_entries(
+        [
+            {**_catalog_entry(f"KEY_{index:02}", confidence=0.5), "disposition": "deprioritize"}
+            for index in range(30)
+        ],
+        set(),
+    )
+
+    selected, output = prioritize_review_exceptions(entries)
+
+    assert len(selected) == 30
+    assert all(item["approval_status"] == "review_required" for item in selected)
+    assert sum(item["approval_status"] == "excluded" for item in output) == 0
+
+
+def test_canonical_key_collision_cannot_remain_approved():
+    entries, warnings = validate_catalog_entries(
+        [
+            {**_catalog_entry("FIRST", confidence=0.9), "canonical_key": "same", "approval_status": "human_approved"},
+            {**_catalog_entry("SECOND", confidence=0.9), "canonical_key": "same", "approval_status": "human_approved"},
+        ],
+        set(),
+    )
+
+    assert [entry["approval_status"] for entry in entries] == ["excluded", "excluded"]
+    assert [entry["disposition"] for entry in entries] == ["exclude", "exclude"]
+    assert warnings == ["canonical key same is used by multiple variables"]
+
+
+def test_compile_context_attaches_only_relevant_feature_cards():
+    entries, _ = validate_catalog_entries(
+        [{
+            **_catalog_entry("SMS_SENT", confidence=0.91),
+            "canonical_key": "sms_sent",
+            "value_category": "communication",
+            "related_features": ["sms_number"],
+        }],
+        {"sms_number", "jobs"},
+    )
+
+    compiled = compile_context(
+        {"snowflake": {"rows": [{"VARIABLE_NAME": "SMS_SENT", "VALUE": 0}]}},
+        entries,
+        feature_catalog_entries=[
+            {
+                "feature": "sms_number",
+                "Product Area": "SMS",
+                "Value Statement": "Customer texting number",
+            },
+            {
+                "feature": "jobs",
+                "Product Area": "Jobs",
+                "Value Statement": "Job management",
+            },
+        ],
+        feature_catalog_version_id="features-v1",
+        context_catalog_version_id="context-v1",
+    )
+
+    assert compiled["context"]["pc"] == {
+        "sms_number": {"a": "SMS", "v": "Customer texting number"}
+    }
+
+
+def test_compile_context_is_deterministic_and_uses_only_reviewed_includes():
+    sources = {
+        "snowflake": {
+            "rows": [
+                {"VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
+                {"VARIABLE_NAME": "NULL_METRIC", "VALUE": None},
+                {"VARIABLE_NAME": "EXCLUDED", "VALUE": 999},
+            ]
+        }
+    }
+    entries = [
+        {"key": "JOBS_CREATED", "canonical_key": "jobs", "related_features": ["jobs"], "disposition": "include", "review_status": "reviewed"},
+        {"key": "NULL_METRIC", "canonical_key": "null_metric", "related_features": [], "disposition": "include", "review_status": "reviewed"},
+        {"key": "EXCLUDED", "canonical_key": "excluded", "related_features": [], "disposition": "exclude", "review_status": "reviewed"},
+        {"key": "NOT_REVIEWED", "canonical_key": "draft", "related_features": [], "disposition": "include", "review_status": "draft"},
+    ]
+
+    compiled = compile_context(
+        sources,
+        entries,
+        feature_catalog_version_id="feature-v1",
+        context_catalog_version_id="context-v1",
+    )
+
+    assert compiled["context"] == {
+        "v": {"jobs": 12},
+        "n": ["null_metric"],
+        "f": {"jobs": ["jobs"]},
+    }
+    assert compiled["feature_catalog_version_id"] == "feature-v1"
+    assert compiled["context_catalog_version_id"] == "context-v1"
+    assert compiled["metrics"]["included_variables"] == 2
+    assert compiled["metrics"]["estimated_tokens"] > 0
+
+
+def test_compile_catalog_contract_uses_every_approved_include_without_org_values():
+    compiled = compile_catalog_contract(
+        [
+            {
+                "key": "JOBS_CREATED",
+                "canonical_key": "jobs",
+                "value_category": "activity",
+                "related_features": ["jobs"],
+                "usefulness_rank": 5,
+                "disposition": "include",
+                "approval_status": "auto_approved",
+            },
+            {
+                "key": "CALLS",
+                "canonical_key": "calls",
+                "disposition": "deprioritize",
+                "approval_status": "review_required",
+            },
+            {
+                "key": "INTERNAL_ONLY",
+                "canonical_key": "internal",
+                "disposition": "exclude",
+                "approval_status": "excluded",
+            },
+        ],
+        feature_catalog_entries=[
+            {"feature": "jobs", "Product Area": "Jobs", "Value Statement": "Job management"},
+        ],
+        feature_catalog_version_id="features-v1",
+        context_catalog_version_id="context-v1",
+    )
+
+    assert compiled["context"] == {
+        "r": [{"k": "JOBS_CREATED", "c": "jobs", "t": "activity", "u": 5, "f": ["jobs"]}],
+        "pc": {"jobs": {"a": "Jobs", "v": "Job management"}},
+    }
+    assert compiled["metrics"]["included_variables"] == 1
+
+
+def test_status_endpoint_identifies_env_file_without_exposing_values(monkeypatch):
+    from waypoint.workbench_api import create_workbench_app
+
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_URL", "https://secret.test/webhook")
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_TOKEN", "secret-token")
+    response = TestClient(create_workbench_app()).get("/api/context-workbench/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["env_file"].endswith("services/api/.env")
+    assert payload["configured"]["snowflake"] is True
+    assert "secret.test" not in json.dumps(payload)
+    assert "secret-token" not in json.dumps(payload)
+
+
+def test_catalog_validate_endpoint_returns_immutable_content_version():
+    from waypoint.workbench_api import create_workbench_app
+
+    client = TestClient(create_workbench_app())
+    body = {"name": "September", "filename": "features.csv", "csv_text": "feature,description\nvoip,Calls\n"}
+    first = client.post("/api/context-workbench/catalog/validate", json=body)
+    second = client.post("/api/context-workbench/catalog/validate", json=body)
+
+    assert first.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["source_filename"] == "features.csv"
+    assert first.json()["entries"][0]["feature"] == "voip"
+
+
+@pytest.mark.asyncio
+async def test_both_sources_resolve_org_uuid_from_n8n_before_context_layer(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    seen = {}
+
+    async def fake_n8n(self, identifier, webhook_url, token):
+        return [
+            {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "org-uuid-1"},
+            {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
+        ]
+
+    async def fake_context(self, identifier, base_url, api_key):
+        seen["identifier"] = identifier
+        return {"features": [{"name": "jobs"}]}
+
+    async def fake_model(prompt, **kwargs):
+        assert "org-uuid-1" not in prompt
+        assert "\"VALUE\": 12" not in prompt
+        return ('[{"key":"JOBS_CREATED","canonical_key":"jobs","value_category":"activity","related_features":["jobs","invented"],"usefulness_rank":5,"disposition":"include","aggregate_prompt":"Calculate cohort percentiles for comparable Pros.","confidence":0.9,"uncertainty_reason":null}]', {"output_tokens": 100})
+
+    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fake_n8n)
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="889901",
+        source_mode="both",
+        workbench_mode="authoring",
+        n8n_webhook_url="https://n8n.test",
+        n8n_webhook_token="token",
+        context_base_url="https://context.test",
+        context_api_key="key",
+        ai_api_key="ai-key",
+        feature_catalog_entries=[{"feature": "jobs"}, {"feature": "voip"}],
+        feature_catalog_version_id="features-v1",
+    ))
+
+    assert seen["identifier"] == "org-uuid-1"
+    assert result["outputs"]["audit"]["total_variables"] == 2
+    assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
+    assert result["outputs"]["context_layer_coverage"]["present_features"] == ["jobs"]
+    assert result["outputs"]["authoring"]["draft"][0]["related_features"] == ["jobs"]
+    assert any("invented" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_compile_mode_never_calls_model(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fail_n8n(*args, **kwargs):
+        raise AssertionError("compile must not recollect source data")
+
+    async def fail_model(*args, **kwargs):
+        raise AssertionError("compile must not call a model")
+
+    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fail_n8n)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fail_model)
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="889901",
+        source_mode="snowflake",
+        workbench_mode="compile",
+        n8n_webhook_url="https://n8n.test",
+        n8n_webhook_token="token",
+        catalog_version_id="context-v1",
+        feature_catalog_version_id="features-v1",
+        feature_catalog_entries=[{"feature": "jobs"}],
+        catalog_override=[{
+            "key": "JOBS_CREATED",
+            "canonical_key": "jobs",
+            "related_features": ["jobs"],
+            "usefulness_rank": 5,
+            "disposition": "include",
+            "review_status": "reviewed",
+        }],
+    ))
+
+    assert result["outputs"]["compiled"]["context"] == {
+        "r": [{"k": "JOBS_CREATED", "c": "jobs", "u": 5, "f": ["jobs"]}],
+    }
+    assert result["outputs"]["compiled"]["metrics"]["included_variables"] == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_n8n(self, identifier, webhook_url, token):
+        return [
+            {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
+            {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "secret"},
+        ]
+
+    calls = []
+
+    async def fake_model(prompt, **kwargs):
+        calls.append({"prompt": prompt, **kwargs})
+        if kwargs["stage"] == "evaluation_judge":
+            return (
+                json.dumps({
+                    "winner": "curated",
+                    "reason": "More grounded recommendations.",
+                    "suggested_changes": ["Keep the strongest usage signals first."],
+                }),
+                {"model": kwargs["model"], "input_tokens": 30, "output_tokens": 20, "duration_ms": 4},
+            )
+        label = "curated" if '"jobs_created"' in prompt else "baseline"
+        return (
+            json.dumps([{
+                "title": label,
+                "mechanism": "jobs",
+                "actions": ["help"],
+                "pro_facing_concept": "help",
+                "manager_rationale": "fit",
+                "channel": "email",
+                "risk": "low",
+            }]),
+            {"model": kwargs["model"], "input_tokens": 100, "output_tokens": 50, "duration_ms": 8},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fake_n8n)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    monkeypatch.setenv("MODEL_FAST", "claude-haiku-4-5")
+    monkeypatch.delenv("WORKBENCH_MODEL", raising=False)
+
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="889901",
+        source_mode="snowflake",
+        workbench_mode="evaluate",
+        n8n_webhook_url="https://n8n.test",
+        n8n_webhook_token="token",
+        ai_api_key="ai-key",
+        model="claude-sonnet-5",
+        feature_catalog_entries=[{
+            "feature": "jobs",
+            "Product Area": "Jobs",
+            "Value Statement": "Create and manage jobs.",
+        }],
+        catalog_override=[{
+            "key": "JOBS_CREATED",
+            "canonical_key": "jobs_created",
+            "value_category": "activity",
+            "related_features": ["jobs"],
+            "usefulness_rank": 5,
+            "disposition": "include",
+            "review_status": "reviewed",
+        }],
+    ))
+
+    evaluation = result["outputs"]["evaluation"]
+    assert len(calls) == 3
+    assert all("You are running one round of an evolutionary search" in calls[index]["prompt"] for index in (0, 1))
+    assert calls[0]["model"] == calls[1]["model"] == "claude-sonnet-5"
+    assert calls[0]["prompt"] != calls[1]["prompt"]
+    assert '"VALUE": "secret"' not in calls[0]["prompt"]
+    assert evaluation["baseline"]["candidates"][0]["title"] == "baseline"
+    assert evaluation["curated"]["candidates"][0]["title"] == "curated"
+    assert evaluation["curated"]["context"]["v"] == {"jobs_created": 12}
+    assert evaluation["curated"]["context"]["pc"]["jobs"]["a"] == "Jobs"
+    assert evaluation["judge"]["winner"] == "curated"
+    assert calls[2]["model"] == "claude-haiku-4-5"
+    assert "effort" not in calls[2]
+
+
+@pytest.mark.asyncio
+async def test_all_source_failures_include_each_safe_reason(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fail_n8n(self, identifier, webhook_url, token):
+        raise ValueError("Snowflake/n8n returned HTTP 503")
+
+    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fail_n8n)
+    with pytest.raises(HTTPException) as caught:
+        await execute_run(WorkbenchRunRequest(
+            identifier="889901",
+            source_mode="snowflake",
+            workbench_mode="runtime",
+            n8n_webhook_url="https://n8n.test",
+            n8n_webhook_token="token",
+        ))
+
+    assert caught.value.status_code == 502
+    assert caught.value.detail == {
+        "message": "All selected context sources failed",
+        "sources": {"snowflake": "Snowflake/n8n returned HTTP 503"},
+    }
 
 
 @pytest.mark.asyncio
@@ -180,9 +797,11 @@ async def test_workbench_never_places_fixture_pii_in_prompt(monkeypatch):
         assert "Karla" not in prompt
         assert "LaPointe" not in prompt
         return (
-            '[{"title":"Try HCP AI","mechanism":"hcp_assist",'
-            '"actions":["show the capability"],"pro_facing_concept":"help",'
-            '"manager_rationale":"fit","channel":"email","risk":"low"}]',
+            (
+                '[{"title":"Try HCP AI","mechanism":"hcp_assist",'
+                '"actions":["show the capability"],"pro_facing_concept":"help",'
+                '"manager_rationale":"fit","channel":"email","risk":"low"}]'
+            ),
             {"model": model, "input_tokens": 10, "output_tokens": 20, "cost_usd": 0.01},
         )
 
@@ -227,7 +846,15 @@ async def test_authoring_mode_returns_review_only_catalog_draft(monkeypatch):
         assert "canonical_key" in prompt
         assert "usefulness_rank" in prompt
         assert "aggregate_prompt" in prompt
-        return ('[{"key":"industry","label":"Industry","category":"profile","unit":null,"meaning":"Business type","why_it_matters":"Helps tailor context"}]', {"model": model})
+        return (
+            (
+                '[{"key":"industry","canonical_key":"industry","value_category":"profile",'
+                '"related_features":[],"usefulness_rank":2,"disposition":"deprioritize",'
+                '"aggregate_prompt":null,"confidence":0.9,"uncertainty_reason":null,'
+                '"label":"Industry"}]'
+            ),
+            {"model": model},
+        )
 
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     async def fake_context(self, identifier, base_url, api_key):
@@ -236,9 +863,435 @@ async def test_authoring_mode_returns_review_only_catalog_draft(monkeypatch):
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     result = await execute_run(WorkbenchRunRequest(identifier="org-123", source_mode="context_layer", context_base_url="https://context.test", context_api_key="context-key", workbench_mode="authoring", ai_api_key="test-key"))
     assert result["outputs"]["authoring"]["status"] == "draft_only"
-    assert result["outputs"]["authoring"]["total_keys"] == 2
+    assert result["outputs"]["authoring"]["total_keys"] == 1
     assert result["outputs"]["authoring"]["completed_keys"] == 1
-    assert result["outputs"]["authoring"]["remaining_keys"] == 1
+    assert result["outputs"]["authoring"]["remaining_keys"] == 0
     assert "label" not in result["outputs"]["authoring"]["draft"][0]
     assert any(stage["name"] == "authoring_parse" and stage["status"] == "succeeded" for stage in result["stages"])
     assert all("hidden@example.com" not in str(stage) for stage in result["stages"])
+
+
+@pytest.mark.asyncio
+async def test_authoring_requeues_variables_missing_required_metadata(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"alpha": 1, "beta": 2}}
+
+    prompts = []
+
+    async def fake_model(prompt, **kwargs):
+        prompts.append(prompt)
+        assert kwargs["max_tokens"] == 20_000
+        assert kwargs["effort"] == "low"
+        assert '"product_area":"SMS Text messaging"' in prompt
+        assert "DO NOT REPEAT" not in prompt
+        key = "context_layer.firmographics.beta"
+        if len(prompts) == 1:
+            return (
+                json.dumps([
+                    {
+                        "key": "context_layer.firmographics.alpha",
+                        "canonical_key": "alpha",
+                        "value_category": "profile",
+                        "related_features": [],
+                        "usefulness_rank": 2,
+                        "disposition": "deprioritize",
+                        "aggregate_prompt": None,
+                        "confidence": 0.9,
+                        "uncertainty_reason": None,
+                    },
+                    {"key": key},
+                ]),
+                {"output_tokens": 100, "stop_reason": "end_turn"},
+            )
+        return (
+            json.dumps([{
+                "key": key,
+                "canonical_key": "beta",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 2,
+                "disposition": "deprioritize",
+                "aggregate_prompt": None,
+                "confidence": 0.9,
+                "uncertainty_reason": None,
+            }]),
+            {"output_tokens": 50, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="org-123",
+        source_mode="context_layer",
+        context_base_url="https://context.test",
+        context_api_key="context-key",
+        workbench_mode="authoring",
+        ai_api_key="test-key",
+        feature_catalog_entries=[{
+            "feature": "sms_number",
+            "Product Area": "SMS Text messaging",
+            "Value Statement": "A short matching description.",
+            "Attached": "DO NOT REPEAT",
+        }],
+    ))
+
+    assert len(prompts) == 2
+    assert "context_layer.firmographics.alpha" not in prompts[1]
+    assert result["outputs"]["authoring"]["completed_keys"] == 2
+    assert result["outputs"]["authoring"]["remaining_keys"] == 0
+    assert result["outputs"]["authoring"]["token_budget"] == 150_000
+
+
+@pytest.mark.asyncio
+async def test_authoring_revises_low_confidence_once_and_checkpoints(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"alpha": 1}}
+
+    prompts: list[str] = []
+    checkpoints: list[dict[str, object]] = []
+
+    async def fake_model(prompt, **kwargs):
+        prompts.append(prompt)
+        confidence = 0.88 if "REVISE LOW-CONFIDENCE" in prompt else 0.6
+        return (
+            json.dumps([{
+                "key": "context_layer.firmographics.alpha",
+                "canonical_key": "alpha",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 4,
+                "disposition": "include",
+                "aggregate_prompt": "Calculate cohort percentiles for comparable Pros.",
+                "confidence": confidence,
+                "uncertainty_reason": None if confidence >= 0.8 else "The variable name is broad.",
+            }]),
+            {"output_tokens": 50, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(
+        WorkbenchRunRequest(
+            identifier="org-123",
+            source_mode="context_layer",
+            context_base_url="https://context.test",
+            context_api_key="context-key",
+            workbench_mode="authoring",
+            ai_api_key="test-key",
+        ),
+        checkpoint=checkpoints.append,
+    )
+
+    entry = result["outputs"]["authoring"]["draft"][0]
+    assert len(prompts) == 2
+    assert entry["confidence"] == 0.88
+    assert entry["approval_status"] == "auto_approved"
+    assert result["outputs"]["authoring"]["revision_attempted"] == 1
+    assert checkpoints[-1]["entries"][0]["confidence"] == 0.88
+    assert checkpoints[-1]["revised_keys"] == ["context_layer.firmographics.alpha"]
+
+
+@pytest.mark.asyncio
+async def test_authoring_model_cannot_claim_human_approval(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"alpha": 1}}
+
+    async def fake_model(prompt, **kwargs):
+        return (
+            json.dumps([{
+                "key": "context_layer.firmographics.alpha",
+                "canonical_key": "alpha",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 4,
+                "disposition": "include",
+                "aggregate_prompt": "Calculate cohort percentiles for comparable Pros.",
+                "confidence": 0.1,
+                "uncertainty_reason": "The variable is ambiguous.",
+                "approval_status": "human_approved",
+                "review_status": "reviewed",
+            }]),
+            {"output_tokens": 50, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="org-123",
+        source_mode="context_layer",
+        context_base_url="https://context.test",
+        context_api_key="context-key",
+        workbench_mode="authoring",
+        ai_api_key="test-key",
+    ))
+
+    entry = result["outputs"]["authoring"]["draft"][0]
+    assert entry["approval_status"] == "auto_approved"
+    assert entry["review_status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_authoring_keeps_review_exception_when_revision_is_not_a_list(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"alpha": 1}}
+
+    async def fake_model(prompt, **kwargs):
+        if "REVISE LOW-CONFIDENCE" in prompt:
+            return ("42", {"output_tokens": 1, "stop_reason": "end_turn"})
+        return (
+            json.dumps([{
+                "key": "context_layer.firmographics.alpha",
+                "canonical_key": "alpha",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 4,
+                "disposition": "deprioritize",
+                "aggregate_prompt": "Calculate cohort percentiles for comparable Pros.",
+                "confidence": 0.6,
+                "uncertainty_reason": "The variable name is broad.",
+            }]),
+            {"output_tokens": 50, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="org-123",
+        source_mode="context_layer",
+        context_base_url="https://context.test",
+        context_api_key="context-key",
+        workbench_mode="authoring",
+        ai_api_key="test-key",
+    ))
+
+    entry = result["outputs"]["authoring"]["draft"][0]
+    assert entry["approval_status"] == "review_required"
+    assert result["outputs"]["authoring"]["review_exception_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_authoring_resume_does_not_redraft_checkpointed_keys(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"done": 1, "todo": 2}}
+
+    prompts: list[str] = []
+
+    async def fake_model(prompt, **kwargs):
+        prompts.append(prompt)
+        assert "context_layer.firmographics.done" not in prompt
+        return (
+            json.dumps([{
+                "key": "context_layer.firmographics.todo",
+                "canonical_key": "todo",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 2,
+                "disposition": "deprioritize",
+                "aggregate_prompt": None,
+                "confidence": 0.9,
+                "uncertainty_reason": None,
+            }]),
+            {"output_tokens": 25, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(
+        WorkbenchRunRequest(
+            identifier="org-123",
+            source_mode="context_layer",
+            context_base_url="https://context.test",
+            context_api_key="context-key",
+            workbench_mode="authoring",
+            ai_api_key="test-key",
+        ),
+        resume_state={
+            "entries": [{
+                "key": "context_layer.firmographics.done",
+                "canonical_key": "done",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 2,
+                "disposition": "deprioritize",
+                "aggregate_prompt": None,
+                "confidence": 0.9,
+                "uncertainty_reason": None,
+                "approval_status": "auto_approved",
+            }],
+            "revised_keys": [],
+        },
+    )
+
+    assert len(prompts) == 1
+    assert result["outputs"]["authoring"]["completed_keys"] == 2
+
+
+@pytest.mark.asyncio
+async def test_authoring_resume_uses_checkpoint_inventory_and_cumulative_budget(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def source_must_not_run(*args, **kwargs):
+        raise AssertionError("resume must not refetch the source")
+
+    async def fake_model(prompt, **kwargs):
+        return (
+            json.dumps([{
+                "key": "context_layer.firmographics.todo",
+                "canonical_key": "todo",
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 2,
+                "disposition": "deprioritize",
+                "aggregate_prompt": None,
+                "confidence": 0.9,
+                "uncertainty_reason": None,
+            }]),
+            {"output_tokens": 25, "stop_reason": "end_turn"},
+        )
+
+    inventory = [{
+        "key": "context_layer.firmographics.todo",
+        "source": "context_layer",
+        "source_path": "firmographics.todo",
+        "source_query": "",
+        "observed_state": "present",
+        "observed_type": "number",
+        "basis": "observed",
+    }]
+    checkpoints: list[dict[str, object]] = []
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", source_must_not_run)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(
+        WorkbenchRunRequest(
+            identifier="org-123",
+            source_mode="context_layer",
+            workbench_mode="authoring",
+            ai_api_key="test-key",
+        ),
+        resume_state={
+            "inventory": inventory,
+            "entries": [],
+            "revised_keys": [],
+            "output_tokens": 100,
+            "attempts": {"context_layer.firmographics.todo": 1},
+            "warnings": ["saved warning"],
+        },
+        checkpoint=checkpoints.append,
+    )
+
+    assert result["outputs"]["authoring"]["output_tokens"] == 125
+    assert "saved warning" in result["warnings"]
+    assert checkpoints[-1]["inventory"] == inventory
+    assert checkpoints[-1]["attempts"]["context_layer.firmographics.todo"] == 2
+
+
+@pytest.mark.asyncio
+async def test_authoring_splits_and_retries_a_batch_that_hits_max_tokens(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {key: index for index, key in enumerate("abcd")}}
+
+    calls = []
+
+    def complete(keys):
+        return json.dumps([
+            {
+                "key": f"context_layer.firmographics.{key}",
+                "canonical_key": key,
+                "value_category": "profile",
+                "related_features": [],
+                "usefulness_rank": 2,
+                "disposition": "deprioritize",
+                "aggregate_prompt": None,
+                "confidence": 0.9,
+                "uncertainty_reason": None,
+            }
+            for key in keys
+        ])
+
+    async def fake_model(prompt, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["effort"] == "low"
+        if len(calls) == 1:
+            return "", {"output_tokens": 20_000, "stop_reason": "max_tokens"}
+        keys = "ab" if len(calls) == 2 else "cd"
+        return complete(keys), {"output_tokens": 100, "stop_reason": "end_turn"}
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    checkpoints: list[dict[str, object]] = []
+    result = await execute_run(
+        WorkbenchRunRequest(
+            identifier="org-123",
+            source_mode="context_layer",
+            context_base_url="https://context.test",
+            context_api_key="context-key",
+            workbench_mode="authoring",
+            ai_api_key="test-key",
+            feature_catalog_entries=[],
+        ),
+        checkpoint=checkpoints.append,
+    )
+
+    assert len(calls) == 3
+    assert result["outputs"]["authoring"]["completed_keys"] == 4
+    assert result["outputs"]["authoring"]["remaining_keys"] == 0
+    assert any("split" in warning for warning in result["warnings"])
+    split_checkpoint = next(item for item in checkpoints if item["output_tokens"] == 20_000)
+    assert len(split_checkpoint["pending_queue"]) == 4
+    assert all(value == 1 for value in split_checkpoint["attempts"].values())
+
+
+@pytest.mark.asyncio
+async def test_authoring_requeues_single_variable_after_max_tokens(monkeypatch):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"alpha": 1}}
+
+    calls = 0
+
+    async def fake_model(prompt, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "", {"output_tokens": 20_000, "stop_reason": "max_tokens"}
+        return (json.dumps([{
+            "key": "context_layer.firmographics.alpha",
+            "canonical_key": "alpha",
+            "value_category": "profile",
+            "related_features": [],
+            "usefulness_rank": 2,
+            "disposition": "deprioritize",
+            "aggregate_prompt": None,
+            "confidence": 0.9,
+            "uncertainty_reason": None,
+        }]), {"output_tokens": 100, "stop_reason": "end_turn"})
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    result = await execute_run(WorkbenchRunRequest(
+        identifier="org-123",
+        source_mode="context_layer",
+        context_base_url="https://context.test",
+        context_api_key="context-key",
+        workbench_mode="authoring",
+        ai_api_key="test-key",
+        feature_catalog_entries=[],
+    ))
+
+    assert calls == 2
+    assert result["outputs"]["authoring"]["completed_keys"] == 1
+    assert result["outputs"]["authoring"]["remaining_keys"] == 0

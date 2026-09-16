@@ -1,89 +1,108 @@
 # Context Workbench handoff
 
-## Goal
+## Purpose
 
-The Context Workbench is a local inspection and authoring tool for building a safe, compact AI context layer for Waypoint. It is experimental: catalog drafts are not runtime-approved automatically.
+The Workbench builds a safe, compact context contract for Waypoint. It starts with every variable returned by the experimental Snowflake-through-n8n workflow, optionally adds Context Layer evidence, audits the full safe inventory, drafts AI-useful metadata, and deterministically compiles approved rules. High-confidence valid rules approve automatically; the user reviews no more than 25 important exceptions.
 
-## Branch and workspace
+The Workbench never edits n8n or Snowflake queries. Change queries outside the Workbench, then run a fresh audit.
 
-- Repository: `/Users/jakefassora/projects/pathfinder-waypoint-v3-outcome-pollers`
-- Branch: `V3-Improvements`
-- Do not modify the separate V2 worktree or its unrelated dirty files.
-- Do not commit or print secrets. Keep `services/api/.env` local and untracked.
+## Durable checkout
 
-## Start locally
+- Branch: `V4-Improvements`
+- Worktree: `/Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4`
+- Environment: `/Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/services/api/.env`
+- The environment file is ignored, local, and loaded by the backend. Do not print its values or replace it with a vault flow.
+- No implementation changes are committed or pushed without explicit approval.
+
+## Start
 
 Backend:
 
 ```bash
-cd /Users/jakefassora/projects/pathfinder-waypoint-v3-outcome-pollers/services/api
-set -a
-source .env
-set +a
-PYTHONPATH=src /Users/jakefassora/projects/pathfinder-waypoint-v2/services/api/.venv/bin/python scripts/run_workbench.py
+cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/services/api
+PYTHONPATH=src .venv/bin/python scripts/run_workbench.py
 ```
 
 Frontend:
 
 ```bash
-cd /Users/jakefassora/projects/pathfinder-waypoint-v3-outcome-pollers/apps/web
-pnpm dev
+cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/apps/web
+./node_modules/.bin/next dev
 ```
 
 Open `http://localhost:3000/context-workbench`.
 
-## Runtime flow
+## Use
 
-1. Fetch Context Layer, Snowflake via n8n, or both.
-2. Normalize the source payloads.
-3. Run the deterministic, app-side PII exclusion gate.
-4. Build the machine-oriented context payload.
-5. Run baseline/proposed prompts and parse candidate JSON.
+1. Confirm the page shows the exact `services/api/.env` path and marks Snowflake and AI configured.
+2. Enter the numeric organization ID.
+3. Leave **Add Context Layer API coverage** off to prove the experimental n8n source by itself. Turn it on only when you want the additional source.
+4. Use the built-in feature catalog or upload a CSV. The feature-key column may be named `feature`, `Feature Key`, or `Display Name`; every key must be unique, and every validated upload is stored as an immutable local version. Duplicate descriptive column names are preserved with numbered suffixes.
+5. Leave **Fresh audit** selected to start from every current source variable. Select an older context version only to resume it deliberately.
+6. Press **Collect and curate all variables**. The backend creates a durable SQLite job and returns immediately. The n8n client accepts the full variable-audit response and waits up to 240 seconds; if that limit is reached, the source reports an explicit timeout instead of an empty failure reason.
+7. Leave the page open or close it. The backend checkpoints after every batch, and the page reconnects to the same job after refresh, browser closure, or backend restart.
+8. Review the exception queue. The model reports confidence from `0.00` through `1.00`; anything below `0.80` gets one automatic revision. Valid results at or above `0.80` approve automatically.
+9. Resolve each displayed exception by approving or excluding it. The queue is capped at 25. Unresolved overflow is excluded from compilation and remains in diagnostics.
+10. Save a new immutable context version. It records the feature-catalog version, confidence threshold, approval states, and excluded keys.
+11. Press **Compile reviewed context**. Compilation runs as another durable job and deterministically turns only `auto_approved` or `human_approved` `include` rules into an organization-independent context contract. It does not recollect org data or make an AI call.
+12. Press **Test curated context**. The Workbench fetches fresh data for the selected organization, applies the PII gate, and runs the exact Waypoint evolve prompt twice: once with the full scrubbed source context and once with the curated packet. It shows both idea sets, token and latency metrics, and a low-cost `MODEL_FAST` verdict with no more than three small suggested context changes. This is recommendation-only; it never sends outreach or writes to production systems.
 
-Raw provider values are withheld from the trace before the PII gate. Credentials never enter the browser request.
+Selecting an older feature version is rollback. Uploading a changed feature catalog shows exact added, removed, and changed counts. Unknown feature mappings are removed and reported as warnings.
 
-## Authoring flow
+Authoring uses low model effort, a 20,000-token generation cap per batch, and a 150,000-output-token cap for the full run. Each batch receives a compact feature index containing exact keys, product areas, and short descriptions instead of every CSV column. Variables returned without every required metadata field are requeued up to three times. A batch that reaches `max_tokens` is split and retried; it is never treated as complete.
 
-Authoring uses scrubbed variable inventory plus the optional feature catalog CSV. It produces only machine-oriented catalog metadata:
+Durable job state lives in ignored local storage at `services/api/.workbench/jobs.sqlite3`. It contains sanitized requests, variable metadata, progress, usage, warnings, and pruned results. It does not contain credentials, raw pre-PII payloads, or full authoring prompts/responses.
 
-```text
-key
-canonical_key
-value_category
-related_features
-usefulness_rank
-aggregate_prompt
+## Data boundaries
+
+- The browser never collects credentials.
+- Raw provider values remain server-side until the app-side PII gate completes.
+- Identity-variable values are removed. Business fields such as `FEATURE_VOIP_STATE` are not confused with geographic state.
+- The authoring model receives variable keys, source query/path, observed type/state, and the verified feature catalog. It does not receive organization values.
+- Runtime compilation attaches compact product cards only for feature keys referenced by approved included rules. Waypoint receives exact feature meaning without receiving all 275 catalog rows for every organization.
+- A missing or null value describes only this observed organization response.
+- Global missingness, freshness, reliability, distributions, and conflict frequency remain unavailable unless evidence is supplied.
+- Aggregate prompts must request cohort-level statistics, not calculations from one Pro's value.
+
+## Source contracts
+
+### Experimental n8n
+
+Request:
+
+```json
+{"organization_id":"889901"}
 ```
 
-`related_features` must contain only exact feature keys from the uploaded catalog. `aggregate_prompt` is generated only for high-usefulness variables and requests cohort-level statistics across comparable Pros; it must not ask Claude to calculate an individual Pro’s position.
+Response: a list of rows containing `QUERY_NAME`, `VARIABLE_NAME`, `VALUE`, and optional `METADATA`. The Workbench retains and audits every safe row; it does not require an `org-context-v2` wrapper.
 
-The authoring loop requeues missing keys when Claude returns a partial batch. Progress is calculated against the full scrubbed inventory.
+### Context Layer
 
-## Catalog versions
+The only endpoint is `GET /api/context_layer/:organization_uuid`. It returns all related features for an organization in one response. In combined mode, the Workbench obtains `ORG_UUID` from the n8n result, performs one read-only GET, and compares every returned feature name against every exact key in the active feature catalog.
 
-- Select **Fresh variable inventory** to ignore saved entries.
-- Select a named version to resume from its saved entries.
-- Selecting a saved version restores the prompt that created it.
-- Saving stores the name, prompt, entries, created timestamp, and updated timestamp in browser local storage.
-- Runtime uses the selected saved version after it is saved; drafts remain experimental until deliberately promoted.
+## Current live evidence
 
-## Design rules
+On 2026-09-15, a safe compile-mode smoke test for organization `889901` returned 649 n8n rows in 18.4 seconds with no source warning. All 649 rows were accounted for; 66 identity-variable values were removed before authoring.
 
-- Prefer compact key/value structures over narrative prose at runtime.
-- Do not guess time windows or feature relationships from opaque names.
-- Keep deterministic transformations, feature mappings, eligibility, consent, PII removal, and statistics outside the LLM.
-- Use the LLM for interpreting approved evidence and generating hypotheses, not for inventing facts or product relationships.
-- Unknown, missing, stale, and conflicting values must remain distinguishable.
+The documented Context Layer org smoke test returned HTTP 200 through the Workbench in 1.0 second. Against the packaged 26-key catalog, three keys matched and thirteen returned feature names were unmatched. That mismatch is catalog-refinement evidence, not permission to invent aliases.
+
+The 2026-09-15 authoring attempt was not durably saved before the browser state disappeared. The durable job implementation prevents that failure mode for future runs. A new live Anthropic run still transfers scrubbed internal variable metadata and consumes model tokens, so it remains an explicit final verification action.
 
 ## Verification
 
 ```bash
-cd /Users/jakefassora/projects/pathfinder-waypoint-v3-outcome-pollers/services/api
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/jakefassora/projects/pathfinder-waypoint-v2/services/api/.venv/bin/python -m pytest -p no:cacheprovider tests/test_workbench.py -q
-
-cd /Users/jakefassora/projects/pathfinder-waypoint-v3-outcome-pollers/apps/web
-pnpm lint
-pnpm test --run
+cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/services/api
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider -q
+.venv/bin/ruff check src tests
+PYTHONPATH=src .venv/bin/mypy src/waypoint
 ```
 
-Do not treat passing tests as proof that external Context Layer, n8n, Snowflake, or Anthropic credentials are configured correctly; those require a live, non-secret-bearing smoke test.
+```bash
+cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/apps/web
+./node_modules/.bin/vitest run
+./node_modules/.bin/eslint src
+./node_modules/.bin/tsc --noEmit
+./node_modules/.bin/next build
+```
+
+Passing local tests does not prove that the curated context improves recommendations. Recommendation quality, model-token usage, and end-to-end latency still need evaluation after the real authoring run produces a reviewed catalog.

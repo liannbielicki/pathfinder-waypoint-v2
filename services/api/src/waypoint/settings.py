@@ -7,7 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="forbid")
+    # Runtime and the local Context Workbench intentionally share services/api/.env.
+    # Ignore unrelated dotenv keys while still validating every declared runtime field.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     DATABASE_URL: SecretStr
     LLM_API_KEY: SecretStr

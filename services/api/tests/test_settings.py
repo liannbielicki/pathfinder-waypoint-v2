@@ -78,3 +78,11 @@ def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setenv(key, val)
     monkeypatch.delenv("CTA_FEASIBILITY_HINTS", raising=False)
     assert Settings.load().CTA_FEASIBILITY_HINTS is False
+
+
+def test_workbench_only_dotenv_keys_do_not_break_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, val in _MINIMAL_ENV.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_URL", "https://workbench.example.com")
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_TOKEN", "workbench-token")
+    assert Settings.load().WORKER_COUNT == 1

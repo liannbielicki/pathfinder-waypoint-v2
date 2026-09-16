@@ -8,6 +8,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+services/api/.workbench/
 dist/
 playwright-report/
 test-results/

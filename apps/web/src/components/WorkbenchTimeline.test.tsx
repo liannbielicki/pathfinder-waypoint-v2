@@ -19,4 +19,14 @@ describe("WorkbenchTimeline", () => {
     expect(screen.getByText(/removed 2 fields/i)).toBeInTheDocument();
     expect(screen.queryByText(/@/)).not.toBeInTheDocument();
   });
+
+  it("shows the exact source failure instead of only a generic failure", () => {
+    render(<WorkbenchTimeline trace={{
+      stages: [{ name: "snowflake_context", status: "failed", error: "Snowflake/n8n returned HTTP 503" }],
+      warnings: [],
+      outputs: {},
+    }} />);
+
+    expect(screen.getByText("Snowflake/n8n returned HTTP 503")).toBeInTheDocument();
+  });
 });
