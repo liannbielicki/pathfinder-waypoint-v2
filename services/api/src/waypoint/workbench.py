@@ -45,6 +45,7 @@ _PHONE = re.compile(
 )
 _DATE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T ]\S+)?$")
 _ADDRESS = re.compile(r"\b\d{1,6}\s+[A-Za-z0-9 .'-]+\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|court|ct|way|highway|hwy)\b", re.IGNORECASE)
+_EFFORT_REJECTED: set[str] = set()
 _FIXTURE_PATH = Path(__file__).parents[2] / "tests" / "fixtures" / "context_layer_workbench.json"
 
 
@@ -784,11 +785,11 @@ async def run_model(
 
     started = time.perf_counter()
     client = anthropic.AsyncAnthropic(api_key=api_key)
+    kwargs: dict[str, Any] = {}
+    if effort is not None and model not in _EFFORT_REJECTED:
+        kwargs["output_config"] = {"effort": effort}
 
     async def create_message() -> Any:
-        kwargs: dict[str, Any] = {}
-        if effort is not None:
-            kwargs["output_config"] = {"effort": effort}
         return await client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -798,7 +799,18 @@ async def run_model(
         )
 
     try:
-        response = await retry_rate_limit(create_message)
+        try:
+            response = await retry_rate_limit(create_message)
+        except Exception as error:
+            if (
+                "output_config" not in kwargs
+                or getattr(error, "status_code", None) != 400
+                or "effort" not in str(error).casefold()
+            ):
+                raise
+            _EFFORT_REJECTED.add(model)
+            kwargs.pop("output_config")
+            response = await retry_rate_limit(create_message)
     finally:
         await client.close()
     usage = response.usage

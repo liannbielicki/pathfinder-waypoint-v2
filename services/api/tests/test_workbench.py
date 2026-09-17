@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from waypoint.workbench import (
     prioritize_review_exceptions,
     redact,
     resolve_product_cards,
+    run_model,
     scrub_pii,
     unwrap_source_payload,
     validate_catalog_entries,
@@ -53,6 +55,48 @@ def _completed_evaluation_job(
 def test_trace_stage_names_are_kept_in_execution_order():
     stages = [WorkbenchStage(name="input"), WorkbenchStage(name="raw_context")]
     assert [stage.name for stage in stages] == ["input", "raw_context"]
+
+
+@pytest.mark.asyncio
+async def test_run_model_retries_without_effort_when_model_rejects_it(monkeypatch):
+    import anthropic
+
+    calls: list[dict[str, object]] = []
+
+    class EffortUnsupported(Exception):
+        status_code = 400
+
+    class FakeClient:
+        def __init__(self, *, api_key: str) -> None:
+            self.messages = self
+
+        async def create(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            if "output_config" in kwargs:
+                raise EffortUnsupported("This model does not support the effort parameter.")
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="[]")],
+                usage=SimpleNamespace(input_tokens=10, output_tokens=2),
+                stop_reason="end_turn",
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeClient)
+
+    text, metrics = await run_model(
+        "Return JSON",
+        api_key="test-key",
+        model="claude-haiku-4-5",
+        stage="authoring_generation_1",
+        effort="low",
+    )
+
+    assert text == "[]"
+    assert calls[0]["output_config"] == {"effort": "low"}
+    assert "output_config" not in calls[1]
+    assert metrics["output_tokens"] == 2
 
 
 def test_redact_masks_secrets_recursively():
