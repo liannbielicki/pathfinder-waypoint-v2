@@ -7,6 +7,7 @@ mirroring warmstart.retrieve's select-the-relevant-thing discipline.
 """
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,3 +125,12 @@ def feature_context(brief: OrgBrief, *, feasibility: bool) -> str:
     header = "HCP features referenced in this Pro's context (reference data):"
     block = "\n".join([header, *lines])
     return f"{block}\n{_FEASIBILITY_DIRECTIVE}" if feasibility else block
+
+
+def waypoint_context(brief: OrgBrief, *, feasibility: bool) -> str:
+    """Return promoted context when present, otherwise the legacy Waypoint brief."""
+    if brief.curated_context is not None:
+        return json.dumps(brief.curated_context, sort_keys=True, separators=(",", ":"))
+    context = brief.model_dump_json()
+    block = feature_context(brief, feasibility=feasibility)
+    return f"{context}\n{block}" if block else context

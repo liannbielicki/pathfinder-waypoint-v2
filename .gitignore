@@ -8,6 +8,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+services/api/.workbench/
+services/api/data/waypoint.db
 dist/
 playwright-report/
 test-results/

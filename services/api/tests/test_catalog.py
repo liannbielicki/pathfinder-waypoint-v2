@@ -1,4 +1,4 @@
-from waypoint.catalog import CATALOG, _first_sentence, feature_context
+from waypoint.catalog import CATALOG, _first_sentence, feature_context, waypoint_context
 from waypoint.n8n import OrgBrief
 
 
@@ -67,3 +67,27 @@ def test_feasibility_suffix_omits_sentinel_works_on():
     assert "payment_processing" in on
     payment_line = next(line for line in on.splitlines() if line.startswith("- payment_processing"))
     assert "reachable on" not in payment_line
+
+
+def test_waypoint_context_uses_promoted_packet_without_legacy_catalog_dump():
+    brief = _brief(
+        feature_voip_state="attached_unused",
+        curated_context={
+            "v": {"jobs_created_t28": 12},
+            "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
+        },
+    )
+
+    context = waypoint_context(brief, feasibility=False)
+
+    assert context == '{"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12}}'
+    assert "voip" not in context
+
+
+def test_waypoint_context_keeps_legacy_behavior_without_active_promotion():
+    brief = _brief(feature_voip_state="attached_unused")
+
+    context = waypoint_context(brief, feasibility=False)
+
+    assert brief.model_dump_json() in context
+    assert "voip (state: attached_unused" in context

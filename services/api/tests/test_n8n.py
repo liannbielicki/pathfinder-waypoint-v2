@@ -63,6 +63,99 @@ async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> N
     assert batch.organizations[0].open_ar_band == "low"
 
 
+async def test_active_promotion_retains_only_promoted_canonical_values(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "JOBS_CREATED_T28",
+            "canonical_key": "jobs_created_t28",
+            "related_features": ["jobs"],
+        }],
+        "feature_catalog": [{
+            "feature": "jobs",
+            "Product Area": "Jobs",
+            "Value Statement": "Manage job workflows.",
+        }],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
+    row = {
+        **_rows()[0],
+        "JOBS_CREATED_T28": 12,
+        "UNAPPROVED_VALUE": 99,
+        "customer_email": "leak@example.com",
+    }
+    httpx_mock.add_response(json=[row])
+
+    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {
+        "v": {"jobs_created_t28": 12},
+        "f": {"jobs_created_t28": ["jobs"]},
+        "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
+    }
+    assert "UNAPPROVED_VALUE" not in str(brief.curated_context)
+    assert "customer_email" not in str(brief.curated_context)
+    assert "curated_context" not in brief.model_dump()
+
+
+async def test_active_promotion_with_no_matching_values_fails_closed(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "NEW_QUERY_FIELD",
+            "canonical_key": "new_query_field",
+            "related_features": [],
+        }],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
+    httpx_mock.add_response(json=[_rows()[0]])
+
+    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {}}
+
+
+async def test_active_promotion_drops_a_value_when_it_contains_pii(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "CUSTOMER_SEGMENT",
+            "canonical_key": "customer_segment",
+            "related_features": [],
+        }],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
+    httpx_mock.add_response(json=[{
+        **_rows()[0],
+        "CUSTOMER_SEGMENT": "unexpected@example.invalid",
+    }])
+
+    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {}}
+    assert "unexpected@example.invalid" not in str(brief.curated_context)
+
+
 async def test_audience_query_version_is_captured_not_stored_on_orgs(
     httpx_mock: HTTPXMock,
 ) -> None:

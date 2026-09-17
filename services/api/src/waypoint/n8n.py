@@ -20,11 +20,15 @@ import logging
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from waypoint.context_promotion import PromotionStore, compile_promoted_context
+from waypoint.workbench import scrub_pii
 
 log = logging.getLogger("waypoint.n8n")
 
 CONTRACT_VERSION = "org-context-v2"
+PROMOTION_STORE = PromotionStore()
 
 # The closed allowlist: only these band/state fields (plus org_uuid and
 # contract_version) may cross the boundary. The client drops anything else.
@@ -117,6 +121,7 @@ class OrgBrief(BaseModel):
     wisetack_state: str | None = None
     mrr_band: str | None = None
     platform_usage_band: str | None = None
+    curated_context: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @property
     def pro_id(self) -> str:
@@ -172,6 +177,33 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
         log.debug("dropped non-allowlisted context fields: %s", sorted(dropped))
     projected: dict[str, Any] = {"org_uuid": row["org_uuid"]}
     projected.update({k: row[k] for k in ALLOWED_FIELDS if k in row})
+    bundle = PROMOTION_STORE.read_active()
+    if bundle is not None:
+        by_case = {str(key).casefold(): value for key, value in row.items()}
+        promoted_values: dict[str, Any] = {}
+        rules = bundle.get("rules")
+        if isinstance(rules, list):
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                canonical = str(rule.get("canonical_key") or "")
+                source = str(rule.get("source_key") or canonical)
+                for candidate in (canonical, source):
+                    if candidate.casefold() in by_case:
+                        safe_value, pii_ledger = scrub_pii({
+                            canonical: by_case[candidate.casefold()]
+                        })
+                        if not pii_ledger and canonical in safe_value:
+                            promoted_values[canonical] = safe_value[canonical]
+                        else:
+                            log.warning(
+                                "dropped promoted value that failed the PII gate: %s",
+                                canonical,
+                            )
+                        break
+        projected["curated_context"] = compile_promoted_context(
+            promoted_values, bundle
+        )
     return OrgBrief(**projected)
 
 

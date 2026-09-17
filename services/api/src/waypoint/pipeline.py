@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.catalog import feature_context
+from waypoint.catalog import waypoint_context
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
@@ -944,13 +944,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         if lstate.best_candidate_id is not None:
             best = await session.get(CandidateRow, lstate.best_candidate_id)
             best_json = json.dumps(best.recommendation) if best is not None else None
-        org_context = brief.model_dump_json()
-        # Resolve the features this brief references to their catalog meaning,
-        # so generation/critic/ranker (all reading this one string) know what
-        # each feature is and whether this Pro uses it. Additive + deterministic.
-        block = feature_context(brief, feasibility=deps.cta_feasibility_hints)
-        if block:
-            org_context = f"{org_context}\n{block}"
+        org_context = waypoint_context(
+            brief, feasibility=deps.cta_feasibility_hints
+        )
         build_prompt = _prompt_builder(
             org_context=org_context,
             best_json=best_json,
@@ -1480,7 +1476,9 @@ async def _attach_follow_up(
             base_key=f"{state.run.id}:{state.pro_id}:wargame",
             tier="fast",
             prompt=war_game_prompt(
-                state.brief.model_dump_json() if state.brief else "{}",
+                waypoint_context(
+                    state.brief, feasibility=deps.cta_feasibility_hints
+                ) if state.brief else "{}",
                 json.dumps(candidate.recommendation),
                 gated_channels,
             ),
