@@ -84,8 +84,7 @@ def build_promotion_bundle(
         if not entry.get("feature"):
             continue
         safe, _ledger = scrub_pii(
-            {key: value for key, value in entry.items() if key in _SAFE_FEATURE_FIELDS},
-            drop_location_tokens=False,
+            {key: value for key, value in entry.items() if key in _SAFE_FEATURE_FIELDS}
         )
         if safe.get("feature"):
             feature_catalog.append(safe)

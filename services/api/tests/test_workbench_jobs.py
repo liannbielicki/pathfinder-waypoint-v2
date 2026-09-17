@@ -86,9 +86,12 @@ def test_job_store_pii_gates_catalogs_before_persistence(tmp_path):
         ],
     })
 
-    assert job.request["catalog_override"] == [_complete_entry("JOBS_CREATED_T28")]
+    assert job.request["catalog_override"] == [
+        _complete_entry("ORGANIZATION_ID"),
+        _complete_entry("JOBS_CREATED_T28"),
+    ]
     assert job.request["catalog_approved_count"] == 2
-    assert job.request["catalog_pii_removed_count"] == 1
+    assert job.request["catalog_pii_removed_count"] == 0
     assert job.request["feature_catalog_entries"] == [{"feature": "jobs"}]
 
 
@@ -138,7 +141,10 @@ async def test_postgres_store_persists_only_sanitized_job_state(db_session_facto
     assert persisted is not None
     assert persisted.status == "completed"
     assert persisted.state == {"phase": "drafting", "pending_keys": 3}
-    assert persisted.request["catalog_override"] == [_complete_entry("JOBS_CREATED_T28")]
+    assert persisted.request["catalog_override"] == [
+        _complete_entry("ORGANIZATION_ID"),
+        _complete_entry("JOBS_CREATED_T28"),
+    ]
     assert "must-not-persist" not in json.dumps(persisted.request)
     assert persisted.result["stages"][0]["data"] is None
 

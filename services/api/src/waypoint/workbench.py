@@ -33,13 +33,18 @@ _NON_PII_BUSINESS_KEYS = {
     "emails_sent", "emails_opened", "emails_clicked", "emails_bounced", "emails_unsubscribed",
     "current_plan_name", "previous_plan_name", "credit_group_name",
 }
+_AGGREGATE_SIGNAL_TOKENS = {
+    "adoption", "attempts", "available", "bounced", "clicked", "completed", "configured",
+    "count", "created", "days", "enabled", "failed", "flag", "has", "is", "opened",
+    "pct", "percent", "rate", "score", "sent", "since", "state", "status", "successful",
+    "total", "unsubscribed", "usage",
+}
 _EMAIL = re.compile(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?\d[\d .()/-]{7,}\d)(?!\d)")
+_PHONE = re.compile(
+    r"(?<!\d)(?:\+?\d{1,3}[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?!\d)"
+)
 _DATE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T ]\S+)?$")
-_ZIP = re.compile(r"\b\d{5}(?:-\d{4})?\b")
-_STATE_OR_COUNTRY = re.compile(r"^(?:[A-Z]{2}|US|USA|United States|Canada|Australia|United Kingdom)$", re.IGNORECASE)
 _ADDRESS = re.compile(r"\b\d{1,6}\s+[A-Za-z0-9 .'-]+\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|court|ct|way|highway|hwy)\b", re.IGNORECASE)
-_PERSON_NAME = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
 _FIXTURE_PATH = Path(__file__).parents[2] / "tests" / "fixtures" / "context_layer_workbench.json"
 
 
@@ -113,10 +118,6 @@ def _is_pii_variable_key(value: str) -> bool:
     if key in _NON_PII_BUSINESS_KEYS or key.startswith("feature_") and key.endswith("_state"):
         return False
     tokens = set(filter(None, re.split(r"[^a-z0-9]+", key)))
-    if tokens & {"id", "identifier"}:
-        return True
-    if tokens & {"person", "customer", "employee", "account", "user", "contact"} and tokens & {"key", "number"}:
-        return True
     if tokens & {"dob", "ssn", "passport"}:
         return True
     if "birth" in tokens and ("date" in tokens or "day" in tokens):
@@ -129,11 +130,20 @@ def _is_pii_variable_key(value: str) -> bool:
         return True
     if tokens & {"bank", "checking", "savings"} and tokens & {"account", "routing", "number"}:
         return True
-    if tokens & {"email", "phone", "address", "street", "city", "country", "zip", "postal", "salesforce", "contact"}:
+    if tokens & {"zip", "postal", "address", "street"}:
         return True
-    if "uuid" in tokens or key in {"organization_id", "org_id", "pro_id", "lead_id", "state"}:
+    has_email_or_phone = any(
+        token == "phone" or token == "mobile" or token.startswith("email")
+        for token in tokens
+    )
+    is_aggregate_signal = bool(tokens & _AGGREGATE_SIGNAL_TOKENS) or any(
+        re.fullmatch(r"t\d+", token) for token in tokens
+    )
+    if has_email_or_phone and not is_aggregate_signal:
         return True
-    return "name" in tokens and bool(tokens & {"organization", "org", "company", "person", "user", "customer", "contact", "first", "last", "primary"})
+    return "name" in tokens and bool(
+        tokens & {"person", "user", "customer", "contact", "employee", "pro", "owner", "first", "last", "primary"}
+    )
 
 
 def is_pii_variable_key(value: str) -> bool:
@@ -141,14 +151,12 @@ def is_pii_variable_key(value: str) -> bool:
     return _is_pii_variable_key(value)
 
 
-def scrub_pii(
-    value: Mapping[str, Any], *, drop_location_tokens: bool = True
-) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Apply the app-side PII exclusion criteria to an arbitrary context pack."""
     identity_values = {
         str(item).strip().casefold() for key, item in value.items()
         if str(key).casefold() not in {"query_name", "variable_name"}
-        and any(word in str(key).casefold() for word in ("name", "email", "phone", "address"))
+        and _is_pii_variable_key(str(key))
         and isinstance(item, str) and item.strip()
     }
     ledger: list[dict[str, str]] = []
@@ -186,21 +194,11 @@ def scrub_pii(
             if ".features[" in f".{path.casefold()}" and leaf in {"name", "display_name"}:
                 return item
             lowered = item.casefold()
-            if _EMAIL.search(item) or (not _DATE.fullmatch(item.strip()) and _PHONE.search(item)) or _ZIP.search(item) or _ADDRESS.search(item):
+            if _EMAIL.search(item) or (not _DATE.fullmatch(item.strip()) and _PHONE.search(item)) or _ADDRESS.search(item):
                 ledger.append({"path": path, "category": "pattern", "reason": "value matched an excluded PII pattern"})
                 return _DROP
             if any(identity and identity in lowered for identity in identity_values):
                 ledger.append({"path": path, "category": "identity_match", "reason": "value matched an excluded identity value"})
-                return _DROP
-            if drop_location_tokens and _STATE_OR_COUNTRY.fullmatch(item.strip()):
-                ledger.append({"path": path, "category": "location", "reason": "value matched an excluded state or country token"})
-                return _DROP
-            if (
-                _PERSON_NAME.search(item)
-                and len(item.split()) <= 5
-                and not re.search(r"\b(?:and|or|the|of|for|with|is|has|from|to)\b", item, re.IGNORECASE)
-            ):
-                ledger.append({"path": path, "category": "name_pattern", "reason": "value matched an excluded person-name pattern"})
                 return _DROP
         if (
             leaf not in _METADATA_KEYS

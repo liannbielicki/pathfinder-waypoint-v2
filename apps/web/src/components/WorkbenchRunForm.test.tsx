@@ -61,6 +61,20 @@ describe("WorkbenchRunForm", () => {
     expect(screen.getByText(/collection is complete.*continue to curation/i)).toBeInTheDocument();
   });
 
+  it("starts a fresh run without deleting saved catalog versions", () => {
+    const savedVersions = JSON.stringify([{ id: "saved-1", entries: [] }]);
+    window.localStorage.setItem("waypoint-context-workbench-active-job", "job-1");
+    window.localStorage.setItem("waypoint-context-catalog-versions", savedVersions);
+    const onStartFresh = vi.fn();
+
+    render(<WorkbenchRunForm onRun={vi.fn()} busy={false} completed onStartFresh={onStartFresh} />);
+    fireEvent.click(screen.getByRole("button", { name: /start a fresh run/i }));
+
+    expect(onStartFresh).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem("waypoint-context-workbench-active-job")).toBeNull();
+    expect(window.localStorage.getItem("waypoint-context-catalog-versions")).toBe(savedVersions);
+  });
+
   it("offers versioned feature catalog upload without exposing query editing", () => {
     render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
     expect(screen.getByLabelText(/upload feature catalog csv/i)).toBeInTheDocument();

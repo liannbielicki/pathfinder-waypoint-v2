@@ -54,8 +54,7 @@ def sanitize_job_request(value: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(entry, dict):
                 continue
             safe, _ledger = scrub_pii(
-                {key: item for key, item in entry.items() if key in _FEATURE_FIELDS},
-                drop_location_tokens=False,
+                {key: item for key, item in entry.items() if key in _FEATURE_FIELDS}
             )
             if safe.get("feature"):
                 safe_features.append(safe)

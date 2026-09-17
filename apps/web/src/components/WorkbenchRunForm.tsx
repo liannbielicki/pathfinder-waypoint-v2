@@ -48,12 +48,13 @@ export function WorkbenchRunForm({
   onRun,
   busy,
   onBusy,
+  onStartFresh,
   completed = false,
 }: {
   onRun: (trace: WorkbenchTrace) => void;
   busy: boolean;
   onBusy?: (busy: boolean) => void;
-  onModeChange?: (mode: string) => void;
+  onStartFresh?: () => void;
   completed?: boolean;
 }) {
   const [identifier, setIdentifier] = useState("889901");
@@ -196,6 +197,18 @@ export function WorkbenchRunForm({
     });
   }
 
+  function startFresh() {
+    window.localStorage.removeItem(WORKBENCH_ACTIVE_JOB_KEY);
+    deliveredJob.current = null;
+    setActiveJobId(null);
+    setActiveJob(null);
+    setContextVersionId("fresh");
+    selectCatalogVersion("fresh");
+    setError(null);
+    onBusy?.(false);
+    onStartFresh?.();
+  }
+
   async function uploadCatalog(file: File) {
     setError(null);
     try {
@@ -292,6 +305,10 @@ export function WorkbenchRunForm({
     <label htmlFor="context-version">Start from prior context catalog</label>
     <select id="context-version" value={contextVersionId} onChange={(event) => {
       const id = event.target.value;
+      if (id === "fresh") {
+        startFresh();
+        return;
+      }
       setContextVersionId(id);
       selectCatalogVersion(id);
       const version = contextVersions.find((item) => item.id === id);
@@ -308,7 +325,10 @@ export function WorkbenchRunForm({
     </section>}
     {!completed && error && <p className="error" role="alert">{error}</p>}
     {completed
-      ? <p className="helper next-step-note">Collection is complete. Continue to curation below, then compile the approved Include variables.</p>
+      ? <div className="next-step-note">
+          <p className="helper">Collection is complete. Continue to curation below, or clear this view to collect a new run.</p>
+          <button type="button" className="secondary" onClick={startFresh}>Start a fresh run</button>
+        </div>
       : <button type="submit" disabled={busy || status?.activity === "waypoint" || status?.configured.snowflake === false || status?.configured.ai === false}>{busy ? "Collecting and curating…" : "Collect and curate all variables"}</button>}
   </form>;
 }

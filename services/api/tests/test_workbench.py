@@ -187,15 +187,15 @@ def test_pii_gate_removes_sensitive_fields_and_identity_values_without_leaking_v
             "industry": "Heating and Air Conditioning",
         }
     )
-    assert "organization_name" not in clean
+    assert clean["organization_name"] == "Mountain HVAC"
     assert "primary_contact_name" not in clean
     assert "best_email" not in clean
     assert "phone" not in clean
     assert "address" not in clean
-    assert "city" not in clean
-    assert "state" not in clean
+    assert clean["city"] == "Rohnert Park"
+    assert clean["state"] == "CA"
     assert "zip" not in clean
-    assert "salesforce_account_id" not in clean
+    assert clean["salesforce_account_id"] == "001-secret"
     assert clean["industry"] == "Heating and Air Conditioning"
     serialized = json.dumps(ledger)
     assert "Karla" not in serialized
@@ -237,7 +237,7 @@ def test_pii_exclusion_preserves_uppercase_audit_keys_and_dates():
     assert ledger == []
 
 
-def test_pii_exclusion_drops_identity_variables_but_keeps_business_state_variables():
+def test_pii_exclusion_keeps_internal_identifiers_and_business_state_variables():
     clean, ledger = scrub_pii({
         "rows": [
             {"VARIABLE_NAME": "ORG_UUID", "VALUE": "org-secret"},
@@ -245,14 +245,15 @@ def test_pii_exclusion_drops_identity_variables_but_keeps_business_state_variabl
         ]
     })
     assert clean["rows"] == [
+        {"VARIABLE_NAME": "ORG_UUID", "VALUE": "org-secret"},
         {"VARIABLE_NAME": "FEATURE_VOIP_STATE", "VALUE": "attached_unused"}
     ]
-    assert len(ledger) == 1
+    assert ledger == []
     inventory = build_audit_inventory({"snowflake": clean})
-    assert [item["key"] for item in inventory] == ["FEATURE_VOIP_STATE"]
+    assert [item["key"] for item in inventory] == ["ORG_UUID", "FEATURE_VOIP_STATE"]
 
 
-def test_pii_exclusion_drops_birth_dates_and_direct_identifier_variables():
+def test_pii_exclusion_drops_sensitive_identifiers_but_keeps_internal_ids():
     clean, ledger = scrub_pii({
         "date_of_birth": "1990-01-01",
         "rows": [
@@ -266,9 +267,58 @@ def test_pii_exclusion_drops_birth_dates_and_direct_identifier_variables():
         ]
     })
 
-    assert clean["rows"] == [{"VARIABLE_NAME": "BIZDATE", "VALUE": "2026-09-09"}]
+    assert clean["rows"] == [
+        {"VARIABLE_NAME": "CUSTOMER_ID", "VALUE": "customer-123"},
+        {"VARIABLE_NAME": "EMPLOYEE_ID", "VALUE": "employee-123"},
+        {"VARIABLE_NAME": "ACCOUNT_KEY", "VALUE": "account-123"},
+        {"VARIABLE_NAME": "BIZDATE", "VALUE": "2026-09-09"},
+    ]
     assert "date_of_birth" not in clean
-    assert len(ledger) == 7
+    assert len(ledger) == 4
+
+
+def test_pii_exclusion_keeps_company_geography_metrics_and_business_values():
+    clean, ledger = scrub_pii({
+        "rows": [
+            {"VARIABLE_NAME": "COMPANY_CITY", "VALUE": "Rohnert Park"},
+            {"VARIABLE_NAME": "COMPANY_STATE", "VALUE": "CA"},
+            {"VARIABLE_NAME": "COMPANY_COUNTRY", "VALUE": "United States"},
+            {"VARIABLE_NAME": "EMAIL_OPEN_RATE_T28", "VALUE": 0.42},
+            {"VARIABLE_NAME": "SALESFORCE_CONTACT_COUNT", "VALUE": 8},
+            {"VARIABLE_NAME": "LATEST_PLAN_NAME", "VALUE": "Essentials Package"},
+            {"VARIABLE_NAME": "INTERNAL_SCORE", "VALUE": "94928"},
+        ]
+    })
+
+    assert clean["rows"] == [
+        {"VARIABLE_NAME": "COMPANY_CITY", "VALUE": "Rohnert Park"},
+        {"VARIABLE_NAME": "COMPANY_STATE", "VALUE": "CA"},
+        {"VARIABLE_NAME": "COMPANY_COUNTRY", "VALUE": "United States"},
+        {"VARIABLE_NAME": "EMAIL_OPEN_RATE_T28", "VALUE": 0.42},
+        {"VARIABLE_NAME": "SALESFORCE_CONTACT_COUNT", "VALUE": 8},
+        {"VARIABLE_NAME": "LATEST_PLAN_NAME", "VALUE": "Essentials Package"},
+        {"VARIABLE_NAME": "INTERNAL_SCORE", "VALUE": "94928"},
+    ]
+    assert ledger == []
+
+
+def test_pii_exclusion_still_drops_zip_postal_and_direct_personal_contact_fields():
+    clean, ledger = scrub_pii({
+        "rows": [
+            {"VARIABLE_NAME": "COMPANY_ZIP", "VALUE": "94928"},
+            {"VARIABLE_NAME": "POSTAL_CODE", "VALUE": "94928-1234"},
+            {"VARIABLE_NAME": "PRIMARY_CONTACT_NAME", "VALUE": "Karla Bravo"},
+            {"VARIABLE_NAME": "CONTACT_EMAIL", "VALUE": "karla@example.com"},
+            {"VARIABLE_NAME": "MOBILE_PHONE", "VALUE": "408-351-8919"},
+            {"VARIABLE_NAME": "STREET_ADDRESS", "VALUE": "10 Main Street"},
+            {"VARIABLE_NAME": "ORG_UUID", "VALUE": "6ee00fbd-3f85-4f44-a1f0-9bf4d3ed4fd5"},
+        ]
+    })
+
+    assert clean["rows"] == [
+        {"VARIABLE_NAME": "ORG_UUID", "VALUE": "6ee00fbd-3f85-4f44-a1f0-9bf4d3ed4fd5"}
+    ]
+    assert len(ledger) == 6
 
 
 def test_unwraps_n8n_context_envelope_before_pii_projection():
@@ -836,8 +886,8 @@ async def test_both_sources_send_organization_id_directly_to_context_layer(monke
     ))
 
     assert seen["identifier"] == "889901"
-    # ORG_UUID is removed before the Workbench inventory or model prompt exists.
-    assert result["outputs"]["audit"]["total_variables"] == 1
+    # Internal IDs remain available to the audit, but observed values stay out of authoring prompts.
+    assert result["outputs"]["audit"]["total_variables"] == 2
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
     assert result["outputs"]["context_layer_coverage"]["present_features"] == ["jobs"]
     assert result["outputs"]["authoring"]["draft"][0]["related_features"] == ["jobs"]
@@ -953,7 +1003,7 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
     assert all("You are running one round of an evolutionary search" in calls[index]["prompt"] for index in (0, 1))
     assert calls[0]["model"] == calls[1]["model"] == "claude-sonnet-5"
     assert calls[0]["prompt"] != calls[1]["prompt"]
-    assert '"VALUE": "secret"' not in calls[0]["prompt"]
+    assert '"VALUE": "secret"' in calls[0]["prompt"]
     assert evaluation["baseline"]["candidates"][0]["title"] == "baseline"
     assert evaluation["curated"]["candidates"][0]["title"] == "curated"
     assert evaluation["curated"]["context"]["v"] == {"jobs_created": 12}

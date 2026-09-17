@@ -22,7 +22,7 @@ export default function ContextWorkbenchPage() {
   if (authState === "checking") return <main><section className="panel">Checking session…</section></main>;
   if (authState === "signed_out") return <main><LoginForm onSuccess={() => setAuthState("signed_in")} /></main>;
   return <main className="workbench">
-    <WorkbenchRunForm busy={busy} onBusy={setBusy} onRun={handleRun} completed={Boolean(trace)} />
+    <WorkbenchRunForm busy={busy} onBusy={setBusy} onRun={handleRun} onStartFresh={() => setTrace(null)} completed={Boolean(trace)} />
     {trace && <>
       <AuthoringCatalog key={JSON.stringify((trace.outputs.authoring as { draft?: unknown } | undefined)?.draft)} trace={trace} />
       <details className="diagnostics"><summary>Run diagnostics</summary><WorkbenchTimeline trace={trace} /></details>
