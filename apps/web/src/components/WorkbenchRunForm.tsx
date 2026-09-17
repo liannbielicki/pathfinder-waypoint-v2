@@ -71,7 +71,20 @@ export function WorkbenchRunForm({
   const deliveredJob = useRef<string | null>(null);
 
   useEffect(() => {
-    getWorkbenchStatus().then(setStatus).catch((cause) => setError(cause instanceof Error ? cause.message : "Backend is unavailable"));
+    let cancelled = false;
+    const refreshStatus = async () => {
+      try {
+        const nextStatus = await getWorkbenchStatus();
+        if (!cancelled) {
+          setStatus(nextStatus);
+          setError(null);
+        }
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Backend is unavailable");
+      }
+    };
+    void refreshStatus();
+    const statusTimer = window.setInterval(() => void refreshStatus(), 5000);
     const refresh = () => {
       const features = readFeatureCatalogVersions();
       const contexts = readCatalogVersions();
@@ -83,7 +96,11 @@ export function WorkbenchRunForm({
     };
     refresh();
     window.addEventListener("waypoint-catalog-updated", refresh);
-    return () => window.removeEventListener("waypoint-catalog-updated", refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(statusTimer);
+      window.removeEventListener("waypoint-catalog-updated", refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -251,11 +268,12 @@ export function WorkbenchRunForm({
     <section className="connection-card" aria-label="Environment status">
       <div><strong>Environment</strong><code>{status?.env_file ?? "Checking backend…"}</code></div>
       <div className="status-row">
-        <span className={status?.configured.snowflake ? "ready" : "not-ready"}>Snowflake {status?.configured.snowflake ? "configured" : "not configured"}</span>
-        <span className={status?.configured.context_layer ? "ready" : "not-ready"}>Context Layer {status?.configured.context_layer ? "configured" : "not configured"}</span>
-        <span className={status?.configured.ai ? "ready" : "not-ready"}>AI {status?.configured.ai ? "configured" : "not configured"}</span>
+        <span className={status?.configured.snowflake ? "ready" : "not-ready"}>Snowflake {status ? (status.configured.snowflake ? "configured" : "not configured") : "checking"}</span>
+        <span className={status?.configured.context_layer ? "ready" : "not-ready"}>Context Layer {status ? (status.configured.context_layer ? "configured" : "not configured") : "checking"}</span>
+        <span className={status?.configured.ai ? "ready" : "not-ready"}>AI {status ? (status.configured.ai ? "configured" : "not configured") : "checking"}</span>
       </div>
     </section>
+    {status?.activity === "waypoint" && <p className="error" role="alert">A Waypoint run is active. Context Workbench will unlock when it finishes.</p>}
 
     <div className="form-grid">
       <div><label htmlFor="identifier">Organization ID</label><input id="identifier" value={identifier} onChange={(event) => setIdentifier(event.target.value)} required /></div>
@@ -291,6 +309,6 @@ export function WorkbenchRunForm({
     {!completed && error && <p className="error" role="alert">{error}</p>}
     {completed
       ? <p className="helper next-step-note">Collection is complete. Continue to curation below, then compile the approved Include variables.</p>
-      : <button type="submit" disabled={busy || status?.configured.snowflake === false || status?.configured.ai === false}>{busy ? "Collecting and curating…" : "Collect and curate all variables"}</button>}
+      : <button type="submit" disabled={busy || status?.activity === "waypoint" || status?.configured.snowflake === false || status?.configured.ai === false}>{busy ? "Collecting and curating…" : "Collect and curate all variables"}</button>}
   </form>;
 }

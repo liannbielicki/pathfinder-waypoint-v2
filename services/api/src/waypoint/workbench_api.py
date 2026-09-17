@@ -1,9 +1,10 @@
-"""Local-only API for the Context Layer workbench."""
+"""Context Workbench execution shared by local and hosted API routes."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -219,7 +220,7 @@ async def execute_run(
     body: WorkbenchRunRequest,
     *,
     resume_state: Mapping[str, Any] | None = None,
-    checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    checkpoint: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     configured = workbench_env()
     context_base_url = body.context_base_url or configured["context_base_url"]
@@ -460,12 +461,12 @@ async def execute_run(
             for index in range(0, len(ordered_inventory), _AUTHORING_BATCH_SIZE)
         ]
 
-        def save_checkpoint(
+        async def save_checkpoint(
             entries: list[dict[str, Any]], *, phase: str, pending: int
         ) -> None:
             if checkpoint is None:
                 return
-            checkpoint({
+            result = checkpoint({
                 "entries": entries,
                 "revised_keys": sorted(revised_keys),
                 "output_tokens": authoring_tokens,
@@ -479,6 +480,8 @@ async def execute_run(
                 "coverage_output": coverage_output,
                 "warnings": warnings,
             })
+            if inspect.isawaitable(result):
+                await result
 
         def current_checkpoint_catalog() -> list[dict[str, Any]]:
             catalog, _ = validate_catalog_entries([
@@ -488,7 +491,7 @@ async def execute_run(
             return catalog
 
         try:
-            save_checkpoint(
+            await save_checkpoint(
                 saved_catalog,
                 phase="audited",
                 pending=sum(len(batch) for batch in pending_batches),
@@ -560,7 +563,7 @@ VARIABLE INVENTORY BATCH {batch_number} ({len(batch)} keys; no organization valu
                             warnings.append(
                                 f"{key}: hit max_tokens after {attempts[key]} attempts"
                             )
-                    save_checkpoint(
+                    await save_checkpoint(
                         current_checkpoint_catalog(),
                         phase="drafting",
                         pending=sum(len(item) for item in pending_batches),
@@ -582,7 +585,7 @@ MALFORMED_RESPONSE:
                         warnings.append(
                             f"authoring repair {batch_number} hit max_tokens; split and requeued"
                         )
-                        save_checkpoint(
+                        await save_checkpoint(
                             current_checkpoint_catalog(),
                             phase="drafting",
                             pending=sum(len(item) for item in pending_batches),
@@ -639,7 +642,7 @@ VARIABLE: {item}"""
                     warnings.append(
                         f"authoring batch {batch_number} left {len(exhausted)} variables incomplete after {_AUTHORING_MAX_ATTEMPTS} attempts"
                     )
-                save_checkpoint(
+                await save_checkpoint(
                     current_checkpoint_catalog(),
                     phase="drafting",
                     pending=sum(len(pending_batch) for pending_batch in pending_batches),
@@ -724,7 +727,7 @@ VARIABLE EVIDENCE (no organization values):
             warnings.extend(revision_warnings)
             for item in validated_revisions:
                 catalog_by_key[str(item["key"])] = item
-            save_checkpoint(
+            await save_checkpoint(
                 list(catalog_by_key.values()),
                 phase="revising",
                 pending=max(0, len(low_confidence) - start - len(revision_batch)),
@@ -739,7 +742,11 @@ VARIABLE EVIDENCE (no organization values):
             if str(item["key"]) in inventory_keys
         }
         completed_keys = len(existing_keys | drafted_keys)
-        save_checkpoint(final_catalog, phase="needs_review" if review_exceptions else "complete", pending=0)
+        await save_checkpoint(
+            final_catalog,
+            phase="needs_review" if review_exceptions else "complete",
+            pending=0,
+        )
         authoring_output = {
             "status": "draft_only",
             "draft": redact(final_catalog),
@@ -926,6 +933,67 @@ def _job_payload(job: WorkbenchJob) -> dict[str, Any]:
     }
 
 
+def build_promotion_preview(job: WorkbenchJob) -> tuple[dict[str, Any], dict[str, Any]]:
+    evaluation = (job.result or {}).get("outputs", {}).get("evaluation")
+    if (
+        job.status != "completed"
+        or job.request.get("workbench_mode") != "evaluate"
+        or not isinstance(evaluation, dict)
+    ):
+        raise HTTPException(status_code=409, detail="Complete the context test before promotion")
+    raw_entries = job.request.get("catalog_override")
+    feature_entries = job.request.get("feature_catalog_entries")
+    context_version_id = str(job.request.get("catalog_version_id") or "")
+    feature_version_id = str(job.request.get("feature_catalog_version_id") or "")
+    if not isinstance(raw_entries, list) or not isinstance(feature_entries, list):
+        raise HTTPException(
+            status_code=422,
+            detail="Evaluation job is missing versioned catalog inputs",
+        )
+    if not context_version_id or not feature_version_id:
+        raise HTTPException(status_code=422, detail="Evaluation job is missing catalog version IDs")
+
+    feature_keys = {
+        str(entry.get("feature"))
+        for entry in feature_entries
+        if isinstance(entry, dict) and entry.get("feature")
+    }
+    entries, counts, _warnings = prepare_promotion_entries(raw_entries, feature_keys)
+    counts["approved"] = int(
+        job.request.get("catalog_approved_count", counts["approved"])
+    )
+    counts["pii_removed"] = int(
+        job.request.get("catalog_pii_removed_count", counts["pii_removed"])
+    )
+    fingerprint = json.dumps(
+        {"evaluation_job_id": job.id, "policy": "pii-first-canonical-v1"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    promotion_id = f"promotion-{hashlib.sha256(fingerprint.encode()).hexdigest()[:16]}"
+    bundle = build_promotion_bundle(
+        entries,
+        feature_catalog_entries=feature_entries,
+        promotion_id=promotion_id,
+        context_catalog_version_id=context_version_id,
+        feature_catalog_version_id=feature_version_id,
+        created_at=job.updated_at,
+    )
+    counts["retained"] = len(bundle["rules"])
+    counts["duplicates_merged"] = max(
+        0, counts["approved"] - counts["pii_removed"] - counts["retained"]
+    )
+    bundle["counts"] = counts
+    if not bundle["rules"]:
+        raise HTTPException(status_code=422, detail="Promotion requires an approved Include variable")
+    return bundle, {
+        "id": promotion_id,
+        "included_variables": len(bundle["rules"]),
+        "counts": counts,
+        "csv": promotion_csv(bundle),
+    }
+
+
 def create_workbench_app(
     *,
     job_db_path: Path | None = None,
@@ -949,10 +1017,13 @@ def create_workbench_app(
                 for key, value in job.request.items()
                 if key not in {"catalog_approved_count", "catalog_pii_removed_count"}
             }
+            async def checkpoint(state: dict[str, Any]) -> None:
+                store.checkpoint(job_id, state)
+
             result = await job_executor(
                 WorkbenchRunRequest.model_validate(executable_request),
                 resume_state=job.state,
-                checkpoint=lambda state: store.checkpoint(job_id, state),
+                checkpoint=checkpoint,
             )
             authoring = result.get("outputs", {}).get("authoring", {})
             status = (
@@ -1027,67 +1098,7 @@ def create_workbench_app(
         job = store.get(evaluation_job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Evaluation job not found")
-        evaluation = (job.result or {}).get("outputs", {}).get("evaluation")
-        if (
-            job.status != "completed"
-            or job.request.get("workbench_mode") != "evaluate"
-            or not isinstance(evaluation, dict)
-        ):
-            raise HTTPException(status_code=409, detail="Complete the context test before promotion")
-        raw_entries = job.request.get("catalog_override")
-        feature_entries = job.request.get("feature_catalog_entries")
-        context_version_id = str(job.request.get("catalog_version_id") or "")
-        feature_version_id = str(job.request.get("feature_catalog_version_id") or "")
-        if not isinstance(raw_entries, list) or not isinstance(feature_entries, list):
-            raise HTTPException(status_code=422, detail="Evaluation job is missing versioned catalog inputs")
-        if not context_version_id or not feature_version_id:
-            raise HTTPException(status_code=422, detail="Evaluation job is missing catalog version IDs")
-
-        feature_keys = {
-            str(entry.get("feature"))
-            for entry in feature_entries
-            if isinstance(entry, dict) and entry.get("feature")
-        }
-        entries, counts, _warnings = prepare_promotion_entries(
-            raw_entries, feature_keys
-        )
-        counts["approved"] = int(
-            job.request.get("catalog_approved_count", counts["approved"])
-        )
-        counts["pii_removed"] = int(
-            job.request.get("catalog_pii_removed_count", counts["pii_removed"])
-        )
-        fingerprint = json.dumps(
-            {
-                "evaluation_job_id": job.id,
-                "policy": "pii-first-canonical-v1",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        promotion_id = f"promotion-{hashlib.sha256(fingerprint.encode()).hexdigest()[:16]}"
-        bundle = build_promotion_bundle(
-            entries,
-            feature_catalog_entries=feature_entries,
-            promotion_id=promotion_id,
-            context_catalog_version_id=context_version_id,
-            feature_catalog_version_id=feature_version_id,
-            created_at=job.updated_at,
-        )
-        counts["retained"] = len(bundle["rules"])
-        counts["duplicates_merged"] = max(
-            0, counts["approved"] - counts["pii_removed"] - counts["retained"]
-        )
-        bundle["counts"] = counts
-        if not bundle["rules"]:
-            raise HTTPException(status_code=422, detail="Promotion requires an approved Include variable")
-        payload = {
-            "id": promotion_id,
-            "included_variables": len(bundle["rules"]),
-            "counts": counts,
-            "csv": promotion_csv(bundle),
-        }
-        return bundle, payload
+        return build_promotion_preview(job)
 
     @app.post("/api/context-workbench/promotions/preview")
     async def preview_promotion(body: PromotionRequest) -> dict[str, Any]:

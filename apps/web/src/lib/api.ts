@@ -111,7 +111,17 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include",
     headers: { "content-type": "application/json", ...init?.headers },
   });
-  if (!response.ok) throw new ApiError(response.status, await response.text());
+  if (!response.ok) {
+    const body = await response.text();
+    let detail = body;
+    try {
+      const payload = JSON.parse(body) as { detail?: unknown };
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      // Keep the provider's plain-text response.
+    }
+    throw new ApiError(response.status, detail);
+  }
   return response.json() as Promise<T>;
 }
 

@@ -18,4 +18,16 @@ describe("LoginForm", () => {
     expect(await screen.findByRole("alert")).toBeVisible();
     vi.unstubAllGlobals();
   });
+
+  it("shows the activity conflict returned by the shared backend", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ detail: "Context Workbench is running" }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    )));
+    render(<LoginForm onSuccess={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText(/password/i), "correct");
+    await userEvent.click(screen.getByRole("button", { name: /sign in/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Context Workbench is running");
+    vi.unstubAllGlobals();
+  });
 });

@@ -16,30 +16,20 @@ The Workbench never edits n8n or Snowflake queries. Change queries outside the W
 
 ## Start
 
-Backend:
-
-```bash
-cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/services/api
-PYTHONPATH=src .venv/bin/python scripts/run_workbench.py
-```
-
-Frontend:
-
-```bash
-cd /Users/jakefassora/projects/pathfinder-waypoint-v2/.claude/worktrees/pathfinder-waypoint-v4/apps/web
-./node_modules/.bin/next dev
-```
-
-Open `http://localhost:3000`. **Waypoint** is the default top tab and **Context Workbench** is the second tab at `/context-workbench`.
+The deployed Workbench is part of the existing Railway Waypoint API and uses
+the existing Vercel `/api/*` proxy. Open the deployed app, choose **Context
+Workbench**, and sign in with the same operator password as Waypoint. No
+separate port `8766` backend is required. For local development, start the
+normal Waypoint API and Next.js applications.
 
 ## Use
 
-1. Confirm the page shows the exact `services/api/.env` path and marks Snowflake and AI configured.
+1. Confirm the page reports the Railway service environment and marks Snowflake and AI configured.
 2. Enter the numeric organization ID.
 3. Leave **Add Context Layer API coverage** off to prove the experimental n8n source by itself. Turn it on only when you want the additional source.
 4. Use the built-in feature catalog or upload a CSV. The feature-key column may be named `feature`, `Feature Key`, or `Display Name`; every key must be unique, and every validated upload is stored as an immutable local version. Duplicate descriptive column names are preserved with numbered suffixes.
 5. Leave **Fresh audit** selected to start from every current source variable. Select an older context version only to resume it deliberately.
-6. Press **Collect and curate all variables**. The backend creates a durable SQLite job and returns immediately. The n8n client accepts the full variable-audit response and waits up to 240 seconds; if that limit is reached, the source reports an explicit timeout instead of an empty failure reason.
+6. Press **Collect and curate all variables**. Railway creates a durable Postgres job and returns immediately. The n8n client accepts the full variable-audit response and waits up to 240 seconds; if that limit is reached, the source reports an explicit timeout instead of an empty failure reason.
 7. Leave the page open or close it. The backend checkpoints after every batch, and the page reconnects to the same job after refresh, browser closure, or backend restart.
 8. Review all variables using the Include, Deprioritize, and Exclude filters. The model reports confidence from `0.00` through `1.00`; anything below `0.80` gets one automatic revision. Valid results at or above `0.80` start in Include automatically.
 9. Approve any Deprioritized variable you want to move into Include. Variables left in Deprioritize remain parked and do not block saving.
@@ -48,16 +38,29 @@ Open `http://localhost:3000`. **Waypoint** is the default top tab and **Context 
 12. Press **Test curated context**. The Workbench fetches fresh data for the selected organization, applies the PII gate, and runs the exact Waypoint evolve prompt twice: once with the full scrubbed source context and once with the curated packet. It shows both idea sets, token and latency metrics, and a low-cost `MODEL_FAST` verdict with no more than three small suggested context changes. This is recommendation-only; it never sends outreach or writes to production systems.
 13. After the context test, download the Snowflake handoff CSV containing exactly `canonical_key`, `source_table`, and `cohort_aggregate_prompt` for the approved Include variables. Downloading does not activate the context.
 14. Give that CSV to Claude with the Snowflake MCP to create or revise the production query. Update n8n manually; the Workbench never edits it. Missing source lineage is written as `UNKNOWN`, never guessed from a query name.
-15. Press **Activate in Waypoint** after the compressed n8n query is ready. Activation packages every distinct approved non-PII Include rule and the safe selected feature-catalog version. The promotion summary shows `approved → PII removed → duplicate representations merged → retained`; for the initial saved evaluation this is `287 → 64 → 4 → 219`. Duplicate metadata is unioned, so merging removes no source information.
-16. On Waypoint's **Start a run** page, leave **Standard context** selected for the existing production workflow, or explicitly choose **Staging context** to test the compressed workflow and packaged promotion. Retries preserve that choice.
+15. Press **Activate in Waypoint** after the compressed n8n query is ready. Activation packages every distinct approved non-PII Include rule and the safe selected feature-catalog version as an immutable Postgres promotion. The promotion summary shows `approved → PII removed → duplicate representations merged → retained`. Duplicate metadata is unioned, so merging removes no source information.
+16. On Waypoint's **Start a run** page, leave **Standard context** selected for the existing production workflow, or explicitly choose **Staging context** to test the compressed workflow and active promotion. Retries preserve that choice.
 
 Selecting an older feature version is rollback. Uploading a changed feature catalog shows exact added, removed, and changed counts. Unknown feature mappings are removed and reported as warnings.
 
 Authoring uses low model effort, a 20,000-token generation cap per batch, and a 150,000-output-token cap for the full run. Each batch receives a compact feature index containing exact keys, product areas, and short descriptions instead of every CSV column. Variables returned without every required metadata field are requeued up to three times. A batch that reaches `max_tokens` is split and retried; it is never treated as complete.
 
-Durable job state lives in ignored local storage at `services/api/.workbench/jobs.sqlite3`. It contains PII-gated requests, safe variable metadata, aggregate removal counts, progress, usage, warnings, and pruned results. It does not contain credentials, PII variable rows, raw pre-PII payloads, or full authoring prompts/responses.
+Durable deployed job state lives in the Alembic-managed Postgres
+`workbench_jobs` table. It contains PII-gated requests, safe variable metadata,
+aggregate removal counts, progress, usage, warnings, and pruned results. It
+does not contain credentials, PII variable rows, raw pre-PII payloads, or full
+authoring prompts/responses. The ignored SQLite store remains only for the
+standalone local test application.
 
-Local Workbench promotions live under `services/api/.workbench/promotions/`. The reviewed Staging artifact deployed with Waypoint lives under `services/api/data/context-promotions/`; `active.json` selects its immutable version. A bundle contains no organization values or credentials.
+Deployed promotions live in the Postgres `context_promotions` table. Staging
+prefers its one active immutable promotion and falls back to the reviewed
+artifact under `services/api/data/context-promotions/` only when Postgres has
+no active version. A bundle contains no organization values or credentials.
+
+Only one workload can execute at a time. An active Waypoint run disables a new
+Workbench collection, and an active Workbench job blocks Waypoint login and run
+creation. Existing work is never interrupted; the lock clears at a terminal
+status.
 
 ## Data boundaries
 
@@ -68,7 +71,7 @@ Local Workbench promotions live under `services/api/.workbench/promotions/`. The
 - Runtime compilation attaches the complete selected feature catalog as compact product cards containing only the exact feature key, product area, and short value statement. Waypoint receives company-wide feature knowledge without the unused CSV columns.
 - Standard Waypoint runs keep the existing `org-context-v2` prompt context and never load a Workbench promotion.
 - Staging runs keep only exact promoted canonical aliases returned by `N8N_CONTEXT_URL_STAGING`. Missing promoted keys remain missing, nulls remain explicit nulls, ambiguous generic names such as `count` are never guessed, and unapproved response columns are dropped.
-- A missing Staging artifact or URL fails closed; it never silently falls back to Standard.
+- A missing Staging promotion or URL fails closed; it never silently falls back to Standard.
 - A missing or null value describes only this observed organization response.
 - Global missingness, freshness, reliability, distributions, and conflict frequency remain unavailable unless evidence is supplied.
 - Aggregate prompts must request cohort-level statistics, not calculations from one Pro's value.

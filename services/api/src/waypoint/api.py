@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
 from waypoint import funnel as funnel_report
+from waypoint.activity import current_activity, lock_fleet
 from waypoint.call_todos import list_calls, update_call
 from waypoint.db import make_engine, make_session_factory
 from waypoint.exposures import register as register_exposures_batch
@@ -24,6 +25,11 @@ from waypoint.handoff import (
     HandoffUnavailable,
     make_lcm_client,
     ready_rows,
+)
+from waypoint.hosted_workbench import (
+    JobExecutor,
+    get_hosted_workbench,
+    install_hosted_workbench,
 )
 from waypoint.loop import LoopConfig
 from waypoint.models import (
@@ -49,6 +55,7 @@ from waypoint.tables import (
     RunRow,
     WinnerRow,
 )
+from waypoint.workbench_api import execute_run
 
 
 class LoginRequest(BaseModel):
@@ -110,7 +117,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.session_factory is None:
         engine = make_engine(app.state.settings.DATABASE_URL.get_secret_value())
         app.state.session_factory = make_session_factory(engine)
-    yield
+    workbench = get_hosted_workbench(app)
+    await workbench.resume()
+    try:
+        yield
+    finally:
+        await workbench.shutdown()
 
 
 async def _get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -157,10 +169,12 @@ async def _run_or_404(session: AsyncSession, run_id: str) -> RunRow:
 def create_app(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    workbench_executor: JobExecutor | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Pathfinder Waypoint V2", version="1.0.0", lifespan=_lifespan)
     app.state.settings = settings
     app.state.session_factory = session_factory
+    install_hosted_workbench(app, executor=workbench_executor or execute_run)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -168,7 +182,14 @@ def create_app(
 
     @app.post("/api/auth/login")
     async def login(request: Request, response: Response, body: LoginRequest) -> dict[str, str]:
-        auth.login(request.app.state.settings, response, body.password)
+        settings: Settings = request.app.state.settings
+        auth.verify_password(settings, body.password)
+        async with request.app.state.session_factory() as session:
+            await lock_fleet(session, settings)
+            if await current_activity(session) == "workbench":
+                raise HTTPException(status_code=409, detail="Context Workbench is running")
+            await session.commit()
+        auth.login(settings, response, body.password)
         return {"status": "ok"}
 
     @app.post("/api/runs", status_code=202, response_model=RunView)
@@ -182,8 +203,9 @@ def create_app(
                 detail="Staging context is unavailable because N8N_CONTEXT_URL_STAGING is not configured",
             )
         await _ensure_fleet(session, settings)
-        fleet = await session.get(FleetControlRow, 1)
-        assert fleet is not None
+        fleet = await lock_fleet(session, settings)
+        if await current_activity(session) == "workbench":
+            raise HTTPException(status_code=409, detail="Context Workbench is running")
         defaults = dict(fleet.loop_defaults or {})
         try:
             config = LoopConfig.from_mapping({**defaults, **(body.loop_config or {})})

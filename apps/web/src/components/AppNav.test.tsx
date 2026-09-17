@@ -6,7 +6,18 @@ let pathname = "/";
 vi.mock("next/navigation", () => ({ usePathname: () => pathname }));
 
 describe("AppNav", () => {
-  beforeEach(() => { pathname = "/"; });
+  beforeEach(() => {
+    pathname = "/";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        env_file: "Railway service environment",
+        env_file_exists: false,
+        configured: { snowflake: true, context_layer: false, ai: true, model: true },
+        activity: "idle",
+      }),
+    }));
+  });
 
   it("keeps Waypoint first and marks it as the default active tab", () => {
     render(<AppNav />);
@@ -25,5 +36,24 @@ describe("AppNav", () => {
 
     expect(screen.getByRole("link", { name: "Context Workbench" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "Waypoint" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("shows the Workbench tab as locked while Waypoint is running", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        env_file: "Railway service environment",
+        env_file_exists: false,
+        configured: { snowflake: true, context_layer: false, ai: true, model: true },
+        activity: "waypoint",
+      }),
+    }));
+
+    render(<AppNav />);
+
+    expect(await screen.findByText("Context Workbench (locked)")).toHaveAttribute(
+      "aria-disabled", "true",
+    );
+    expect(screen.queryByRole("link", { name: /context workbench/i })).not.toBeInTheDocument();
   });
 });

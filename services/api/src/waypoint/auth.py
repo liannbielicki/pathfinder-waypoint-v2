@@ -15,10 +15,14 @@ def _signer(settings: Settings) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.SESSION_KEY.get_secret_value())
 
 
-def login(settings: Settings, response: Response, password: str) -> None:
+def verify_password(settings: Settings, password: str) -> None:
     if not secrets.compare_digest(password, settings.APP_PASSWORD.get_secret_value()):
         # No WWW-Authenticate header: this is a cookie login, not basic auth.
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+def login(settings: Settings, response: Response, password: str) -> None:
+    verify_password(settings, password)
     response.set_cookie(
         COOKIE_NAME,
         _signer(settings).dumps({"authenticated": True}),

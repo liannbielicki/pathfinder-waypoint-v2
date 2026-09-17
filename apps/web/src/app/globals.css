@@ -33,6 +33,7 @@ body {
 .app-nav { display: flex; gap: .5rem; max-width: 72rem; margin: 0 auto; padding: 1rem 1rem 0; border-bottom: 1px solid var(--border); }
 .app-nav a { padding: .65rem 1rem; color: color-mix(in srgb, var(--fg) 68%, transparent); text-decoration: none; font-weight: 750; border-bottom: 3px solid transparent; }
 .app-nav a[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); }
+.app-nav [aria-disabled="true"] { padding: .65rem 1rem; color: color-mix(in srgb, var(--fg) 38%, transparent); font-weight: 750; }
 
 main {
   max-width: 52rem;

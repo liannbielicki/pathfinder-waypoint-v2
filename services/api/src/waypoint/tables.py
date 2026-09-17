@@ -325,6 +325,48 @@ class FleetControlRow(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
+class WorkbenchJobRow(Base):
+    __tablename__ = "workbench_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'needs_review', 'completed', 'failed')",
+            name="ck_workbench_jobs_status",
+        ),
+        Index(
+            "uq_workbench_jobs_one_active",
+            text("(1)"),
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    status: Mapped[str] = mapped_column(default="queued")
+    request: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    state: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    result: Mapped[dict[str, Any] | None] = mapped_column(default=None)
+    error: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class ContextPromotionRow(Base):
+    __tablename__ = "context_promotions"
+    __table_args__ = (
+        Index(
+            "uq_context_promotions_one_active",
+            text("(1)"),
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    bundle: Mapped[dict[str, Any]]
+    active: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class UsageRow(Base):
     __tablename__ = "llm_usage"
 

@@ -1,9 +1,17 @@
+import asyncio
 import json
 import time
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
-from waypoint.workbench_jobs import WorkbenchJobStore, prune_job_result
+from waypoint.hosted_workbench import HostedWorkbench
+from waypoint.workbench_jobs import (
+    PostgresWorkbenchStore,
+    WorkbenchJobStore,
+    prune_job_result,
+)
 
 
 def _complete_entry(key: str) -> dict[str, object]:
@@ -104,6 +112,85 @@ def test_prune_job_result_removes_prompt_response_and_scrubbed_stage_data():
     assert pruned["stages"][4]["data"] == {"removed_count": 1}
 
 
+async def test_postgres_store_persists_only_sanitized_job_state(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    job = await store.create({
+        "identifier": "org-123",
+        "workbench_mode": "evaluate",
+        "ai_api_key": "must-not-persist",
+        "catalog_override": [
+            _complete_entry("ORGANIZATION_ID"),
+            _complete_entry("JOBS_CREATED_T28"),
+        ],
+    })
+    await store.checkpoint(job.id, {"phase": "drafting", "pending_keys": 3})
+    await store.complete(
+        job.id,
+        prune_job_result({
+            "stages": [{"name": "scrubbed_context", "data": {"VALUE": 12}}],
+            "outputs": {},
+        }),
+        status="completed",
+    )
+
+    persisted = await store.get(job.id)
+
+    assert persisted is not None
+    assert persisted.status == "completed"
+    assert persisted.state == {"phase": "drafting", "pending_keys": 3}
+    assert persisted.request["catalog_override"] == [_complete_entry("JOBS_CREATED_T28")]
+    assert "must-not-persist" not in json.dumps(persisted.request)
+    assert persisted.result["stages"][0]["data"] is None
+
+
+async def test_postgres_store_enforces_one_active_job(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    await store.create({"identifier": "org-1", "workbench_mode": "authoring"})
+
+    with pytest.raises(IntegrityError):
+        await store.create({"identifier": "org-2", "workbench_mode": "authoring"})
+
+
+async def test_postgres_store_activates_one_immutable_promotion(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    first = {"id": "promotion-one", "rules": [{"canonical_key": "jobs"}]}
+    second = {"id": "promotion-two", "rules": [{"canonical_key": "invoices"}]}
+
+    await store.promote(first)
+    await store.promote(second)
+
+    assert await store.read_active_promotion() == second
+    with pytest.raises(ValueError, match="different content"):
+        await store.promote({**second, "rules": []})
+
+
+async def test_two_hosted_processes_execute_one_workbench_job_once(
+    db_session_factory,
+) -> None:
+    calls = 0
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {"authoring": {"review_exception_count": 0}},
+        }
+
+    store = PostgresWorkbenchStore(db_session_factory)
+    job = await store.create({"identifier": "org-1", "workbench_mode": "authoring"})
+    first = HostedWorkbench(db_session_factory, fake_execute)
+    second = HostedWorkbench(db_session_factory, fake_execute)
+
+    await asyncio.gather(first.run_job(job.id), second.run_job(job.id))
+
+    completed = await store.get(job.id)
+    assert calls == 1
+    assert completed is not None and completed.status == "completed"
+
+
 def _wait_for_terminal(client: TestClient, job_id: str) -> dict[str, object]:
     for _ in range(100):
         payload = client.get(f"/api/context-workbench/jobs/{job_id}").json()
@@ -122,7 +209,7 @@ def test_job_api_starts_reads_and_resumes_durable_jobs(tmp_path):
         calls.append(dict(resume_state or {}))
         state = {"entries": [_complete_entry("DONE")], "revised_keys": []}
         if checkpoint:
-            checkpoint(state)
+            await checkpoint(state)
         return {
             "stages": [],
             "warnings": [],

@@ -11,6 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from waypoint.db import session_scope
+from waypoint.tables import ContextPromotionRow, WorkbenchJobRow
 from waypoint.workbench import is_pii_variable_key, scrub_pii
 
 _SAFE_REQUEST_FIELDS = {
@@ -198,6 +203,132 @@ class WorkbenchJobStore:
                 f"UPDATE jobs SET {assignments} WHERE id = ?",
                 (*values.values(), job_id),
             )
+
+
+def _postgres_job(row: WorkbenchJobRow) -> WorkbenchJob:
+    return WorkbenchJob(
+        id=row.id,
+        status=row.status,
+        request=dict(row.request or {}),
+        state=dict(row.state or {}),
+        result=dict(row.result) if row.result is not None else None,
+        error=row.error,
+        created_at=row.created_at.isoformat(),
+        updated_at=row.updated_at.isoformat(),
+    )
+
+
+class PostgresWorkbenchStore:
+    """Async durable store used by the Railway-hosted Workbench."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self.factory = factory
+
+    async def create(
+        self,
+        request: dict[str, Any],
+        *,
+        session: AsyncSession | None = None,
+    ) -> WorkbenchJob:
+        row = WorkbenchJobRow(request=sanitize_job_request(request))
+        if session is not None:
+            session.add(row)
+            await session.flush()
+            return _postgres_job(row)
+        async with session_scope(self.factory) as owned:
+            owned.add(row)
+            await owned.flush()
+            return _postgres_job(row)
+
+    async def get(self, job_id: str) -> WorkbenchJob | None:
+        async with self.factory() as session:
+            row = await session.get(WorkbenchJobRow, job_id)
+            return _postgres_job(row) if row is not None else None
+
+    async def checkpoint(self, job_id: str, state: dict[str, Any]) -> None:
+        await self._update(job_id, status="running", state=state, error=None)
+
+    async def set_status(self, job_id: str, status: str) -> None:
+        await self._update(job_id, status=status)
+
+    async def complete(self, job_id: str, result: dict[str, Any], *, status: str) -> None:
+        await self._update(job_id, status=status, result=result, error=None)
+
+    async def fail(self, job_id: str, error: str) -> None:
+        await self._update(job_id, status="failed", error=error[:1000])
+
+    async def resumable(self) -> list[WorkbenchJob]:
+        async with self.factory() as session:
+            rows = (
+                await session.execute(
+                    select(WorkbenchJobRow)
+                    .where(WorkbenchJobRow.status.in_(("queued", "running")))
+                    .order_by(WorkbenchJobRow.created_at)
+                )
+            ).scalars().all()
+            return [_postgres_job(row) for row in rows]
+
+    async def latest(self) -> WorkbenchJob | None:
+        async with self.factory() as session:
+            row = (
+                await session.execute(
+                    select(WorkbenchJobRow)
+                    .order_by(WorkbenchJobRow.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return _postgres_job(row) if row is not None else None
+
+    async def promote(
+        self,
+        bundle: dict[str, Any],
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        promotion_id = str(bundle.get("id") or "")
+        if not promotion_id:
+            raise ValueError("promotion id is required")
+        if session is not None:
+            await self._promote(session, promotion_id, bundle)
+            return
+        async with session_scope(self.factory) as owned:
+            await self._promote(owned, promotion_id, bundle)
+
+    async def _promote(
+        self,
+        session: AsyncSession,
+        promotion_id: str,
+        bundle: dict[str, Any],
+    ) -> None:
+        existing = await session.get(ContextPromotionRow, promotion_id)
+        if existing is not None and existing.bundle != bundle:
+            raise ValueError("promotion id already exists with different content")
+        await session.execute(update(ContextPromotionRow).values(active=False))
+        if existing is None:
+            session.add(
+                ContextPromotionRow(id=promotion_id, bundle=bundle, active=True)
+            )
+        else:
+            existing.active = True
+        await session.flush()
+
+    async def read_active_promotion(self) -> dict[str, Any] | None:
+        async with self.factory() as session:
+            row = (
+                await session.execute(
+                    select(ContextPromotionRow).where(ContextPromotionRow.active.is_(True))
+                )
+            ).scalar_one_or_none()
+            return dict(row.bundle) if row is not None else None
+
+    async def _update(self, job_id: str, **values: Any) -> None:
+        async with session_scope(self.factory) as session:
+            row = await session.get(WorkbenchJobRow, job_id)
+            if row is None:
+                return
+            for key, value in values.items():
+                setattr(row, key, value)
+            await session.flush()
 
 
 def prune_job_result(result: dict[str, Any]) -> dict[str, Any]:

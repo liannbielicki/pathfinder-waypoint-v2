@@ -17,6 +17,7 @@ Redirects are refused so the bearer token is never forwarded.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -159,7 +160,10 @@ class OrgContextBatch(BaseModel):
 
 
 def _brief_from_row(
-    row: dict[str, Any], promotion_store: PromotionStore | None = None
+    row: dict[str, Any],
+    promotion: Mapping[str, Any] | None = None,
+    *,
+    promotion_required: bool = False,
 ) -> OrgBrief:
     """Project one wire row onto the allowlist: verify the version, keep only
     allowlisted fields (dropping any stray column — the PII guard), tolerate
@@ -178,8 +182,8 @@ def _brief_from_row(
         log.debug("dropped non-allowlisted context fields: %s", sorted(dropped))
     projected: dict[str, Any] = {"org_uuid": row["org_uuid"]}
     projected.update({k: row[k] for k in ALLOWED_FIELDS if k in row})
-    bundle = promotion_store.read_active() if promotion_store is not None else None
-    if promotion_store is not None and bundle is None:
+    bundle = promotion
+    if promotion_required and bundle is None:
         raise ValueError("staging context promotion artifact is missing")
     if bundle is not None:
         by_case = {str(key).casefold(): value for key, value in row.items()}
@@ -238,6 +242,7 @@ class N8NContextClient:
         backoff_seconds: float = 15.0,
         client: httpx.AsyncClient | None = None,
         promotion_store: PromotionStore | None = None,
+        promotion_loader: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
     ) -> None:
         # ponytail: 5-id batches match the existing n8n validate-node cap.
         self.url = url
@@ -245,6 +250,7 @@ class N8NContextClient:
         self.attempts = attempts
         self.backoff_seconds = backoff_seconds
         self._promotion_store = promotion_store
+        self._promotion_loader = promotion_loader
         # One shared client instance serves every worker loop, so this
         # semaphore is the process-wide cap on concurrent n8n executions —
         # the flow (Snowflake + Iterable behind it) degrades badly when all
@@ -285,6 +291,16 @@ class N8NContextClient:
         # and routes them.
         organizations: list[OrgBrief] = []
         query_version: str | None = None
+        promotion_required = (
+            self._promotion_store is not None or self._promotion_loader is not None
+        )
+        promotion = (
+            await self._promotion_loader()
+            if self._promotion_loader is not None
+            else self._promotion_store.read_active()
+            if self._promotion_store is not None
+            else None
+        )
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
             response = await self._post_chunk(chunk)
@@ -305,7 +321,15 @@ class N8NContextClient:
             )
             try:
                 pairs = [
-                    (row, _brief_from_row(row, self._promotion_store)) for row in rows
+                    (
+                        row,
+                        _brief_from_row(
+                            row,
+                            promotion,
+                            promotion_required=promotion_required,
+                        ),
+                    )
+                    for row in rows
                 ]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error

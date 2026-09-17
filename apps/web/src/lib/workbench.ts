@@ -19,6 +19,7 @@ export type WorkbenchStatus = {
   env_file: string;
   env_file_exists: boolean;
   configured: { snowflake: boolean; context_layer: boolean; ai: boolean; model: boolean };
+  activity: "idle" | "waypoint" | "workbench";
 };
 
 export type WorkbenchJob = {
@@ -43,7 +44,6 @@ export type PromotionResult = {
   csv: string;
 };
 
-const API_URL = process.env.NEXT_PUBLIC_WORKBENCH_API_URL ?? "http://localhost:8766";
 export const WORKBENCH_ACTIVE_JOB_KEY = "waypoint-context-workbench-active-job";
 
 async function responsePayload(response: Response) {
@@ -68,11 +68,11 @@ async function responsePayload(response: Response) {
 
 async function request(path: string, init?: RequestInit) {
   try {
-    return await fetch(`${API_URL}${path}`, init);
+    return await fetch(path, { ...init, credentials: "include" });
   } catch (cause) {
     if (cause instanceof TypeError) {
       throw new Error(
-        `Lost connection to the Workbench backend at ${API_URL}. The backend may be stopped or may have restarted during this run.`,
+        "Lost connection to the shared Waypoint backend. It may be unavailable or restarting.",
         { cause },
       );
     }
@@ -110,14 +110,6 @@ export async function previewContextPromotion(input: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   })) as Promise<PromotionResult>;
-}
-
-export async function runWorkbench(input: Record<string, unknown>): Promise<WorkbenchTrace> {
-  const response = await request(
-    "/api/context-workbench/run",
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
-  );
-  return responsePayload(response) as Promise<WorkbenchTrace>;
 }
 
 export async function startWorkbenchJob(input: Record<string, unknown>): Promise<WorkbenchJob> {

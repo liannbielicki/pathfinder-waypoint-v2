@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 
 import httpx
@@ -9,6 +10,7 @@ from tests.conftest import TEST_SETTINGS
 from waypoint.api import create_app
 from waypoint.tables import (
     CandidateRow,
+    ContextPromotionRow,
     EvolveRoundRow,
     HandoffRow,
     JobRow,
@@ -16,6 +18,7 @@ from waypoint.tables import (
     RunRow,
     TouchOutcomeRow,
     WinnerRow,
+    WorkbenchJobRow,
 )
 
 RUN_REQUEST = {
@@ -428,6 +431,194 @@ async def test_staging_run_is_rejected_when_staging_url_is_unavailable(
 
 async def test_fleet_settings_requires_session(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/fleet/settings")).status_code == 401
+
+
+async def test_hosted_workbench_routes_require_the_waypoint_session(
+    client: httpx.AsyncClient,
+) -> None:
+    assert (await client.get("/api/context-workbench/status")).status_code == 401
+    assert (await client.post(
+        "/api/context-workbench/jobs",
+        json={"identifier": "889901", "workbench_mode": "compile"},
+    )).status_code == 401
+
+
+async def test_active_waypoint_run_locks_the_hosted_workbench(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    status = await auth_client.get("/api/context-workbench/status")
+    blocked = await auth_client.post(
+        "/api/context-workbench/jobs",
+        json={"identifier": "889901", "workbench_mode": "compile"},
+    )
+
+    assert status.status_code == 200
+    assert status.json()["activity"] == "waypoint"
+    assert blocked.status_code == 409
+    assert "Waypoint run is active" in blocked.text
+
+
+async def test_degraded_waypoint_run_does_not_lock_the_hosted_workbench(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    run = await db_session.get(RunRow, created["id"])
+    assert run is not None
+    run.status = "degraded"
+    await db_session.commit()
+
+    status = await auth_client.get("/api/context-workbench/status")
+
+    assert status.status_code == 200
+    assert status.json()["activity"] == "idle"
+
+
+async def test_active_workbench_blocks_login_and_waypoint_run_creation(
+    client: httpx.AsyncClient,
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(
+        WorkbenchJobRow(
+            id="workbench-active",
+            status="running",
+            request={"identifier": "889901", "workbench_mode": "authoring"},
+        )
+    )
+    await db_session.commit()
+
+    login = await client.post(
+        "/api/auth/login", json={"password": "operator-password"}
+    )
+    run = await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    assert login.status_code == 409
+    assert "Context Workbench is running" in login.text
+    assert run.status_code == 409
+    assert "Context Workbench is running" in run.text
+
+
+async def test_hosted_workbench_runs_and_checkpoints_in_postgres(
+    db_session_factory,
+) -> None:
+    checkpoints: list[dict[str, object]] = []
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        state = {"phase": "drafting", "pending_keys": 2}
+        checkpoints.append(state)
+        assert checkpoint is not None
+        await checkpoint(state)
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {
+                "authoring": {
+                    "draft": [],
+                    "review_exception_count": 0,
+                }
+            },
+        }
+
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://operator.test"
+    ) as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post(
+            "/api/context-workbench/jobs",
+            json={"identifier": "889901", "workbench_mode": "authoring"},
+        )
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(
+                f"/api/context-workbench/jobs/{job_id}"
+            )).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("hosted Workbench job did not complete")
+
+    assert checkpoints == [{"phase": "drafting", "pending_keys": 2}]
+    assert job["state"] == checkpoints[0]
+    assert job["result"]["outputs"]["authoring"]["draft"] == []
+
+
+async def test_hosted_workbench_activates_an_immutable_promotion(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    entry = {
+        "key": "JOBS_CREATED_T28",
+        "canonical_key": "jobs_created_t28",
+        "value_category": "activity",
+        "related_features": ["jobs"],
+        "usefulness_rank": 5,
+        "disposition": "include",
+        "aggregate_prompt": "Calculate the matched cohort percentile.",
+        "review_status": "reviewed",
+        "approval_status": "auto_approved",
+        "confidence": 0.95,
+        "uncertainty_reason": None,
+        "source_table": "ANALYTICS.JOBS",
+    }
+    db_session.add(WorkbenchJobRow(
+        id="evaluation-complete",
+        status="completed",
+        request={
+            "identifier": "889901",
+            "workbench_mode": "evaluate",
+            "catalog_override": [entry],
+            "feature_catalog_entries": [{
+                "feature": "jobs",
+                "Product Area": "Operations",
+                "Value Statement": "Create and manage jobs.",
+            }],
+            "catalog_version_id": "context-v1",
+            "feature_catalog_version_id": "features-v1",
+        },
+        result={"outputs": {"evaluation": {"judge": {"winner": "curated"}}}},
+    ))
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-complete"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["included_variables"] == 1
+    assert response.json()["csv"].splitlines()[0] == (
+        "canonical_key,source_table,cohort_aggregate_prompt"
+    )
+    promotion = await db_session.get(ContextPromotionRow, response.json()["id"])
+    assert promotion is not None and promotion.active is True
+    assert promotion.bundle["feature_catalog"][0]["feature"] == "jobs"
+
+
+async def test_hosted_workbench_cannot_promote_during_a_waypoint_run(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "anything"},
+    )
+
+    assert response.status_code == 409
+    assert "Waypoint run" in response.text
 
 
 async def test_stages_aggregate_across_per_pro_jobs(

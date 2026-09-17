@@ -15,8 +15,8 @@ export function LoginForm({ onSuccess }: { onSuccess: () => void }) {
     try {
       await login(password);
       onSuccess();
-    } catch {
-      setError("Sign-in failed. Check the operator password and try again.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-in failed. Check the operator password and try again.");
     } finally {
       setBusy(false);
     }

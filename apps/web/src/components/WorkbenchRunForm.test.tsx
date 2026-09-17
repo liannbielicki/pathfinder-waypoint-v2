@@ -17,6 +17,7 @@ describe("WorkbenchRunForm", () => {
         env_file: "/project/services/api/.env",
         env_file_exists: true,
         configured: { snowflake: true, context_layer: true, ai: true, model: true },
+        activity: "idle",
       }),
     }));
   });
@@ -34,6 +35,23 @@ describe("WorkbenchRunForm", () => {
     expect(screen.getByRole("button", { name: /collect and curate all variables/i })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("/project/services/api/.env")).toBeInTheDocument());
     expect(screen.getByText(/snowflake.*configured/i)).toBeInTheDocument();
+  });
+
+  it("locks collection while a Waypoint run is active", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        env_file: "/project/services/api/.env",
+        env_file_exists: true,
+        configured: { snowflake: true, context_layer: true, ai: true, model: true },
+        activity: "waypoint",
+      }),
+    }));
+
+    render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
+
+    expect(await screen.findByText(/waypoint run is active/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: /collect and curate/i })).toBeDisabled();
   });
 
   it("removes collection as the primary action after a run is complete", () => {

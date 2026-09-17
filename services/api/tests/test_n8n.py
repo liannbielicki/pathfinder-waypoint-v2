@@ -18,7 +18,11 @@ FIXTURE = Path(__file__).parent / "fixtures" / "n8n_context.json"
 N8N_URL = "https://n8n.example/webhook/context"
 
 
-def make_client(batch_size: int = 5, promotion_store=None) -> N8NContextClient:
+def make_client(
+    batch_size: int = 5,
+    promotion_store=None,
+    promotion_loader=None,
+) -> N8NContextClient:
     # backoff 0 so retry tests don't sleep for real
     return N8NContextClient(
         url=N8N_URL,
@@ -26,6 +30,7 @@ def make_client(batch_size: int = 5, promotion_store=None) -> N8NContextClient:
         batch_size=batch_size,
         backoff_seconds=0.0,
         promotion_store=promotion_store,
+        promotion_loader=promotion_loader,
     )
 
 
@@ -105,6 +110,31 @@ async def test_active_promotion_retains_only_promoted_canonical_values(
     assert "UNAPPROVED_VALUE" not in str(brief.curated_context)
     assert "customer_email" not in str(brief.curated_context)
     assert "curated_context" not in brief.model_dump()
+
+
+async def test_staging_can_load_the_active_promotion_from_postgres_boundary(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async def load_promotion():
+        return {
+            "rules": [{
+                "source_key": "JOBS_CREATED_T28",
+                "canonical_key": "jobs_created_t28",
+                "related_features": ["jobs"],
+            }],
+            "feature_catalog": [],
+        }
+
+    httpx_mock.add_response(json=[{**_rows()[0], "jobs_created_t28": 12}])
+
+    brief = (
+        await make_client(promotion_loader=load_promotion).fetch(["pro_1"])
+    ).organizations[0]
+
+    assert brief.curated_context == {
+        "v": {"jobs_created_t28": 12},
+        "f": {"jobs_created_t28": ["jobs"]},
+    }
 
 
 async def test_active_promotion_with_no_matching_values_fails_closed(

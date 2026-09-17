@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getWorkbenchJob, resumeWorkbenchJob, runWorkbench, startWorkbenchJob } from "./workbench";
+import { getWorkbenchJob, getWorkbenchStatus, resumeWorkbenchJob, startWorkbenchJob } from "./workbench";
 
 describe("Workbench API errors", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -7,8 +7,8 @@ describe("Workbench API errors", () => {
   it("explains when the browser loses the backend connection", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
-    await expect(runWorkbench({})).rejects.toThrow(
-      "Lost connection to the Workbench backend at http://localhost:8766",
+    await expect(getWorkbenchStatus()).rejects.toThrow(
+      "Lost connection to the shared Waypoint backend",
     );
   });
 
@@ -20,7 +20,7 @@ describe("Workbench API errors", () => {
       json: vi.fn().mockRejectedValue(new SyntaxError("not JSON")),
     }));
 
-    await expect(runWorkbench({})).rejects.toThrow(
+    await expect(getWorkbenchStatus()).rejects.toThrow(
       "Workbench backend returned HTTP 500 Internal Server Error",
     );
   });
@@ -40,8 +40,8 @@ describe("durable Workbench jobs", () => {
     await getWorkbenchJob("job-1");
     await resumeWorkbenchJob("job-1");
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://localhost:8766/api/context-workbench/jobs", expect.objectContaining({ method: "POST" }));
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://localhost:8766/api/context-workbench/jobs/job-1", undefined);
-    expect(fetchMock).toHaveBeenNthCalledWith(3, "http://localhost:8766/api/context-workbench/jobs/job-1/resume", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/context-workbench/jobs", expect.objectContaining({ method: "POST", credentials: "include" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/context-workbench/jobs/job-1", expect.objectContaining({ credentials: "include" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/context-workbench/jobs/job-1/resume", expect.objectContaining({ method: "POST", credentials: "include" }));
   });
 });

@@ -37,6 +37,7 @@ from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import Calibration, load_calibration
 from waypoint.settings import Settings
 from waypoint.tables import FleetControlRow
+from waypoint.workbench_jobs import PostgresWorkbenchStore
 
 log = logging.getLogger("waypoint.worker")
 
@@ -351,13 +352,22 @@ async def main() -> None:
         timeout=settings.N8N_TIMEOUT_SECONDS,
         max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
+    promotion_store = PostgresWorkbenchStore(factory)
+    packaged_promotions = PromotionStore(PACKAGED_PROMOTION_ROOT)
+
+    async def load_active_promotion() -> dict[str, Any] | None:
+        return (
+            await promotion_store.read_active_promotion()
+            or packaged_promotions.read_active()
+        )
+
     staging_context = (
         N8NContextClient(
             url=str(settings.N8N_CONTEXT_URL_STAGING),
             token=settings.N8N_TOKEN.get_secret_value(),
             timeout=settings.N8N_TIMEOUT_SECONDS,
             max_concurrent=settings.N8N_MAX_CONCURRENT,
-            promotion_store=PromotionStore(PACKAGED_PROMOTION_ROOT),
+            promotion_loader=load_active_promotion,
         )
         if settings.N8N_CONTEXT_URL_STAGING is not None
         else None

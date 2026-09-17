@@ -59,6 +59,142 @@ export interface paths {
         patch: operations["patch_call_api_calls__winner_id__patch"];
         trace?: never;
     };
+    "/api/context-workbench/catalog/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate Catalog */
+        post: operations["validate_catalog_api_context_workbench_catalog_validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Job */
+        post: operations["start_job_api_context_workbench_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/jobs/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest Job */
+        get: operations["latest_job_api_context_workbench_jobs_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_context_workbench_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/jobs/{job_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Job */
+        post: operations["resume_job_api_context_workbench_jobs__job_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/promotions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote */
+        post: operations["promote_api_context_workbench_promotions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/promotions/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Promotion */
+        post: operations["preview_promotion_api_context_workbench_promotions_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/context-workbench/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Status */
+        get: operations["status_api_context_workbench_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/exposures": {
         parameters: {
             query?: never;
@@ -328,6 +464,15 @@ export interface components {
              */
             status: "todo" | "done";
         };
+        /** CatalogValidateRequest */
+        CatalogValidateRequest: {
+            /** Csv Text */
+            csv_text: string;
+            /** Filename */
+            filename: string;
+            /** Name */
+            name: string;
+        };
         /**
          * ExposureIn
          * @description One exposure registration. Arm "A" is the treated recommendation; arm
@@ -401,6 +546,11 @@ export interface components {
         LoginRequest: {
             /** Password */
             password: string;
+        };
+        /** PromotionRequest */
+        PromotionRequest: {
+            /** Evaluation Job Id */
+            evaluation_job_id: string;
         };
         /** RunCreate */
         RunCreate: {
@@ -638,6 +788,88 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** WorkbenchRunRequest */
+        WorkbenchRunRequest: {
+            /** Ai Api Key */
+            ai_api_key?: string | null;
+            /**
+             * Authoring Prompt
+             * @default Create a token-efficient, AI-only variable catalog using key, canonical_key, value_category, related_features, usefulness_rank, and aggregate_prompt. Map each variable only to exact feature keys from the supplied catalog. Do not create human descriptions, time metadata, or recommendations. Return valid JSON only.
+             */
+            authoring_prompt: string;
+            /**
+             * Candidate Count
+             * @default 3
+             */
+            candidate_count: number;
+            /** Catalog Override */
+            catalog_override?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Catalog Version Id */
+            catalog_version_id?: string | null;
+            /** Catalog Version Name */
+            catalog_version_name?: string | null;
+            /** Catalog Version Saved At */
+            catalog_version_saved_at?: string | null;
+            /** Channels */
+            channels?: string[];
+            /** Context Api Key */
+            context_api_key?: string | null;
+            /** Context Base Url */
+            context_base_url?: string | null;
+            /**
+             * Context Policy
+             * @default compare
+             * @enum {string}
+             */
+            context_policy: "baseline" | "proposed" | "compare";
+            /**
+             * Enrichment
+             * @default catalog
+             * @enum {string}
+             */
+            enrichment: "none" | "catalog";
+            /** Feature Catalog Csv */
+            feature_catalog_csv?: string | null;
+            /** Feature Catalog Entries */
+            feature_catalog_entries?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Feature Catalog Version Id */
+            feature_catalog_version_id?: string | null;
+            /** Identifier */
+            identifier: string;
+            /**
+             * Identifier Type
+             * @default organization_id
+             * @enum {string}
+             */
+            identifier_type: "organization_id" | "org_uuid" | "pro_uuid";
+            /**
+             * Journey Window
+             * @default churn_risk_open
+             */
+            journey_window: string;
+            /** Model */
+            model?: string | null;
+            /** N8N Webhook Token */
+            n8n_webhook_token?: string | null;
+            /** N8N Webhook Url */
+            n8n_webhook_url?: string | null;
+            /**
+             * Source Mode
+             * @default snowflake
+             * @enum {string}
+             */
+            source_mode: "snowflake" | "context_layer" | "both";
+            /**
+             * Workbench Mode
+             * @default runtime
+             * @enum {string}
+             */
+            workbench_mode: "runtime" | "authoring" | "compile" | "evaluate";
+        };
     };
     responses: never;
     parameters: never;
@@ -733,6 +965,256 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_catalog_api_context_workbench_catalog_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogValidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_job_api_context_workbench_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkbenchRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    latest_job_api_context_workbench_jobs_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_job_api_context_workbench_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_job_api_context_workbench_jobs__job_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_api_context_workbench_promotions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromotionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_promotion_api_context_workbench_promotions_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromotionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    status_api_context_workbench_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
