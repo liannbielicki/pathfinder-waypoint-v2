@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from waypoint import amplitude_source, iterable_source, queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.checkpoints import sweep_if_enabled
+from waypoint.context_promotion import PACKAGED_PROMOTION_ROOT, PromotionStore
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
@@ -218,6 +219,7 @@ async def _worker_loop(
     slots: FleetSlots,
     llm_stacks: LLMStacks,
     context: N8NContextClient,
+    staging_context: N8NContextClient | None,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
     persona_source: Callable[[str], Awaitable[list[Persona]]],
@@ -269,6 +271,7 @@ async def _worker_loop(
                         reconcile=partial(queue.reconcile_cost, usage_session),
                     ),
                     context=context,
+                    staging_context=staging_context,
                     queue=QueueOps(session),
                     get_personas=persona_source,
                     calibration=calibration,
@@ -348,6 +351,17 @@ async def main() -> None:
         timeout=settings.N8N_TIMEOUT_SECONDS,
         max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
+    staging_context = (
+        N8NContextClient(
+            url=str(settings.N8N_CONTEXT_URL_STAGING),
+            token=settings.N8N_TOKEN.get_secret_value(),
+            timeout=settings.N8N_TIMEOUT_SECONDS,
+            max_concurrent=settings.N8N_MAX_CONCURRENT,
+            promotion_store=PromotionStore(PACKAGED_PROMOTION_ROOT),
+        )
+        if settings.N8N_CONTEXT_URL_STAGING is not None
+        else None
+    )
 
     # One long-lived LCM transport shared by every loop (like the n8n client):
     # no per-Pro TLS handshake on the trickle path.
@@ -371,6 +385,7 @@ async def main() -> None:
                 slots=FleetSlots(slots_connection, max_slots=settings.MAX_LLM_IN_FLIGHT),
                 llm_stacks=llm_stacks,
                 context=context,
+                staging_context=staging_context,
                 anthropic=anthropic,
                 pricing=pricing,
                 persona_source=persona_source,

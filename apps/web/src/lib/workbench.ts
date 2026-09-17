@@ -34,6 +34,12 @@ export type WorkbenchJob = {
 export type PromotionResult = {
   id: string;
   included_variables: number;
+  counts: {
+    approved: number;
+    pii_removed: number;
+    duplicates_merged: number;
+    retained: number;
+  };
   csv: string;
 };
 

@@ -29,6 +29,7 @@ from .conftest import (
     CRITIC_BLOCK,
     CRITIC_OK,
     PERSONAS,
+    FakeContext,
     FakeDeps,
     idea_json,
     reactions_json,
@@ -123,6 +124,24 @@ async def test_happy_path_completes_with_champion_and_measurement(
     tiers = {(c["stage"], c["tier"]) for c in deps.gateway.calls}
     assert ("screen", "fast") in tiers
     assert ("final", "deep") in tiers
+
+
+async def test_staging_run_uses_only_the_staging_context_client(
+    deps: FakeDeps,
+    seeded_job,
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    assert run is not None
+    run.context_source = "staging"
+    await deps.db.commit()
+    standard = deps.context
+    staging = FakeContext()
+    deps.staging_context = staging
+
+    await run_job(seeded_job.id, deps)
+
+    assert standard.fetches == []
+    assert staging.fetches == [["pro_1"]]
 
 
 async def test_winner_carries_canonical_item_identity(deps: FakeDeps, seeded_job) -> None:
@@ -551,6 +570,28 @@ async def test_context_outage_waits_for_retry(deps: FakeDeps, seeded_job) -> Non
     deps.context.unavailable = True
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "waiting"
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    assert run is not None
+    assert "standard" in str(run.stop_reason)
+
+
+async def test_staging_context_outage_is_labeled_in_diagnostics(
+    deps: FakeDeps, seeded_job
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert run is not None and job is not None
+    run.context_source = "staging"
+    job.attempts = job.max_attempts
+    staging = FakeContext()
+    staging.unavailable = True
+    deps.staging_context = staging
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    await deps.db.refresh(job)
+    assert "context_unavailable: staging:" in job.checkpoint["failure"]["reason"]
 
 
 async def test_context_outage_for_one_pro_never_fails_the_run(deps: FakeDeps) -> None:

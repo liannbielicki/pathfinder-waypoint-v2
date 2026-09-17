@@ -51,6 +51,7 @@ describe("AuthoringCatalog", () => {
     vi.mocked(previewContextPromotion).mockResolvedValue({
       id: "promotion-preview",
       included_variables: 1,
+      counts: { approved: 1, pii_removed: 0, duplicates_merged: 0, retained: 1 },
       csv: "canonical_key,source_table,cohort_aggregate_prompt\n",
     });
     const values = new Map<string, string>();
@@ -139,11 +140,13 @@ describe("AuthoringCatalog", () => {
     vi.mocked(promoteContext).mockResolvedValue({
       id: "promotion-one",
       included_variables: 1,
+      counts: { approved: 1, pii_removed: 0, duplicates_merged: 0, retained: 1 },
       csv: "canonical_key,source_table,cohort_aggregate_prompt\njobs,ANALYTICS.JOBS,\n",
     });
     vi.mocked(previewContextPromotion).mockResolvedValue({
       id: "promotion-one",
       included_variables: 1,
+      counts: { approved: 1, pii_removed: 0, duplicates_merged: 0, retained: 1 },
       csv: "canonical_key,source_table,cohort_aggregate_prompt\njobs,ANALYTICS.JOBS,\n",
     });
     render(<AuthoringCatalog trace={{

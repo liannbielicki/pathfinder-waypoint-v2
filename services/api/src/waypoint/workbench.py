@@ -25,10 +25,6 @@ _SAFE_CATALOG_FIELDS = {
     "aggregate_prompt", "disposition", "review_status", "approval_status",
     "confidence", "uncertainty_reason", "exclusion_reason",
 }
-_PII_WORDS = (
-    "name", "email", "phone", "address", "street", "city", "state", "country", "zip",
-    "postal", "uuid", "organization_id", "salesforce", "contact", "lead_id", "pro_id",
-)
 _METADATA_KEYS = {
     "query_name", "variable_name", "source_table", "source_database", "table_schema",
     "table_name", "column_name", "data_type", "ordinal_position", "comment",
@@ -68,8 +64,10 @@ def workbench_env() -> dict[str, str | None]:
     return {
         "context_base_url": _env("CONTEXT_LAYER_BASE_URL"),
         "context_api_key": _env("CONTEXT_LAYER_API_KEY"),
-        "n8n_webhook_url": _env("N8N_CONTEXT_WEBHOOK_URL"),
-        "n8n_webhook_token": _env("N8N_CONTEXT_WEBHOOK_TOKEN"),
+        "n8n_webhook_url": (
+            _env("N8N_CONTEXT_URL_WORKBENCH") or _env("N8N_CONTEXT_WEBHOOK_URL")
+        ),
+        "n8n_webhook_token": _env("N8N_TOKEN") or _env("N8N_CONTEXT_WEBHOOK_TOKEN"),
         "ai_api_key": _env("ANTHROPIC_API_KEY") or _env("LLM_API_KEY"),
         "model": _env("WORKBENCH_MODEL") or _env("MODEL_FAST"),
         "fast_model": _env("MODEL_FAST") or "claude-haiku-4-5",
@@ -143,7 +141,9 @@ def is_pii_variable_key(value: str) -> bool:
     return _is_pii_variable_key(value)
 
 
-def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def scrub_pii(
+    value: Mapping[str, Any], *, drop_location_tokens: bool = True
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Apply the app-side PII exclusion criteria to an arbitrary context pack."""
     identity_values = {
         str(item).strip().casefold() for key, item in value.items()
@@ -160,14 +160,15 @@ def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, 
                 (str(child) for key, child in item.items() if str(key).casefold() == "variable_name"),
                 "",
             ).casefold()
+            if variable_name and _is_pii_variable_key(variable_name):
+                ledger.append({
+                    "path": path or "rows",
+                    "category": "variable",
+                    "reason": "variable key is classified as PII by the exclusion list",
+                })
+                return _DROP
             for key, child in item.items():
                 child_path = f"{path}.{key}" if path else str(key)
-                if (
-                    str(key).casefold() == "value"
-                    and _is_pii_variable_key(variable_name)
-                ):
-                    ledger.append({"path": child_path, "category": "variable", "reason": "variable key is classified as PII by the exclusion list"})
-                    continue
                 result = walk(child, child_path, str(key).casefold())
                 if result is not _DROP:
                     mapping_output[str(key)] = result
@@ -191,7 +192,7 @@ def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, 
             if any(identity and identity in lowered for identity in identity_values):
                 ledger.append({"path": path, "category": "identity_match", "reason": "value matched an excluded identity value"})
                 return _DROP
-            if _STATE_OR_COUNTRY.fullmatch(item.strip()):
+            if drop_location_tokens and _STATE_OR_COUNTRY.fullmatch(item.strip()):
                 ledger.append({"path": path, "category": "location", "reason": "value matched an excluded state or country token"})
                 return _DROP
             if (
@@ -204,7 +205,7 @@ def scrub_pii(value: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, 
         if (
             leaf not in _METADATA_KEYS
             and leaf not in _NON_PII_BUSINESS_KEYS
-            and (_is_pii_variable_key(leaf) or any(word in leaf for word in _PII_WORDS))
+            and _is_pii_variable_key(leaf)
         ):
             ledger.append({"path": path, "category": "field", "reason": "field is classified as PII by the exclusion list"})
             return _DROP
@@ -545,11 +546,6 @@ def validate_catalog_entries(
     for canonical, collisions in canonical_keys.items():
         if canonical and len(collisions) > 1:
             warnings.append(f"canonical key {canonical} is used by multiple variables")
-            for entry in collisions:
-                entry["approval_status"] = "excluded"
-                entry["disposition"] = "exclude"
-                entry["exclusion_reason"] = "canonical_key_conflict"
-                entry["canonical_key_conflict"] = True
     return output, warnings
 
 

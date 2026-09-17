@@ -124,6 +124,7 @@ export const login = (password: string) =>
 // The server defaults journey_window; callers (RetryPanel) may omit it.
 export type RunCreateInput = Omit<RunCreate, "journey_window"> & {
   journey_window?: RunCreate["journey_window"];
+  context_source?: "standard" | "staging";
 };
 
 export const createRun = (body: RunCreateInput) =>
@@ -132,6 +133,7 @@ export const createRun = (body: RunCreateInput) =>
 export interface FleetSettings {
   loop_defaults: Record<string, number>;
   max_in_flight_llm_calls: number;
+  staging_context_available: boolean;
 }
 
 export const getFleetSettings = () => api<FleetSettings>("/fleet/settings");

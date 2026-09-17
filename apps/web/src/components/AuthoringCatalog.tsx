@@ -314,7 +314,8 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
       {promotionPreview && <a className="download-link" href={`data:text/csv;charset=utf-8,${encodeURIComponent(promotionPreview.csv)}`} download={`${promotionPreview.id}-snowflake-handoff.csv`}>Download Snowflake handoff CSV</a>}
       <button type="button" onClick={() => void promote()} disabled={!promotionPreview || promoting || Boolean(promotion)}>{promoting ? "Activating…" : promotion ? "Active in Waypoint" : "Activate in Waypoint"}</button>
       {promotion && <>
-        <p><strong>{promotion.id} is now active</strong> with {promotion.included_variables} approved variables.</p>
+        <p><strong>{promotion.id} is now active</strong> with {promotion.included_variables} non-PII variables.</p>
+        <p className="helper">{promotion.counts.approved} approved · {promotion.counts.pii_removed} PII removed · {promotion.counts.duplicates_merged} duplicate representations merged · {promotion.counts.retained} retained</p>
       </>}
     </section>}
   </section>;

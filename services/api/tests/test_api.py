@@ -59,6 +59,7 @@ async def test_start_returns_202_before_worker_runs(
     body = response.json()
     assert body["status"] == "queued"
     assert body["audience_query"] == "audience_v7"
+    assert body["context_source"] == "standard"
     # A queued job exists for the run and the run budget comes from settings.
     job = (await db_session.execute(select(JobRow).where(JobRow.run_id == body["id"]))).scalar_one()
     assert job.status == "queued"
@@ -402,6 +403,27 @@ async def test_fleet_settings_endpoint_exposes_defaults_and_the_cap(
     body = response.json()
     assert body["max_in_flight_llm_calls"] == 4
     assert body["loop_defaults"]["MAX_ROUNDS"] == 10
+    assert body["staging_context_available"] is True
+
+
+async def test_staging_run_is_rejected_when_staging_url_is_unavailable(
+    db_session_factory,
+) -> None:
+    from waypoint.api import create_app
+
+    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_STAGING": None})
+    app = create_app(settings=settings, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        response = await client.post(
+            "/api/runs", json={**RUN_REQUEST, "context_source": "staging"}
+        )
+
+    assert response.status_code == 422
+    assert "staging" in response.text.casefold()
 
 
 async def test_fleet_settings_requires_session(client: httpx.AsyncClient) -> None:

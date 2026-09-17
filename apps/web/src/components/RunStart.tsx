@@ -51,6 +51,8 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   );
   const [channels, setChannels] = useState<Channel[]>([...CHANNELS]);
   const [journeyWindow, setJourneyWindow] = useState("churn_risk");
+  const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
+  const [stagingAvailable, setStagingAvailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaults, setDefaults] = useState<Record<string, number> | null>(null);
@@ -67,6 +69,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         if (cancelled) return;
         setDefaults(settings.loop_defaults);
         setFleetCap(settings.max_in_flight_llm_calls);
+        setStagingAvailable(settings.staging_context_available);
         // Only fields the server actually advertises get a value. A key the
         // API does not know (an older API than this UI) would otherwise render
         // as the string "undefined" — an empty number input that reads as
@@ -147,6 +150,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         audience_run: audienceRun,
         channels,
         journey_window: journeyWindow as RunCreateInput["journey_window"],
+        context_source: contextSource,
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
       onStarted(run);
@@ -220,6 +224,34 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         <p className="helper">
           The customer state this run optimizes a touch for. Touches are
           selected for return-to-app impact within this window.
+        </p>
+        <div>
+          <span>Context source</span>
+          <label htmlFor="context-standard">
+            <input
+              id="context-standard"
+              type="radio"
+              name="context-source"
+              checked={contextSource === "standard"}
+              onChange={() => setContextSource("standard")}
+            />
+            Standard context
+          </label>
+          <label htmlFor="context-staging">
+            <input
+              id="context-staging"
+              type="radio"
+              name="context-source"
+              checked={contextSource === "staging"}
+              disabled={!stagingAvailable}
+              onChange={() => setContextSource("staging")}
+            />
+            Staging context
+          </label>
+        </div>
+        <p className="helper">
+          Standard uses today&apos;s production workflow. Staging uses the compressed,
+          PII-gated context catalog.
         </p>
       </fieldset>
 

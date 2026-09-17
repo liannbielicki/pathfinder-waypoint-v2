@@ -148,6 +148,41 @@ def machine_catalog(
     ]
 
 
+def prepare_promotion_entries(
+    raw_entries: list[dict[str, Any]], feature_keys: set[str]
+) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
+    """PII-gate reviewed entries before validation without dropping other information."""
+    catalog_entries = [
+        entry for entry in raw_entries if isinstance(entry, dict) and entry.get("key")
+    ]
+    approved = [
+        entry for entry in catalog_entries if str(entry.get("disposition")) == "include"
+    ]
+    safe_entries = [
+        entry
+        for entry in catalog_entries
+        if not is_pii_variable_key(str(entry.get("key") or ""))
+        and not is_pii_variable_key(str(entry.get("canonical_key") or ""))
+    ]
+    pii_removed = sum(
+        1
+        for entry in approved
+        if is_pii_variable_key(str(entry.get("key") or ""))
+        or is_pii_variable_key(str(entry.get("canonical_key") or ""))
+    )
+    validated, warnings = validate_catalog_entries(
+        machine_catalog(safe_entries), feature_keys
+    )
+    entries = [
+        {**entry, "source_table": str(original.get("source_table") or "")}
+        for entry, original in zip(validated, safe_entries, strict=True)
+    ]
+    return entries, {
+        "approved": len(approved),
+        "pii_removed": pii_removed,
+    }, warnings
+
+
 def _compact_feature_catalog(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Keep only the feature evidence needed for exact authoring-time mapping."""
     compact: list[dict[str, str]] = []
@@ -207,10 +242,12 @@ async def execute_run(
         and isinstance(resumed_inventory, list)
         and all(isinstance(item, dict) for item in resumed_inventory)
     )
+    sanitized_request = sanitize_job_request(body.model_dump())
+    safe_catalog_override = sanitized_request.get("catalog_override")
     stages.append(
         WorkbenchStage(
             name="input",
-            data=sanitize_job_request(body.model_dump()),
+            data=sanitized_request,
         )
     )
 
@@ -222,13 +259,16 @@ async def execute_run(
         feature_catalog_entries = [
             {"feature": key, **entry} for key, entry in load_catalog().items()
         ]
+    feature_catalog_entries = sanitize_job_request({
+        "feature_catalog_entries": feature_catalog_entries
+    }).get("feature_catalog_entries", [])
     feature_keys = {
         str(entry.get("feature")) for entry in feature_catalog_entries if entry.get("feature")
     }
 
     if body.workbench_mode == "compile":
         validated, validation_warnings = validate_catalog_entries(
-            machine_catalog(body.catalog_override), feature_keys
+            machine_catalog(safe_catalog_override), feature_keys
         )
         warnings.extend(validation_warnings)
         compiled = compile_catalog_contract(
@@ -253,7 +293,7 @@ async def execute_run(
     if not inventory_resume and body.source_mode in ("context_layer", "both") and (not context_base_url or not context_api_key):
         raise HTTPException(status_code=422, detail="Context Layer mode requires CONTEXT_LAYER_BASE_URL and CONTEXT_LAYER_API_KEY in services/api/.env")
     if not inventory_resume and body.source_mode in ("snowflake", "both") and (not n8n_webhook_url or not n8n_webhook_token):
-        raise HTTPException(status_code=422, detail="Snowflake mode requires N8N_CONTEXT_WEBHOOK_URL and N8N_CONTEXT_WEBHOOK_TOKEN in services/api/.env")
+        raise HTTPException(status_code=422, detail="Snowflake mode requires N8N_CONTEXT_URL_WORKBENCH and N8N_TOKEN in services/api/.env")
 
     sources: dict[str, Any] = {}
     source_errors: dict[str, str] = {}
@@ -366,7 +406,7 @@ async def execute_run(
         )
         saved_catalog, saved_warnings = validate_catalog_entries(
             [
-                *machine_catalog(body.catalog_override),
+                *machine_catalog(safe_catalog_override),
                 *machine_catalog(resumed_entries if isinstance(resumed_entries, list) else []),
             ],
             feature_keys,
@@ -736,7 +776,7 @@ VARIABLE EVIDENCE (no organization values):
     if body.workbench_mode == "evaluate":
         assert ai_api_key is not None
         validated, validation_warnings = validate_catalog_entries(
-            machine_catalog(body.catalog_override), feature_keys
+            machine_catalog(safe_catalog_override), feature_keys
         )
         warnings.extend(validation_warnings)
         curated = compile_context(
@@ -830,7 +870,7 @@ CURATED:
 
     catalog = load_catalog() if body.enrichment == "catalog" else {}
     assert ai_api_key is not None
-    current_context = {"organization": scrubbed, "variable_catalog": machine_catalog(body.catalog_override), "product_context": "current_v3_catalog" if catalog else None}
+    current_context = {"organization": scrubbed, "variable_catalog": machine_catalog(safe_catalog_override), "product_context": "current_v3_catalog" if catalog else None}
     proposed_context = build_prompt_context(current_context, catalog) if catalog else current_context
     stages.append(WorkbenchStage(name="current_context", data=redact(current_context)))
     stages.append(WorkbenchStage(name="proposed_context", data=redact(proposed_context)))
@@ -904,8 +944,13 @@ def create_workbench_app(
             return
         store.set_status(job_id, "running")
         try:
+            executable_request = {
+                key: value
+                for key, value in job.request.items()
+                if key not in {"catalog_approved_count", "catalog_pii_removed_count"}
+            }
             result = await job_executor(
-                WorkbenchRunRequest.model_validate(job.request),
+                WorkbenchRunRequest.model_validate(executable_request),
                 resume_state=job.state,
                 checkpoint=lambda state: store.checkpoint(job_id, state),
             )
@@ -1003,26 +1048,22 @@ def create_workbench_app(
             for entry in feature_entries
             if isinstance(entry, dict) and entry.get("feature")
         }
-        validated, _warnings = validate_catalog_entries(
-            machine_catalog(raw_entries), feature_keys
+        entries, counts, _warnings = prepare_promotion_entries(
+            raw_entries, feature_keys
         )
-        catalog_entries = [
-            entry
-            for entry in raw_entries
-            if isinstance(entry, dict) and entry.get("key")
-        ]
-        entries = []
-        for entry, original in zip(validated, catalog_entries, strict=True):
-            if is_pii_variable_key(str(entry.get("key") or "")) or is_pii_variable_key(
-                str(entry.get("canonical_key") or "")
-            ):
-                continue
-            entries.append({
-                **entry,
-                "source_table": str(original.get("source_table") or ""),
-            })
+        counts["approved"] = int(
+            job.request.get("catalog_approved_count", counts["approved"])
+        )
+        counts["pii_removed"] = int(
+            job.request.get("catalog_pii_removed_count", counts["pii_removed"])
+        )
         fingerprint = json.dumps(
-            {"evaluation_job_id": job.id}, sort_keys=True, separators=(",", ":")
+            {
+                "evaluation_job_id": job.id,
+                "policy": "pii-first-canonical-v1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         promotion_id = f"promotion-{hashlib.sha256(fingerprint.encode()).hexdigest()[:16]}"
         bundle = build_promotion_bundle(
@@ -1033,11 +1074,17 @@ def create_workbench_app(
             feature_catalog_version_id=feature_version_id,
             created_at=job.updated_at,
         )
+        counts["retained"] = len(bundle["rules"])
+        counts["duplicates_merged"] = max(
+            0, counts["approved"] - counts["pii_removed"] - counts["retained"]
+        )
+        bundle["counts"] = counts
         if not bundle["rules"]:
             raise HTTPException(status_code=422, detail="Promotion requires an approved Include variable")
         payload = {
             "id": promotion_id,
             "included_variables": len(bundle["rules"]),
+            "counts": counts,
             "csv": promotion_csv(bundle),
         }
         return bundle, payload

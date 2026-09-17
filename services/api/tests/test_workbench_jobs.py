@@ -63,6 +63,27 @@ def test_job_store_never_persists_secret_request_fields(tmp_path):
     assert "Useful product context" in persisted
 
 
+def test_job_store_pii_gates_catalogs_before_persistence(tmp_path):
+    store = WorkbenchJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create({
+        "identifier": "org-123",
+        "workbench_mode": "evaluate",
+        "feature_catalog_entries": [{
+            "feature": "jobs",
+            "Value Statement": "Owner jane@example.com",
+        }],
+        "catalog_override": [
+            _complete_entry("ORGANIZATION_ID"),
+            _complete_entry("JOBS_CREATED_T28"),
+        ],
+    })
+
+    assert job.request["catalog_override"] == [_complete_entry("JOBS_CREATED_T28")]
+    assert job.request["catalog_approved_count"] == 2
+    assert job.request["catalog_pii_removed_count"] == 1
+    assert job.request["feature_catalog_entries"] == [{"feature": "jobs"}]
+
+
 def test_prune_job_result_removes_prompt_response_and_scrubbed_stage_data():
     result = {
         "stages": [

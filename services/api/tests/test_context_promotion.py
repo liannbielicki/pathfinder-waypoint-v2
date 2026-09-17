@@ -1,7 +1,9 @@
 import csv
 import io
+import json
 
 from waypoint.context_promotion import (
+    PACKAGED_PROMOTION_ROOT,
     PromotionStore,
     build_promotion_bundle,
     compile_promoted_context,
@@ -119,3 +121,72 @@ def test_promotion_store_keeps_immutable_versions_and_an_active_pointer(tmp_path
 
     assert store.read_active() == bundle
     assert store.read("promotion-one") == bundle
+
+
+def test_promotion_preserves_distinct_non_pii_collisions_and_deduplicates_exact_rules():
+    shared = {
+        "key": "COUNT",
+        "canonical_key": "workflow_count",
+        "source_table": "ANALYTICS.WORKFLOWS",
+        "disposition": "include",
+        "approval_status": "auto_approved",
+    }
+    bundle = build_promotion_bundle(
+        [
+            {**shared, "related_features": ["jobs"], "aggregate_prompt": "Prompt A."},
+            {**shared, "related_features": ["invoices"], "aggregate_prompt": "Prompt B."},
+            {**shared, "canonical_key": "progress_count"},
+        ],
+        feature_catalog_entries=[],
+        promotion_id="promotion-collisions",
+        context_catalog_version_id="context-one",
+        feature_catalog_version_id="features-one",
+        created_at="2026-09-17T12:00:00Z",
+    )
+
+    assert [(rule["source_key"], rule["canonical_key"]) for rule in bundle["rules"]] == [
+        ("COUNT", "progress_count"),
+        ("COUNT", "workflow_count"),
+    ]
+    assert bundle["rules"][1]["related_features"] == ["invoices", "jobs"]
+    assert bundle["rules"][1]["cohort_aggregate_prompt"] == "Prompt A. Prompt B."
+
+
+def test_feature_catalog_removes_pii_values_without_removing_product_language():
+    bundle = build_promotion_bundle(
+        [],
+        feature_catalog_entries=[{
+            "feature": "email_marketing",
+            "Product Area": "AI",
+            "Value Statement": "Send campaigns; owner jane@example.com",
+        }],
+        promotion_id="promotion-features",
+        context_catalog_version_id="context-one",
+        feature_catalog_version_id="features-one",
+        created_at="2026-09-17T12:00:00Z",
+    )
+
+    assert bundle["feature_catalog"] == [{
+        "feature": "email_marketing",
+        "Product Area": "AI",
+    }]
+
+
+def test_packaged_staging_promotion_is_the_approved_baseline() -> None:
+    bundle = PromotionStore(PACKAGED_PROMOTION_ROOT).read_active()
+    assert bundle is not None
+    assert bundle["context_catalog_version_id"] == (
+        "context-1789581748920-43479f5d-2f15-4bf0-89dd-fbf7e5bafe54"
+    )
+    assert bundle["feature_catalog_version_id"] == "features-649a8d942fd62ed9"
+    assert bundle["counts"] == {
+        "approved": 287,
+        "pii_removed": 64,
+        "duplicates_merged": 4,
+        "retained": 219,
+    }
+    assert len(bundle["rules"]) == 219
+    assert len(bundle["feature_catalog"]) == 181
+    serialized = json.dumps(bundle).lower()
+    assert "organization_id" not in serialized
+    assert "@" not in serialized

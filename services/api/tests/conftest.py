@@ -259,12 +259,14 @@ class FakeLLM:
 class FakeContext:
     def __init__(self) -> None:
         self.unavailable = False
+        self.fetches: list[list[str]] = []
         self.audience_query_version: str | None = None
         self.batch = OrgContextBatch.model_validate_json(
             (FIXTURES / "n8n_context.json").read_text()
         )
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+        self.fetches.append(pro_ids)
         if self.unavailable:
             raise ContextUnavailable("injected outage")
         orgs = [o for o in self.batch.organizations if o.pro_id in pro_ids]
@@ -372,6 +374,7 @@ TEST_SETTINGS = Settings(
     DATABASE_URL="postgresql+asyncpg://localhost:5432/waypoint_test",
     LLM_API_KEY="test",
     N8N_CONTEXT_URL="https://n8n.example/webhook/context",
+    N8N_CONTEXT_URL_STAGING="https://n8n.example/webhook/context-staging",
     N8N_TOKEN="test",
     PERSONA_URL="https://personas.example/personas",
     PERSONA_TOKEN="test",

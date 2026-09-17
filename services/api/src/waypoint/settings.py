@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     DATABASE_URL: SecretStr
     LLM_API_KEY: SecretStr
     N8N_CONTEXT_URL: AnyHttpUrl
+    N8N_CONTEXT_URL_STAGING: AnyHttpUrl | None = None
     N8N_TOKEN: SecretStr
     # The context flow (Snowflake + Iterable behind one webhook) can
     # legitimately run 10-15 minutes per call under load, and it degrades

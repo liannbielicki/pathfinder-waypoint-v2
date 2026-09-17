@@ -10,6 +10,7 @@ const FLEET_SETTINGS = {
     CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
   max_in_flight_llm_calls: 7,
+  staging_context_available: true,
 };
 
 function stubFetch(overrides?: {
@@ -240,6 +241,26 @@ describe("RunStart", () => {
     expect(createCalls[0]).toEqual(
       expect.objectContaining({ journey_window: "onboarding" }),
     );
+  });
+
+  it("defaults to Standard context and submits Staging only when selected", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.getByLabelText(/standard context/i)).toBeChecked();
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0]).toEqual(expect.objectContaining({ context_source: "staging" }));
+  });
+
+  it("disables Staging context when its Railway URL is unavailable", async () => {
+    stubFetch({ settings: { ...FLEET_SETTINGS, staging_context_available: false } });
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.getByLabelText(/staging context/i)).toBeDisabled();
+    expect(screen.getByLabelText(/standard context/i)).toBeChecked();
   });
 
   it("offers the ungated churn-risk window and sends it", async () => {

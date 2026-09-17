@@ -371,6 +371,15 @@
             "title": "Channels",
             "type": "array"
           },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
+            "type": "string"
+          },
           "journey_window": {
             "default": "churn_risk",
             "enum": [
@@ -445,6 +454,15 @@
           },
           "config_version": {
             "title": "Config Version",
+            "type": "string"
+          },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
             "type": "string"
           },
           "cost_limit_usd": {
@@ -592,6 +610,15 @@
           },
           "config_version": {
             "title": "Config Version",
+            "type": "string"
+          },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
             "type": "string"
           },
           "cost_limit_usd": {

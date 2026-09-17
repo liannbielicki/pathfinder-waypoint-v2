@@ -28,7 +28,6 @@ from waypoint.workbench import scrub_pii
 log = logging.getLogger("waypoint.n8n")
 
 CONTRACT_VERSION = "org-context-v2"
-PROMOTION_STORE = PromotionStore()
 
 # The closed allowlist: only these band/state fields (plus org_uuid and
 # contract_version) may cross the boundary. The client drops anything else.
@@ -159,7 +158,9 @@ class OrgContextBatch(BaseModel):
     audience_query_version: str | None = None
 
 
-def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
+def _brief_from_row(
+    row: dict[str, Any], promotion_store: PromotionStore | None = None
+) -> OrgBrief:
     """Project one wire row onto the allowlist: verify the version, keep only
     allowlisted fields (dropping any stray column — the PII guard), tolerate
     absent ones."""
@@ -177,7 +178,9 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
         log.debug("dropped non-allowlisted context fields: %s", sorted(dropped))
     projected: dict[str, Any] = {"org_uuid": row["org_uuid"]}
     projected.update({k: row[k] for k in ALLOWED_FIELDS if k in row})
-    bundle = PROMOTION_STORE.read_active()
+    bundle = promotion_store.read_active() if promotion_store is not None else None
+    if promotion_store is not None and bundle is None:
+        raise ValueError("staging context promotion artifact is missing")
     if bundle is not None:
         by_case = {str(key).casefold(): value for key, value in row.items()}
         promoted_values: dict[str, Any] = {}
@@ -187,20 +190,17 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
                 if not isinstance(rule, dict):
                     continue
                 canonical = str(rule.get("canonical_key") or "")
-                source = str(rule.get("source_key") or canonical)
-                for candidate in (canonical, source):
-                    if candidate.casefold() in by_case:
-                        safe_value, pii_ledger = scrub_pii({
-                            canonical: by_case[candidate.casefold()]
-                        })
-                        if not pii_ledger and canonical in safe_value:
-                            promoted_values[canonical] = safe_value[canonical]
-                        else:
-                            log.warning(
-                                "dropped promoted value that failed the PII gate: %s",
-                                canonical,
-                            )
-                        break
+                if canonical.casefold() in by_case:
+                    safe_value, pii_ledger = scrub_pii({
+                        canonical: by_case[canonical.casefold()]
+                    })
+                    if not pii_ledger and canonical in safe_value:
+                        promoted_values[canonical] = safe_value[canonical]
+                    else:
+                        log.warning(
+                            "dropped promoted value that failed the PII gate: %s",
+                            canonical,
+                        )
         projected["curated_context"] = compile_promoted_context(
             promoted_values, bundle
         )
@@ -237,12 +237,14 @@ class N8NContextClient:
         attempts: int = 3,
         backoff_seconds: float = 15.0,
         client: httpx.AsyncClient | None = None,
+        promotion_store: PromotionStore | None = None,
     ) -> None:
         # ponytail: 5-id batches match the existing n8n validate-node cap.
         self.url = url
         self.batch_size = batch_size
         self.attempts = attempts
         self.backoff_seconds = backoff_seconds
+        self._promotion_store = promotion_store
         # One shared client instance serves every worker loop, so this
         # semaphore is the process-wide cap on concurrent n8n executions —
         # the flow (Snowflake + Iterable behind it) degrades badly when all
@@ -302,7 +304,9 @@ class N8NContextClient:
                 None,
             )
             try:
-                pairs = [(row, _brief_from_row(row)) for row in rows]
+                pairs = [
+                    (row, _brief_from_row(row, self._promotion_store)) for row in rows
+                ]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
             # The flow accepts three id spaces (numeric org id, pro_<hex>

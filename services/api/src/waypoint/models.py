@@ -40,6 +40,7 @@ PENDING_AUDIENCE_QUERY = "pending_n8n"
 # churn signal is missing or untrusted. It shares churn_risk's evidence corpus
 # (see evidence.evidence_windows) — same objective, same history.
 JourneyWindow = Literal["churn_risk", "churn_risk_open", "onboarding", "upsell"]
+ContextSource = Literal["standard", "staging"]
 
 
 class RunCreate(BaseModel):
@@ -52,6 +53,7 @@ class RunCreate(BaseModel):
     # fields, and the server treats any supplied key as confirmed.
     loop_config: dict[str, float] | None = None
     journey_window: JourneyWindow = "churn_risk"
+    context_source: ContextSource = "standard"
 
 
 class RunView(BaseModel):
@@ -69,6 +71,7 @@ class RunView(BaseModel):
     stop_reason: str | None
     created_at: datetime
     journey_window: str
+    context_source: ContextSource = "standard"
 
 
 class Recommendation(BaseModel):

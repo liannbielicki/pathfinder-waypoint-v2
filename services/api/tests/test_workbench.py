@@ -244,12 +244,12 @@ def test_pii_exclusion_drops_identity_variables_but_keeps_business_state_variabl
             {"VARIABLE_NAME": "FEATURE_VOIP_STATE", "VALUE": "attached_unused"},
         ]
     })
-    assert "VALUE" not in clean["rows"][0]
-    assert clean["rows"][1]["VALUE"] == "attached_unused"
+    assert clean["rows"] == [
+        {"VARIABLE_NAME": "FEATURE_VOIP_STATE", "VALUE": "attached_unused"}
+    ]
     assert len(ledger) == 1
     inventory = build_audit_inventory({"snowflake": clean})
-    assert inventory[0]["observed_state"] == "removed_pii"
-    assert inventory[0]["observed_type"] == "unavailable"
+    assert [item["key"] for item in inventory] == ["FEATURE_VOIP_STATE"]
 
 
 def test_pii_exclusion_drops_birth_dates_and_direct_identifier_variables():
@@ -266,13 +266,7 @@ def test_pii_exclusion_drops_birth_dates_and_direct_identifier_variables():
         ]
     })
 
-    assert "VALUE" not in clean["rows"][0]
-    assert "VALUE" not in clean["rows"][1]
-    assert "VALUE" not in clean["rows"][2]
-    assert "VALUE" not in clean["rows"][3]
-    assert "VALUE" not in clean["rows"][4]
-    assert "VALUE" not in clean["rows"][5]
-    assert clean["rows"][6]["VALUE"] == "2026-09-09"
+    assert clean["rows"] == [{"VARIABLE_NAME": "BIZDATE", "VALUE": "2026-09-09"}]
     assert "date_of_birth" not in clean
     assert len(ledger) == 7
 
@@ -500,7 +494,7 @@ def test_prioritize_review_exceptions_keeps_every_deprioritized_variable():
     assert sum(item["approval_status"] == "excluded" for item in output) == 0
 
 
-def test_canonical_key_collision_cannot_remain_approved():
+def test_canonical_key_collision_is_flagged_without_removing_non_pii_information():
     entries, warnings = validate_catalog_entries(
         [
             {**_catalog_entry("FIRST", confidence=0.9), "canonical_key": "same", "approval_status": "human_approved"},
@@ -509,8 +503,8 @@ def test_canonical_key_collision_cannot_remain_approved():
         set(),
     )
 
-    assert [entry["approval_status"] for entry in entries] == ["excluded", "excluded"]
-    assert [entry["disposition"] for entry in entries] == ["exclude", "exclude"]
+    assert [entry["approval_status"] for entry in entries] == ["auto_approved", "auto_approved"]
+    assert [entry["disposition"] for entry in entries] == ["include", "include"]
     assert warnings == ["canonical key same is used by multiple variables"]
 
 
@@ -629,8 +623,8 @@ def test_compile_catalog_contract_uses_every_approved_include_without_org_values
 def test_status_endpoint_identifies_env_file_without_exposing_values(monkeypatch):
     from waypoint.workbench_api import create_workbench_app
 
-    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_URL", "https://secret.test/webhook")
-    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_TOKEN", "secret-token")
+    monkeypatch.setenv("N8N_CONTEXT_URL_WORKBENCH", "https://secret.test/webhook")
+    monkeypatch.setenv("N8N_TOKEN", "secret-token")
     response = TestClient(create_workbench_app()).get("/api/context-workbench/status")
 
     assert response.status_code == 200
@@ -703,11 +697,17 @@ def test_promotion_endpoint_uses_completed_server_evaluation_and_returns_exact_c
     assert promoted.status_code == 200
     payload = promoted.json()
     assert payload["included_variables"] == 1
+    assert payload["counts"] == {
+        "approved": 1,
+        "pii_removed": 0,
+        "duplicates_merged": 0,
+        "retained": 1,
+    }
     assert payload["csv"] == (
         "canonical_key,source_table,cohort_aggregate_prompt\n"
         "jobs_created_t28,ANALYTICS.JOBS_DAILY,Calculate the cohort distribution.\n"
     )
-    assert set(payload) == {"id", "included_variables", "csv"}
+    assert set(payload) == {"id", "included_variables", "counts", "csv"}
     assert preview.json() == payload
     bundle = json.loads((tmp_path / "promotions" / f"{payload['id']}.json").read_text())
     assert bundle["feature_catalog"] == [{
@@ -836,7 +836,8 @@ async def test_both_sources_send_organization_id_directly_to_context_layer(monke
     ))
 
     assert seen["identifier"] == "889901"
-    assert result["outputs"]["audit"]["total_variables"] == 2
+    # ORG_UUID is removed before the Workbench inventory or model prompt exists.
+    assert result["outputs"]["audit"]["total_variables"] == 1
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
     assert result["outputs"]["context_layer_coverage"]["present_features"] == ["jobs"]
     assert result["outputs"]["authoring"]["draft"][0]["related_features"] == ["jobs"]

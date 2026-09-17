@@ -22,7 +22,10 @@ A human must set these values (never their values in git). All names match
 
 - `DATABASE_URL` — Supabase/Postgres connection string (asyncpg form)
 - `LLM_API_KEY` — Anthropic API key
-- `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing n8n context webhook
+- `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing Standard n8n context webhook;
+  Standard remains the default and is not changed by the Workbench
+- `N8N_CONTEXT_URL_STAGING` — optional compressed n8n context webhook used
+  only when an operator selects Staging on Start a run; it shares `N8N_TOKEN`
 - `PERSONA_URL`, `PERSONA_TOKEN` — persona snapshot service
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
 - `BYPASS_TOKEN` — Vercel Deployment Protection bypass secret for the LCM
@@ -57,6 +60,12 @@ Docker was not installed on the build machine, so
   `org_size_bucket`, `trade_bucket`, `open_ar_band`) the rebuild added for
   persona matching. Proof: `cd services/api && N8N_CONTEXT_URL=… N8N_TOKEN=…
   LIVE_TEST_PRO=… uv run pytest tests/test_n8n_live.py -q -m live`.
+- **Staging n8n context flow**: configure `N8N_CONTEXT_URL_STAGING` only after
+  its query emits the exact canonical aliases from the Workbench handoff CSV.
+  It must not return raw PII fields. Waypoint applies the app-side PII gate
+  again, drops unpromoted fields, and fails closed if the packaged promotion
+  is unavailable. The Workbench-only full audit flow uses
+  `N8N_CONTEXT_URL_WORKBENCH` locally and never replaces either runtime URL.
 - **Persona service**: confirm it serves
   `{"snapshot_version": …, "personas": [{persona_id, family, label, features}]}`
   as consumed by `waypoint.worker.load_personas` and shaped like
@@ -91,7 +100,8 @@ Docker was not installed on the build machine, so
    holds ~3 Postgres connections — size it to `MAX_IN_FLIGHT_LLM_CALLS` and
    mind `max_connections`.
 2. Run migrations once: `uv run alembic upgrade head` with the production
-   `DATABASE_URL`.
+   `DATABASE_URL`. Migration `0014` adds the immutable per-run
+   `standard`/`staging` selection and defaults existing runs to `standard`.
 3. Vercel: deploy `apps/web` with `API_BASE_URL` pointing at Railway.
 4. Health checks:
    - `curl https://<railway-domain>/health` → `{"status": "ok"}`

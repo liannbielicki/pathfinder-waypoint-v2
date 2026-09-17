@@ -7,7 +7,7 @@ durable state. Health exposes nothing but liveness.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -30,6 +30,7 @@ from waypoint.models import (
     TERMINAL_RUN_STATUSES,
     CallItem,
     CallUpdate,
+    ContextSource,
     ExposureIn,
     HandoffReceipt,
     RunCreate,
@@ -85,6 +86,7 @@ def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
         stop_reason=run.stop_reason,
         created_at=run.created_at,
         journey_window=run.journey_window,
+        context_source=cast(ContextSource, run.context_source),
     )
 
 
@@ -174,6 +176,11 @@ def create_app(
         request: Request, body: RunCreate, session: SessionDep, _: AuthDep
     ) -> RunView:
         settings: Settings = request.app.state.settings
+        if body.context_source == "staging" and settings.N8N_CONTEXT_URL_STAGING is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Staging context is unavailable because N8N_CONTEXT_URL_STAGING is not configured",
+            )
         await _ensure_fleet(session, settings)
         fleet = await session.get(FleetControlRow, 1)
         assert fleet is not None
@@ -194,6 +201,7 @@ def create_app(
             audience_run=body.audience_run,
             channels=body.channels,
             journey_window=body.journey_window,
+            context_source=body.context_source,
             loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )
@@ -215,6 +223,7 @@ def create_app(
         return {
             "loop_defaults": effective.to_dict(),
             "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
+            "staging_context_available": settings.N8N_CONTEXT_URL_STAGING is not None,
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)

@@ -17,6 +17,26 @@ def test_run_requires_clean_audience_lineage() -> None:
     )
     assert run.pro_ids == ["pro_1", "pro_2"]
     assert run.audience_query == "audience_v7"
+    assert run.context_source == "standard"
+
+
+def test_run_accepts_only_known_context_sources() -> None:
+    staging = RunCreate(
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["email"],
+        context_source="staging",
+    )
+    assert staging.context_source == "staging"
+    with pytest.raises(ValidationError):
+        RunCreate(
+            pro_ids=["pro_1"],
+            audience_query="audience_v7",
+            audience_run="2026-08-06T18:00:00Z",
+            channels=["email"],
+            context_source="experimental",
+        )
 
 
 def test_run_rejects_empty_audience() -> None:
@@ -208,3 +228,17 @@ async def test_run_defaults_to_churn_risk_window(db_session) -> None:
     db_session.add(run)
     await db_session.commit()
     assert run.journey_window == "churn_risk"
+    assert run.context_source == "standard"
+
+
+async def test_run_context_source_round_trips(db_session) -> None:
+    run = RunRow(
+        pro_ids=["p"],
+        audience_query="q",
+        audience_run="r",
+        channels=["sms"],
+        context_source="staging",
+    )
+    db_session.add(run)
+    await db_session.commit()
+    assert (await db_session.get(RunRow, run.id)).context_source == "staging"

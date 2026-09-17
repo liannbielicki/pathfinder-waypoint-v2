@@ -53,6 +53,27 @@ approved by the deployed promotion, preserves explicit nulls, drops unexpected o
 PII-bearing fields, and attaches the bundled compact feature catalog. A missing
 Staging promotion fails closed instead of falling back to broad Standard context.
 
+## PII-only curation policy
+
+PII is the only reason the promotion pipeline may automatically discard source
+information. The shared app-side PII gate runs immediately after either source
+responds, before Workbench inventory construction, persistence, display, or any AI
+call. Rows whose variable key is classified as PII are removed as complete rows,
+not retained as empty metadata records. The same gate runs again on Staging n8n
+responses before runtime context compilation, so an upstream query regression
+cannot expose PII to Waypoint.
+
+Canonical-key collisions and repeated source names are not exclusion reasons.
+Exact duplicate rules may be represented once because this loses no information;
+all distinct non-PII rules remain in the reviewed catalog and promotion. The
+compressed n8n workflow must return the promoted canonical aliases. Runtime does
+not guess from ambiguous generic source names such as `count`; missing canonical
+aliases remain missing rather than being copied into multiple facts.
+
+The feature catalog passes through a value-level PII gate before it is included in
+AI context. Product terms such as email or address features remain valid product
+metadata; only detected personal values are removed.
+
 The n8n response continues to self-report `audience_query_version`; Waypoint stamps
 that version once exactly as it does today. Run status also exposes
 `context_source`, so an operator can see both which endpoint class was selected
@@ -64,11 +85,16 @@ The initial deployable Staging artifact is generated from completed evaluation j
 `5b7eba5c-97df-4088-b043-c2676089200d`:
 
 - context version `context-1789581748920-43479f5d-2f15-4bf0-89dd-fbf7e5bafe54`;
-- 480 reviewed rules, of which exactly 287 are approved Include rules;
+- 480 reviewed rules, of which 287 are approved Include decisions before the PII
+  gate;
 - feature version `features-649a8d942fd62ed9` with 181 features.
 
-The artifact contains rules and feature definitions only, never organization
-values or credentials. It lives under `services/api/data/context-promotions/` so
+The artifact contains every distinct approved non-PII rule and safe feature
+definitions, never organization values or credentials. Its final rule count is
+reported as `approved -> PII removed -> duplicate representations merged -> retained`
+rather than asserted to equal the pre-gate 287 decisions. The initial result is
+`287 -> 64 -> 4 -> 219`; duplicate metadata is unioned, so no distinct source
+information is discarded. It lives under `services/api/data/context-promotions/` so
 the Docker image delivers the same immutable file to every API and worker. An
 `active.json` pointer selects the current Staging artifact. Future changes follow
 Workbench review and evaluation, artifact export, commit, and deployment.
@@ -108,8 +134,11 @@ Tests must prove:
 - retry preserves the original selection;
 - concurrent Standard and Staging jobs route to different clients;
 - Standard does not load a promotion;
-- Staging uses exactly the 287-rule artifact and all 181 feature cards;
+- Staging preserves every distinct approved non-PII rule and all safe feature
+  cards, with transparent PII-removal counts;
+- PII variable rows never enter the Workbench inventory or authoring prompt;
+- canonical collisions remain catalog information and ambiguous source-key
+  fallback never fabricates duplicate facts;
 - missing keys and nulls remain missing/null rather than becoming facts;
 - the existing backend, frontend, lint, type, migration, and production-build
   checks remain green.
-

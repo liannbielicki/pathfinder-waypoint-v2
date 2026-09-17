@@ -32,10 +32,11 @@ def test_missing_required_runtime_values_fail_startup() -> None:
 
 def test_all_runtime_names_are_short_and_descriptive() -> None:
     names = set(Settings.model_fields)
-    # AMPLITUDE_RETURN_EVENT (22 chars) is the longest name today.
-    assert all(len(name) < 23 for name in names)
+    # The explicit Standard/Staging distinction is worth its 24-character name.
+    assert all(len(name) <= 24 for name in names)
     assert names == {
-        "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
+        "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_CONTEXT_URL_STAGING",
+        "N8N_TOKEN",
         "N8N_TIMEOUT_SECONDS", "N8N_MAX_CONCURRENT",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",
         "BYPASS_TOKEN",
@@ -47,6 +48,10 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
         "ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY",
         "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS",
     }
+
+
+def test_staging_context_url_is_optional() -> None:
+    assert Settings.model_fields["N8N_CONTEXT_URL_STAGING"].default is None
 
 
 def test_max_llm_in_flight_is_optional_and_defaults_to_four() -> None:

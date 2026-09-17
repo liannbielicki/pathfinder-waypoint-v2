@@ -39,6 +39,12 @@ class Base(DeclarativeBase):
 
 class RunRow(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        CheckConstraint(
+            "context_source IN ('standard', 'staging')",
+            name="ck_runs_context_source",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     status: Mapped[str] = mapped_column(default="queued")
@@ -47,6 +53,7 @@ class RunRow(Base):
     audience_run: Mapped[str]
     channels: Mapped[list[str]]
     journey_window: Mapped[str] = mapped_column(default="churn_risk")
+    context_source: Mapped[str] = mapped_column(default="standard", server_default="standard")
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))

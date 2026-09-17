@@ -226,6 +226,7 @@ class PipelineDeps:
     get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
     create_plan: Any  # (mechanism: str, catalog) -> MeasurementPlan (deterministic)
+    staging_context: ContextLike | None = None
     metric_catalog: dict[str, Any] = field(default_factory=dict)
     # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
     # keeps the idea context to description+state; on adds works_on hints.
@@ -1652,10 +1653,16 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
 
     # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
     try:
-        batch = await deps.context.fetch([state.pro_id])
+        context = deps.context
+        if run.context_source == "staging":
+            if deps.staging_context is None:
+                raise ContextUnavailable("staging context source is not configured")
+            context = deps.staging_context
+        batch = await context.fetch([state.pro_id])
     except ContextUnavailable as error:
+        failure_reason = f"context_unavailable: {run.context_source}: {error}"
         if await store.requeue_job(job_id):
-            await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
+            await store.set_run_status(run_id, "waiting", failure_reason)
         else:
             # Attempts exhausted for THIS Pro only: its job fails (requeue_job
             # already marked it) and finalize_run aggregates to failed/degraded
@@ -1663,7 +1670,7 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             # never take the whole run down.
             await queue.checkpoint_job(
                 store.session, job_id, "failure",
-                {"reason": f"context_unavailable: {error}"},
+                {"reason": failure_reason},
             )
             await finalize_run(store.session, run_id)
         return

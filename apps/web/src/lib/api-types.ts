@@ -411,6 +411,12 @@ export interface components {
             /** Channels */
             channels: ("sms" | "email" | "call")[];
             /**
+             * Context Source
+             * @default standard
+             * @enum {string}
+             */
+            context_source: "standard" | "staging";
+            /**
              * Journey Window
              * @default churn_risk
              * @enum {string}
@@ -439,6 +445,12 @@ export interface components {
             channels: string[];
             /** Config Version */
             config_version: string;
+            /**
+             * Context Source
+             * @default standard
+             * @enum {string}
+             */
+            context_source: "standard" | "staging";
             /** Cost Limit Usd */
             cost_limit_usd: string;
             /** Cost Reserved Usd */
@@ -497,6 +509,12 @@ export interface components {
             channels: string[];
             /** Config Version */
             config_version: string;
+            /**
+             * Context Source
+             * @default standard
+             * @enum {string}
+             */
+            context_source: "standard" | "staging";
             /** Cost Limit Usd */
             cost_limit_usd: string;
             /** Cost Reserved Usd */

@@ -11,7 +11,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from waypoint.workbench import scrub_pii
+
 DEFAULT_PROMOTION_ROOT = Path(__file__).parents[2] / ".workbench" / "promotions"
+PACKAGED_PROMOTION_ROOT = Path(__file__).parents[2] / "data" / "context-promotions"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _SAFE_FEATURE_FIELDS = {
     "feature",
@@ -39,7 +42,7 @@ def build_promotion_bundle(
     feature_catalog_version_id: str,
     created_at: str,
 ) -> dict[str, Any]:
-    rules = []
+    rules_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
     for entry in entries:
         if not _approved_include(entry):
             continue
@@ -48,7 +51,7 @@ def build_promotion_bundle(
         if not source_key or not canonical_key:
             continue
         related = entry.get("related_features")
-        rules.append({
+        rule = {
             "source_key": source_key,
             "canonical_key": canonical_key,
             "source_table": str(entry.get("source_table") or "UNKNOWN").strip() or "UNKNOWN",
@@ -56,19 +59,43 @@ def build_promotion_bundle(
             "related_features": sorted({str(item) for item in related})
             if isinstance(related, list)
             else [],
+        }
+        identity = (source_key, canonical_key, str(rule["source_table"]))
+        existing = rules_by_identity.get(identity)
+        if existing is None:
+            rules_by_identity[identity] = rule
+            continue
+        existing["related_features"] = sorted({
+            *existing["related_features"], *rule["related_features"]
         })
+        prompts = [
+            prompt
+            for prompt in (
+                str(existing["cohort_aggregate_prompt"]),
+                str(rule["cohort_aggregate_prompt"]),
+            )
+            if prompt
+        ]
+        existing["cohort_aggregate_prompt"] = " ".join(dict.fromkeys(prompts))
+    rules = list(rules_by_identity.values())
     rules.sort(key=lambda rule: str(rule["canonical_key"]))
+    feature_catalog = []
+    for entry in feature_catalog_entries:
+        if not entry.get("feature"):
+            continue
+        safe, _ledger = scrub_pii(
+            {key: value for key, value in entry.items() if key in _SAFE_FEATURE_FIELDS},
+            drop_location_tokens=False,
+        )
+        if safe.get("feature"):
+            feature_catalog.append(safe)
     return {
         "id": promotion_id,
         "created_at": created_at,
         "context_catalog_version_id": context_catalog_version_id,
         "feature_catalog_version_id": feature_catalog_version_id,
         "rules": rules,
-        "feature_catalog": [
-            {key: value for key, value in entry.items() if key in _SAFE_FEATURE_FIELDS}
-            for entry in feature_catalog_entries
-            if entry.get("feature")
-        ],
+        "feature_catalog": feature_catalog,
     }
 
 
@@ -118,11 +145,9 @@ def compile_promoted_context(
             if not isinstance(rule, Mapping):
                 continue
             canonical = str(rule.get("canonical_key") or "")
-            source = str(rule.get("source_key") or canonical)
-            value_key = canonical if canonical in values else source
-            if not canonical or value_key not in values:
+            if not canonical or canonical not in values:
                 continue
-            value = values[value_key]
+            value = values[canonical]
             if value is None:
                 nulls.append(canonical)
             else:

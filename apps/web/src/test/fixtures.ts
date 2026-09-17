@@ -24,6 +24,7 @@ export const RUN_FIXTURE: RunDetail = {
   stop_reason: null,
   created_at: "2026-08-06T18:00:00Z",
   journey_window: "churn_risk",
+  context_source: "standard",
   stages: {},
   rounds: [],
   candidates: [],

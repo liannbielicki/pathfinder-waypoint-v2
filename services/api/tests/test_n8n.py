@@ -18,10 +18,14 @@ FIXTURE = Path(__file__).parent / "fixtures" / "n8n_context.json"
 N8N_URL = "https://n8n.example/webhook/context"
 
 
-def make_client(batch_size: int = 5) -> N8NContextClient:
+def make_client(batch_size: int = 5, promotion_store=None) -> N8NContextClient:
     # backoff 0 so retry tests don't sleep for real
     return N8NContextClient(
-        url=N8N_URL, token="test-token", batch_size=batch_size, backoff_seconds=0.0
+        url=N8N_URL,
+        token="test-token",
+        batch_size=batch_size,
+        backoff_seconds=0.0,
+        promotion_store=promotion_store,
     )
 
 
@@ -64,7 +68,7 @@ async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> N
 
 
 async def test_active_promotion_retains_only_promoted_canonical_values(
-    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    httpx_mock: HTTPXMock,
 ) -> None:
     bundle = {
         "rules": [{
@@ -83,7 +87,6 @@ async def test_active_promotion_retains_only_promoted_canonical_values(
         def read_active(self):
             return bundle
 
-    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
     row = {
         **_rows()[0],
         "JOBS_CREATED_T28": 12,
@@ -92,7 +95,7 @@ async def test_active_promotion_retains_only_promoted_canonical_values(
     }
     httpx_mock.add_response(json=[row])
 
-    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
 
     assert brief.curated_context == {
         "v": {"jobs_created_t28": 12},
@@ -105,7 +108,7 @@ async def test_active_promotion_retains_only_promoted_canonical_values(
 
 
 async def test_active_promotion_with_no_matching_values_fails_closed(
-    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    httpx_mock: HTTPXMock,
 ) -> None:
     bundle = {
         "rules": [{
@@ -120,16 +123,15 @@ async def test_active_promotion_with_no_matching_values_fails_closed(
         def read_active(self):
             return bundle
 
-    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
     httpx_mock.add_response(json=[_rows()[0]])
 
-    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
 
     assert brief.curated_context == {"v": {}}
 
 
 async def test_active_promotion_drops_a_value_when_it_contains_pii(
-    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    httpx_mock: HTTPXMock,
 ) -> None:
     bundle = {
         "rules": [{
@@ -144,16 +146,60 @@ async def test_active_promotion_drops_a_value_when_it_contains_pii(
         def read_active(self):
             return bundle
 
-    monkeypatch.setattr("waypoint.n8n.PROMOTION_STORE", ActivePromotion())
     httpx_mock.add_response(json=[{
         **_rows()[0],
         "CUSTOMER_SEGMENT": "unexpected@example.invalid",
     }])
 
-    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
 
     assert brief.curated_context == {"v": {}}
     assert "unexpected@example.invalid" not in str(brief.curated_context)
+
+
+async def test_standard_client_never_applies_a_promotion(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json=[{**_rows()[0], "JOBS_CREATED_T28": 12}])
+    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+    assert brief.curated_context is None
+
+
+async def test_staging_requires_canonical_aliases_instead_of_ambiguous_source_fallback(
+    httpx_mock: HTTPXMock,
+) -> None:
+    bundle = {
+        "rules": [
+            {"source_key": "count", "canonical_key": "workflow_entries_count"},
+            {"source_key": "count", "canonical_key": "workflow_progress_count"},
+        ],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    httpx_mock.add_response(json=[{
+        **_rows()[0],
+        "count": 99,
+        "workflow_entries_count": 12,
+    }])
+
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {"workflow_entries_count": 12}}
+
+
+async def test_staging_fails_closed_when_promotion_artifact_is_missing(
+    httpx_mock: HTTPXMock,
+) -> None:
+    class MissingPromotion:
+        def read_active(self):
+            return None
+
+    httpx_mock.add_response(json=_rows())
+
+    with pytest.raises(ContextUnavailable, match="promotion"):
+        await make_client(promotion_store=MissingPromotion()).fetch(["pro_1"])
 
 
 async def test_audience_query_version_is_captured_not_stored_on_orgs(

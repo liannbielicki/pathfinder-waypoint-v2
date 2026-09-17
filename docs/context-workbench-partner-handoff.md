@@ -4,7 +4,7 @@
 
 The Workbench builds a safe, compact context contract for Waypoint. It starts with every variable returned by the experimental Snowflake-through-n8n workflow, optionally adds Context Layer evidence, audits the full safe inventory, drafts AI-useful metadata, and deterministically compiles approved rules. Every variable remains visible under Include, Deprioritize, or Exclude; only variables in Include enter the promoted runtime contract.
 
-The Workbench never edits n8n or Snowflake queries. Change queries outside the Workbench, then run a fresh audit.
+The Workbench never edits n8n or Snowflake queries. Change queries outside the Workbench, then run a fresh audit. Its only automatic information-removal rule is PII: the gate removes complete PII variable rows before inventory, persistence, display, or AI authoring. Exact duplicates may collapse, but canonical collisions and other distinct non-PII rules remain.
 
 ## Durable checkout
 
@@ -48,25 +48,27 @@ Open `http://localhost:3000`. **Waypoint** is the default top tab and **Context 
 12. Press **Test curated context**. The Workbench fetches fresh data for the selected organization, applies the PII gate, and runs the exact Waypoint evolve prompt twice: once with the full scrubbed source context and once with the curated packet. It shows both idea sets, token and latency metrics, and a low-cost `MODEL_FAST` verdict with no more than three small suggested context changes. This is recommendation-only; it never sends outreach or writes to production systems.
 13. After the context test, download the Snowflake handoff CSV containing exactly `canonical_key`, `source_table`, and `cohort_aggregate_prompt` for the approved Include variables. Downloading does not activate the context.
 14. Give that CSV to Claude with the Snowflake MCP to create or revise the production query. Update n8n manually; the Workbench never edits it. Missing source lineage is written as `UNKNOWN`, never guessed from a query name.
-15. Press **Activate in Waypoint** after the n8n query is ready. Activation makes the approved Include rules and the complete selected feature-catalog version available to everyday Waypoint.
+15. Press **Activate in Waypoint** after the compressed n8n query is ready. Activation packages every distinct approved non-PII Include rule and the safe selected feature-catalog version. The promotion summary shows `approved → PII removed → duplicate representations merged → retained`; for the initial saved evaluation this is `287 → 64 → 4 → 219`. Duplicate metadata is unioned, so merging removes no source information.
+16. On Waypoint's **Start a run** page, leave **Standard context** selected for the existing production workflow, or explicitly choose **Staging context** to test the compressed workflow and packaged promotion. Retries preserve that choice.
 
 Selecting an older feature version is rollback. Uploading a changed feature catalog shows exact added, removed, and changed counts. Unknown feature mappings are removed and reported as warnings.
 
 Authoring uses low model effort, a 20,000-token generation cap per batch, and a 150,000-output-token cap for the full run. Each batch receives a compact feature index containing exact keys, product areas, and short descriptions instead of every CSV column. Variables returned without every required metadata field are requeued up to three times. A batch that reaches `max_tokens` is split and retried; it is never treated as complete.
 
-Durable job state lives in ignored local storage at `services/api/.workbench/jobs.sqlite3`. It contains sanitized requests, variable metadata, progress, usage, warnings, and pruned results. It does not contain credentials, raw pre-PII payloads, or full authoring prompts/responses.
+Durable job state lives in ignored local storage at `services/api/.workbench/jobs.sqlite3`. It contains PII-gated requests, safe variable metadata, aggregate removal counts, progress, usage, warnings, and pruned results. It does not contain credentials, PII variable rows, raw pre-PII payloads, or full authoring prompts/responses.
 
-Promoted versions live as immutable ignored JSON bundles under `services/api/.workbench/promotions/`; `active.json` points to the version used by Waypoint. Re-promoting another saved context version changes the active pointer without changing the older bundle. A bundle contains no organization values or credentials.
+Local Workbench promotions live under `services/api/.workbench/promotions/`. The reviewed Staging artifact deployed with Waypoint lives under `services/api/data/context-promotions/`; `active.json` selects its immutable version. A bundle contains no organization values or credentials.
 
 ## Data boundaries
 
 - The browser never collects credentials.
 - Raw provider values remain server-side until the app-side PII gate completes.
-- Identity-variable values are removed. Business fields such as `FEATURE_VOIP_STATE` are not confused with geographic state.
+- Identity-variable rows are removed before the Workbench inventory exists. Business fields such as `FEATURE_VOIP_STATE`, and feature-catalog labels such as `Value Statement`, are not confused with geographic state.
 - The authoring model receives variable keys, source query/path, observed type/state, and the verified feature catalog. It does not receive organization values.
 - Runtime compilation attaches the complete selected feature catalog as compact product cards containing only the exact feature key, product area, and short value statement. Waypoint receives company-wide feature knowledge without the unused CSV columns.
-- Everyday Waypoint keeps only promoted canonical keys returned by the production n8n response. Missing promoted keys remain missing, nulls remain explicit nulls, and unapproved response columns are dropped.
-- With no active promotion, Waypoint keeps the existing `org-context-v2` prompt context. Once a promotion is active, Waypoint uses only the promoted contract; promoted keys missing from the n8n result stay missing and the packet may be empty rather than silently reverting to the old broad context.
+- Standard Waypoint runs keep the existing `org-context-v2` prompt context and never load a Workbench promotion.
+- Staging runs keep only exact promoted canonical aliases returned by `N8N_CONTEXT_URL_STAGING`. Missing promoted keys remain missing, nulls remain explicit nulls, ambiguous generic names such as `count` are never guessed, and unapproved response columns are dropped.
+- A missing Staging artifact or URL fails closed; it never silently falls back to Standard.
 - A missing or null value describes only this observed organization response.
 - Global missingness, freshness, reliability, distributions, and conflict frequency remain unavailable unless evidence is supplied.
 - Aggregate prompts must request cohort-level statistics, not calculations from one Pro's value.

@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from waypoint.workbench import is_pii_variable_key, scrub_pii
+
 _SAFE_REQUEST_FIELDS = {
     "identifier", "identifier_type", "source_mode", "model", "context_policy",
     "enrichment", "channels", "journey_window", "candidate_count", "workbench_mode",
@@ -42,18 +44,38 @@ def sanitize_job_request(value: dict[str, Any]) -> dict[str, Any]:
     sanitized = {key: item for key, item in value.items() if key in _SAFE_REQUEST_FIELDS}
     feature_entries = sanitized.get("feature_catalog_entries")
     if isinstance(feature_entries, list):
-        sanitized["feature_catalog_entries"] = [
-            {key: item for key, item in entry.items() if key in _FEATURE_FIELDS}
-            for entry in feature_entries
-            if isinstance(entry, dict)
-        ]
+        safe_features = []
+        for entry in feature_entries:
+            if not isinstance(entry, dict):
+                continue
+            safe, _ledger = scrub_pii(
+                {key: item for key, item in entry.items() if key in _FEATURE_FIELDS},
+                drop_location_tokens=False,
+            )
+            if safe.get("feature"):
+                safe_features.append(safe)
+        sanitized["feature_catalog_entries"] = safe_features
     catalog_entries = sanitized.get("catalog_override")
     if isinstance(catalog_entries, list):
+        entries = [entry for entry in catalog_entries if isinstance(entry, dict)]
+        approved = [
+            entry for entry in entries if str(entry.get("disposition")) == "include"
+        ]
+        pii_entries = [
+            entry
+            for entry in entries
+            if is_pii_variable_key(str(entry.get("key") or ""))
+            or is_pii_variable_key(str(entry.get("canonical_key") or ""))
+        ]
         sanitized["catalog_override"] = [
             {key: item for key, item in entry.items() if key in _CATALOG_FIELDS}
-            for entry in catalog_entries
-            if isinstance(entry, dict)
+            for entry in entries
+            if entry not in pii_entries
         ]
+        sanitized["catalog_approved_count"] = len(approved)
+        sanitized["catalog_pii_removed_count"] = sum(
+            1 for entry in approved if entry in pii_entries
+        )
     return sanitized
 
 
