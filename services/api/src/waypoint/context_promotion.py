@@ -85,9 +85,7 @@ def promotion_csv(bundle: Mapping[str, Any]) -> str:
     return output.getvalue()
 
 
-def _feature_cards(
-    feature_keys: set[str], feature_catalog: object
-) -> dict[str, dict[str, str]]:
+def _feature_cards(feature_catalog: object) -> dict[str, dict[str, str]]:
     cards: dict[str, dict[str, str]] = {}
     if not isinstance(feature_catalog, list):
         return cards
@@ -95,7 +93,7 @@ def _feature_cards(
         if not isinstance(entry, Mapping):
             continue
         key = str(entry.get("feature") or "")
-        if key not in feature_keys:
+        if not key:
             continue
         card: dict[str, str] = {}
         area = entry.get("Product Area") or entry.get("product_area")
@@ -104,8 +102,7 @@ def _feature_cards(
             card["a"] = str(area).strip()
         if value:
             card["v"] = str(value).strip()[:240]
-        if card:
-            cards[key] = card
+        cards[key] = card
     return dict(sorted(cards.items()))
 
 
@@ -115,7 +112,6 @@ def compile_promoted_context(
     compiled: dict[str, Any] = {}
     nulls: list[str] = []
     features: dict[str, list[str]] = {}
-    referenced: set[str] = set()
     rules = bundle.get("rules")
     if isinstance(rules, list):
         for rule in rules:
@@ -135,13 +131,12 @@ def compile_promoted_context(
             if isinstance(related, list) and related:
                 exact = [str(item) for item in related]
                 features[canonical] = exact
-                referenced.update(exact)
     context: dict[str, Any] = {"v": dict(sorted(compiled.items()))}
     if nulls:
         context["n"] = sorted(nulls)
     if features:
         context["f"] = dict(sorted(features.items()))
-    cards = _feature_cards(referenced, bundle.get("feature_catalog"))
+    cards = _feature_cards(bundle.get("feature_catalog"))
     if cards:
         context["pc"] = cards
     return context

@@ -272,7 +272,7 @@ async def execute_run(
     if not inventory_resume and body.source_mode in ("context_layer", "both"):
         started = time.perf_counter()
         context_identifier = body.identifier
-        if body.source_mode == "both" and body.identifier_type != "org_uuid":
+        if body.source_mode == "both" and body.identifier_type == "pro_uuid":
             context_identifier = _org_uuid_from_n8n(sources.get("snowflake")) or ""
         try:
             if not context_identifier:
@@ -978,9 +978,8 @@ def create_workbench_app(
             "csv_text": body.csv_text,
         }
 
-    @app.post("/api/context-workbench/promotions")
-    async def promote(body: PromotionRequest) -> dict[str, Any]:
-        job = store.get(body.evaluation_job_id)
+    def promotion_preview(evaluation_job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        job = store.get(evaluation_job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Evaluation job not found")
         evaluation = (job.result or {}).get("outputs", {}).get("evaluation")
@@ -1036,12 +1035,23 @@ def create_workbench_app(
         )
         if not bundle["rules"]:
             raise HTTPException(status_code=422, detail="Promotion requires an approved Include variable")
-        promotions.promote(bundle)
-        return {
+        payload = {
             "id": promotion_id,
             "included_variables": len(bundle["rules"]),
             "csv": promotion_csv(bundle),
         }
+        return bundle, payload
+
+    @app.post("/api/context-workbench/promotions/preview")
+    async def preview_promotion(body: PromotionRequest) -> dict[str, Any]:
+        _bundle, payload = promotion_preview(body.evaluation_job_id)
+        return payload
+
+    @app.post("/api/context-workbench/promotions")
+    async def promote(body: PromotionRequest) -> dict[str, Any]:
+        bundle, payload = promotion_preview(body.evaluation_job_id)
+        promotions.promote(bundle)
+        return payload
 
     @app.post("/api/context-workbench/run")
     async def run(body: WorkbenchRunRequest) -> dict[str, Any]:

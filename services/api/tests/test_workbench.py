@@ -514,7 +514,7 @@ def test_canonical_key_collision_cannot_remain_approved():
     assert warnings == ["canonical key same is used by multiple variables"]
 
 
-def test_compile_context_attaches_only_relevant_feature_cards():
+def test_compile_context_attaches_the_full_selected_feature_catalog():
     entries, _ = validate_catalog_entries(
         [{
             **_catalog_entry("SMS_SENT", confidence=0.91),
@@ -539,13 +539,16 @@ def test_compile_context_attaches_only_relevant_feature_cards():
                 "Product Area": "Jobs",
                 "Value Statement": "Job management",
             },
+            {"feature": "feature_only"},
         ],
         feature_catalog_version_id="features-v1",
         context_catalog_version_id="context-v1",
     )
 
     assert compiled["context"]["pc"] == {
-        "sms_number": {"a": "SMS", "v": "Customer texting number"}
+        "feature_only": {},
+        "jobs": {"a": "Jobs", "v": "Job management"},
+        "sms_number": {"a": "SMS", "v": "Customer texting number"},
     }
 
 
@@ -686,6 +689,13 @@ def test_promotion_endpoint_uses_completed_server_evaluation_and_returns_exact_c
     )
     assert blocked.status_code == 404
 
+    preview = client.post(
+        "/api/context-workbench/promotions/preview",
+        json={"evaluation_job_id": evaluation_job_id},
+    )
+    assert preview.status_code == 200
+    assert not (tmp_path / "promotions" / "active.json").exists()
+
     promoted = client.post(
         "/api/context-workbench/promotions",
         json={"evaluation_job_id": evaluation_job_id},
@@ -698,6 +708,7 @@ def test_promotion_endpoint_uses_completed_server_evaluation_and_returns_exact_c
         "jobs_created_t28,ANALYTICS.JOBS_DAILY,Calculate the cohort distribution.\n"
     )
     assert set(payload) == {"id", "included_variables", "csv"}
+    assert preview.json() == payload
     bundle = json.loads((tmp_path / "promotions" / f"{payload['id']}.json").read_text())
     assert bundle["feature_catalog"] == [{
         "feature": "jobs",
@@ -788,7 +799,7 @@ def test_promotion_endpoint_preserves_source_table_for_each_duplicate_key_occurr
 
 
 @pytest.mark.asyncio
-async def test_both_sources_resolve_org_uuid_from_n8n_before_context_layer(monkeypatch):
+async def test_both_sources_send_organization_id_directly_to_context_layer(monkeypatch):
     from waypoint.workbench_api import WorkbenchRunRequest, execute_run
 
     seen = {}
@@ -824,7 +835,7 @@ async def test_both_sources_resolve_org_uuid_from_n8n_before_context_layer(monke
         feature_catalog_version_id="features-v1",
     ))
 
-    assert seen["identifier"] == "org-uuid-1"
+    assert seen["identifier"] == "889901"
     assert result["outputs"]["audit"]["total_variables"] == 2
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
     assert result["outputs"]["context_layer_coverage"]["present_features"] == ["jobs"]
@@ -865,6 +876,7 @@ async def test_compile_mode_never_calls_model(monkeypatch):
 
     assert result["outputs"]["compiled"]["context"] == {
         "r": [{"k": "JOBS_CREATED", "c": "jobs", "u": 5, "f": ["jobs"]}],
+        "pc": {"jobs": {}},
     }
     assert result["outputs"]["compiled"]["metrics"]["included_variables"] == 1
 

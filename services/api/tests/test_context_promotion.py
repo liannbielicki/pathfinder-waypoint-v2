@@ -47,6 +47,7 @@ def _bundle() -> dict[str, object]:
             {"feature": "jobs", "Product Area": "Jobs", "Value Statement": "Manage job workflows."},
             {"feature": "voip", "Product Area": "Phones", "Value Statement": "Manage customer calls."},
             {"feature": "unused", "Product Area": "Other", "Value Statement": "Must not reach runtime."},
+            {"feature": "feature_only"},
         ],
         promotion_id="promotion-one",
         context_catalog_version_id="context-one",
@@ -82,7 +83,7 @@ def test_promotion_keeps_only_approved_include_rules_and_exact_csv_columns():
     ]
 
 
-def test_runtime_compilation_keeps_promoted_values_and_only_relevant_feature_cards():
+def test_runtime_compilation_keeps_promoted_values_and_full_feature_catalog():
     context = compile_promoted_context(
         {
             "org_uuid": "secret-org-id",
@@ -101,11 +102,12 @@ def test_runtime_compilation_keeps_promoted_values_and_only_relevant_feature_car
             "jobs_created_t28": ["jobs"],
         },
         "pc": {
+            "feature_only": {},
             "jobs": {"a": "Jobs", "v": "Manage job workflows."},
+            "unused": {"a": "Other", "v": "Must not reach runtime."},
             "voip": {"a": "Phones", "v": "Manage customer calls."},
         },
     }
-    assert "unused" not in str(context)
     assert "secret-org-id" not in str(context)
 
 

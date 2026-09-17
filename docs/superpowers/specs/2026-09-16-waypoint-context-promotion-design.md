@@ -27,19 +27,19 @@ Only approved Include rules appear. Missing table lineage is emitted as `UNKNOWN
 
 ## Runtime behavior
 
-The production n8n response remains the source of current per-organization values. Waypoint reads the active promotion bundle, keeps only exact promoted canonical keys, preserves nulls, and attaches compact product meaning only for exact feature keys referenced by those retained variables. If there is no active bundle, the existing `org-context-v2` behavior remains unchanged. If a bundle is active but none of its keys are returned, Waypoint uses an explicit empty promoted packet instead of silently falling back to the broad legacy context.
+The production n8n response remains the source of current per-organization values. Waypoint reads the active promotion bundle, keeps only exact promoted canonical keys, preserves nulls, and attaches the complete selected feature catalog in compact form using only feature key, product area, and short value statement. If there is no active bundle, the existing `org-context-v2` behavior remains unchanged. If a bundle is active but none of its keys are returned, Waypoint uses an explicit empty promoted value packet plus the selected feature catalog instead of silently falling back to the broad legacy context.
 
 This creates a safe rollout boundary: promotion activates the deterministic contract, while the user-owned n8n query can be updated manually from the CSV. Missing promoted values remain missing and never become zero or facts.
 
 ## UI flow
 
-The shared header contains `Waypoint` and `Context Workbench`; `Waypoint` is first and links to `/`. After a compiled context has been evaluated, the Workbench shows one final action: `Promote to Waypoint`. Successful promotion exposes the three-column CSV download and identifies the active promoted version.
+The shared header contains `Waypoint` and `Context Workbench`; `Waypoint` is first and links to `/`. After a compiled context has been evaluated, the Workbench exposes the three-column CSV before activation. The user updates n8n manually, then presses `Activate in Waypoint`; successful activation identifies the active promoted version.
 
 ## Non-goals
 
 - Editing or invoking n8n workflow configuration.
 - Generating Snowflake SQL.
-- Sending the entire feature catalog on every Waypoint model call.
+- Sending unused feature-catalog CSV columns on Waypoint model calls.
 - Adding a new database, state-management library, or separate product.
 - Guessing source-table lineage.
 

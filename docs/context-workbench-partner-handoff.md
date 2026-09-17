@@ -46,8 +46,9 @@ Open `http://localhost:3000`. **Waypoint** is the default top tab and **Context 
 10. Save a new immutable context version. It records the feature-catalog version, confidence threshold, approval states, and excluded keys.
 11. Press **Compile reviewed context**. Compilation runs as another durable job and deterministically turns only `auto_approved` or `human_approved` `include` rules into an organization-independent context contract. It does not recollect org data or make an AI call.
 12. Press **Test curated context**. The Workbench fetches fresh data for the selected organization, applies the PII gate, and runs the exact Waypoint evolve prompt twice: once with the full scrubbed source context and once with the curated packet. It shows both idea sets, token and latency metrics, and a low-cost `MODEL_FAST` verdict with no more than three small suggested context changes. This is recommendation-only; it never sends outreach or writes to production systems.
-13. Press **Promote to Waypoint** only after the context test. Promotion activates the approved Include rules and the selected feature-catalog version for everyday Waypoint. It also exposes a CSV download containing exactly `canonical_key`, `source_table`, and `cohort_aggregate_prompt` for the approved Include variables.
+13. After the context test, download the Snowflake handoff CSV containing exactly `canonical_key`, `source_table`, and `cohort_aggregate_prompt` for the approved Include variables. Downloading does not activate the context.
 14. Give that CSV to Claude with the Snowflake MCP to create or revise the production query. Update n8n manually; the Workbench never edits it. Missing source lineage is written as `UNKNOWN`, never guessed from a query name.
+15. Press **Activate in Waypoint** after the n8n query is ready. Activation makes the approved Include rules and the complete selected feature-catalog version available to everyday Waypoint.
 
 Selecting an older feature version is rollback. Uploading a changed feature catalog shows exact added, removed, and changed counts. Unknown feature mappings are removed and reported as warnings.
 
@@ -63,7 +64,7 @@ Promoted versions live as immutable ignored JSON bundles under `services/api/.wo
 - Raw provider values remain server-side until the app-side PII gate completes.
 - Identity-variable values are removed. Business fields such as `FEATURE_VOIP_STATE` are not confused with geographic state.
 - The authoring model receives variable keys, source query/path, observed type/state, and the verified feature catalog. It does not receive organization values.
-- Runtime compilation attaches compact product cards only for feature keys referenced by approved included rules. Waypoint receives exact feature meaning without receiving all 275 catalog rows for every organization.
+- Runtime compilation attaches the complete selected feature catalog as compact product cards containing only the exact feature key, product area, and short value statement. Waypoint receives company-wide feature knowledge without the unused CSV columns.
 - Everyday Waypoint keeps only promoted canonical keys returned by the production n8n response. Missing promoted keys remain missing, nulls remain explicit nulls, and unapproved response columns are dropped.
 - With no active promotion, Waypoint keeps the existing `org-context-v2` prompt context. Once a promotion is active, Waypoint uses only the promoted contract; promoted keys missing from the n8n result stay missing and the packet may be empty rather than silently reverting to the old broad context.
 - A missing or null value describes only this observed organization response.
@@ -84,7 +85,7 @@ Response: a list of rows containing `QUERY_NAME`, `VARIABLE_NAME`, `VALUE`, opti
 
 ### Context Layer
 
-The only endpoint is `GET /api/context_layer/:organization_uuid`. It returns all related features for an organization in one response. In combined mode, the Workbench obtains `ORG_UUID` from the n8n result, performs one read-only GET, and compares every returned feature name against every exact key in the active feature catalog.
+The only endpoint is `GET /api/context_layer/:org`. It returns all related features for an organization in one response. In combined mode, the Workbench sends an `organization_id` directly, so a slow or failed n8n request does not block the Context Layer request. A submitted `pro_uuid` still resolves through n8n first. The response is compared against every exact key in the active feature catalog.
 
 ## Current live evidence
 

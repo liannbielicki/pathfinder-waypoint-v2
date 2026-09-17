@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { promoteContext, startWorkbenchJob } from "@/lib/workbench";
+import { previewContextPromotion, promoteContext, startWorkbenchJob } from "@/lib/workbench";
 import { AuthoringCatalog } from "./AuthoringCatalog";
 
 vi.mock("@/lib/workbench", async (importOriginal) => ({
@@ -8,6 +8,7 @@ vi.mock("@/lib/workbench", async (importOriginal) => ({
   startWorkbenchJob: vi.fn(),
   getWorkbenchJob: vi.fn(),
   promoteContext: vi.fn(),
+  previewContextPromotion: vi.fn(),
 }));
 
 vi.mock("@/lib/catalogVersions", async (importOriginal) => ({
@@ -46,6 +47,12 @@ describe("AuthoringCatalog", () => {
   beforeEach(() => {
     vi.mocked(startWorkbenchJob).mockReset();
     vi.mocked(promoteContext).mockReset();
+    vi.mocked(previewContextPromotion).mockReset();
+    vi.mocked(previewContextPromotion).mockResolvedValue({
+      id: "promotion-preview",
+      included_variables: 1,
+      csv: "canonical_key,source_table,cohort_aggregate_prompt\n",
+    });
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: (key: string) => values.get(key) ?? null,
@@ -119,7 +126,7 @@ describe("AuthoringCatalog", () => {
     expect(vi.mocked(startWorkbenchJob).mock.calls[1][0]).toMatchObject({ workbench_mode: "evaluate", context_policy: "compare" });
   });
 
-  it("offers promotion and the exact CSV only after the context test", async () => {
+  it("offers the exact CSV before activation after the context test", async () => {
     vi.mocked(startWorkbenchJob)
       .mockResolvedValueOnce({
         id: "compile-1", status: "completed", state: {},
@@ -130,6 +137,11 @@ describe("AuthoringCatalog", () => {
         result: { stages: [], warnings: [], outputs: { evaluation: { judge: { winner: "curated", reason: "Better." } } } },
       });
     vi.mocked(promoteContext).mockResolvedValue({
+      id: "promotion-one",
+      included_variables: 1,
+      csv: "canonical_key,source_table,cohort_aggregate_prompt\njobs,ANALYTICS.JOBS,\n",
+    });
+    vi.mocked(previewContextPromotion).mockResolvedValue({
       id: "promotion-one",
       included_variables: 1,
       csv: "canonical_key,source_table,cohort_aggregate_prompt\njobs,ANALYTICS.JOBS,\n",
@@ -160,11 +172,13 @@ describe("AuthoringCatalog", () => {
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
     fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
     fireEvent.click(await screen.findByRole("button", { name: /test curated context/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /promote to waypoint/i }));
+    const download = await screen.findByRole("link", { name: /download snowflake handoff csv/i });
+    expect(download).toHaveAttribute("download", "promotion-one-snowflake-handoff.csv");
+    expect(vi.mocked(promoteContext)).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: /activate in waypoint/i }));
 
     expect(await screen.findByText(/promotion-one is now active/i)).toBeInTheDocument();
-    const download = screen.getByRole("link", { name: /download snowflake handoff csv/i });
-    expect(download).toHaveAttribute("download", "promotion-one-snowflake-handoff.csv");
+    expect(vi.mocked(previewContextPromotion)).toHaveBeenCalledWith({ evaluation_job_id: "evaluation-1" });
     expect(vi.mocked(promoteContext)).toHaveBeenCalledWith({ evaluation_job_id: "evaluation-1" });
   });
 
@@ -182,12 +196,12 @@ describe("AuthoringCatalog", () => {
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
     fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
     fireEvent.click(await screen.findByRole("button", { name: /test curated context/i }));
-    expect(await screen.findByRole("button", { name: /promote to waypoint/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /activate in waypoint/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("JOBS_CREATED"));
     fireEvent.change(screen.getByLabelText("Canonical key"), { target: { value: "jobs_changed" } });
 
-    expect(screen.queryByRole("button", { name: /promote to waypoint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate in waypoint/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /save new immutable version/i })).toBeEnabled();
   });
 

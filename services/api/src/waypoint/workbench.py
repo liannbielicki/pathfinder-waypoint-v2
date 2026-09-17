@@ -572,13 +572,12 @@ def prioritize_review_exceptions(
 
 
 def _compact_product_context(
-    referenced_features: set[str],
     feature_catalog_entries: list[dict[str, Any]] | None,
 ) -> dict[str, dict[str, str]]:
     product_context: dict[str, dict[str, str]] = {}
     for entry in feature_catalog_entries or []:
         feature = str(entry.get("feature") or "")
-        if feature not in referenced_features:
+        if not feature:
             continue
         card: dict[str, str] = {}
         product_area = entry.get("Product Area") or entry.get("product_area")
@@ -587,8 +586,7 @@ def _compact_product_context(
             card["a"] = str(product_area).strip()
         if value_statement:
             card["v"] = str(value_statement).strip()[:240]
-        if card:
-            product_context[feature] = card
+        product_context[feature] = card
     return dict(sorted(product_context.items()))
 
 
@@ -601,7 +599,6 @@ def compile_catalog_contract(
 ) -> dict[str, Any]:
     """Compile approved catalog rules into an organization-independent baseline."""
     rules: list[dict[str, Any]] = []
-    referenced_features: set[str] = set()
     for entry in entries:
         approved = entry.get("approval_status") in {"auto_approved", "human_approved"}
         legacy_approved = entry.get("review_status") == "reviewed"
@@ -623,13 +620,10 @@ def compile_catalog_contract(
         related = entry.get("related_features")
         if isinstance(related, list) and related:
             rule["f"] = [str(item) for item in related]
-            referenced_features.update(str(item) for item in related)
         rules.append(rule)
     rules.sort(key=lambda rule: (-int(rule.get("u", 0)), str(rule["k"])))
     context: dict[str, Any] = {"r": rules}
-    product_context = _compact_product_context(
-        referenced_features, feature_catalog_entries
-    )
+    product_context = _compact_product_context(feature_catalog_entries)
     if product_context:
         context["pc"] = product_context
     serialized = json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -671,7 +665,6 @@ def compile_context(
     nulls: list[str] = []
     features: dict[str, list[str]] = {}
     included = 0
-    referenced_features: set[str] = set()
     for entry in entries:
         approved = entry.get("approval_status") in {"auto_approved", "human_approved"}
         legacy_approved = entry.get("review_status") == "reviewed"
@@ -689,15 +682,12 @@ def compile_context(
         related = entry.get("related_features")
         if isinstance(related, list) and related:
             features[canonical] = [str(item) for item in related]
-            referenced_features.update(str(item) for item in related)
     context: dict[str, Any] = {"v": compiled_values}
     if nulls:
         context["n"] = sorted(nulls)
     if features:
         context["f"] = features
-    product_context = _compact_product_context(
-        referenced_features, feature_catalog_entries
-    )
+    product_context = _compact_product_context(feature_catalog_entries)
     if product_context:
         context["pc"] = product_context
     serialized = json.dumps(context, sort_keys=True, separators=(",", ":"))

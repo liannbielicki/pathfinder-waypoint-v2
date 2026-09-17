@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { newCatalogVersionId, readCatalogVersions, saveCatalogVersion, selectedCatalogVersionId, type CatalogVersion } from "@/lib/catalogVersions";
-import { getWorkbenchJob, promoteContext, startWorkbenchJob, WORKBENCH_ACTIVE_JOB_KEY, type PromotionResult, type WorkbenchTrace } from "@/lib/workbench";
+import { getWorkbenchJob, previewContextPromotion, promoteContext, startWorkbenchJob, WORKBENCH_ACTIVE_JOB_KEY, type PromotionResult, type WorkbenchTrace } from "@/lib/workbench";
 
 type Entry = {
   key?: string;
@@ -64,6 +64,7 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
   const [compiled, setCompiled] = useState<WorkbenchTrace | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [evaluationTrace, setEvaluationTrace] = useState<WorkbenchTrace | null>(null);
+  const [promotionPreview, setPromotionPreview] = useState<PromotionResult | null>(null);
   const [promoting, setPromoting] = useState(false);
   const [promotion, setPromotion] = useState<PromotionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,11 +101,21 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
   const undrafted = [...uniqueAuditKeys].filter((key) => !draftedKeys.has(key)).length;
   const parseError = trace.stages.find((stage) => stage.name === "authoring_parse" && stage.status === "failed");
 
+  useEffect(() => {
+    if (!evaluationTrace?.job_id || promotionPreview) return;
+    void previewContextPromotion({ evaluation_job_id: evaluationTrace.job_id })
+      .then(setPromotionPreview)
+      .catch((cause: unknown) => setError(
+        cause instanceof Error ? cause.message : "Could not prepare the Snowflake handoff CSV",
+      ));
+  }, [evaluationTrace, promotionPreview]);
+
   function update(index: number, values: Partial<Entry>) {
     setEntries((current) => current.map((entry, currentIndex) => currentIndex === index ? { ...entry, ...values } : entry));
     setSavedVersionId(null);
     setCompiled(null);
     setEvaluationTrace(null);
+    setPromotionPreview(null);
     setPromotion(null);
   }
 
@@ -138,6 +149,7 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
     setSavedVersionId(version.id);
     setCompiled(null);
     setEvaluationTrace(null);
+    setPromotionPreview(null);
     setPromotion(null);
   }
 
@@ -147,6 +159,7 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
     if (!input || typeof input !== "object") return;
     setCompiling(true);
     setEvaluationTrace(null);
+    setPromotionPreview(null);
     setPromotion(null);
     setError(null);
     try {
@@ -296,12 +309,12 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
     </section>}
     {evaluation && <section className="promotion-panel">
       <p className="eyebrow">Final step · Promote</p>
-      <h3>Use this context in Waypoint</h3>
-      <p className="helper">Activates the approved context and selected feature catalog. It does not change n8n.</p>
-      <button type="button" onClick={() => void promote()} disabled={promoting || Boolean(promotion)}>{promoting ? "Promoting…" : promotion ? "Promoted to Waypoint" : "Promote to Waypoint"}</button>
+      <h3>Export, update n8n, then activate</h3>
+      <p className="helper">Download the approved variables first. After you update the n8n query, activate this context and the complete selected feature catalog in Waypoint.</p>
+      {promotionPreview && <a className="download-link" href={`data:text/csv;charset=utf-8,${encodeURIComponent(promotionPreview.csv)}`} download={`${promotionPreview.id}-snowflake-handoff.csv`}>Download Snowflake handoff CSV</a>}
+      <button type="button" onClick={() => void promote()} disabled={!promotionPreview || promoting || Boolean(promotion)}>{promoting ? "Activating…" : promotion ? "Active in Waypoint" : "Activate in Waypoint"}</button>
       {promotion && <>
         <p><strong>{promotion.id} is now active</strong> with {promotion.included_variables} approved variables.</p>
-        <a className="download-link" href={`data:text/csv;charset=utf-8,${encodeURIComponent(promotion.csv)}`} download={`${promotion.id}-snowflake-handoff.csv`}>Download Snowflake handoff CSV</a>
       </>}
     </section>}
   </section>;

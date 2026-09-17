@@ -96,6 +96,16 @@ export async function promoteContext(input: {
   })) as Promise<PromotionResult>;
 }
 
+export async function previewContextPromotion(input: {
+  evaluation_job_id: string;
+}): Promise<PromotionResult> {
+  return responsePayload(await request("/api/context-workbench/promotions/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as Promise<PromotionResult>;
+}
+
 export async function runWorkbench(input: Record<string, unknown>): Promise<WorkbenchTrace> {
   const response = await request(
     "/api/context-workbench/run",
