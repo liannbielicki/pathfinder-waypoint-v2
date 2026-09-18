@@ -54,6 +54,7 @@ class RunCreate(BaseModel):
     loop_config: dict[str, float] | None = None
     journey_window: JourneyWindow = "churn_risk"
     context_source: ContextSource = "standard"
+    context_promotion_id: str | None = None
 
 
 class RunView(BaseModel):

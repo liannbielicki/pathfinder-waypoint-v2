@@ -261,6 +261,59 @@ async def test_backfilled_context_metadata_keeps_its_feature_reference_on_repair
     }
 
 
+async def test_recovered_context_rejects_changed_feature_lineage(
+    db_session_factory,
+):
+    store = PostgresWorkbenchStore(db_session_factory)
+    entries = [_complete_entry("JOBS_CREATED_T28")]
+    await store.save_catalog_version({
+        "id": "context-recovered-lineage", "kind": "context",
+        "name": "Recovered context", "entries": entries,
+        "details": {
+            "feature_catalog_version_id": "features-one",
+            "recovered_metadata": True,
+        },
+    })
+
+    with pytest.raises(ValueError, match="different content"):
+        await store.save_catalog_version({
+            "id": "context-recovered-lineage", "kind": "context",
+            "name": "Stale browser context", "entries": entries,
+            "details": {"feature_catalog_version_id": "features-two"},
+        })
+
+
+async def test_concurrent_recovered_metadata_repairs_are_compare_and_swap(
+    db_session_factory,
+):
+    store = PostgresWorkbenchStore(db_session_factory)
+    entries = [{"feature": "jobs", "description": "Manage jobs"}]
+    await store.save_catalog_version({
+        "id": "features-repair-race", "kind": "feature",
+        "name": "Recovered features", "entries": entries,
+        "details": {"recovered_metadata": True},
+    })
+
+    results = await asyncio.gather(
+        PostgresWorkbenchStore(db_session_factory).save_catalog_version({
+            "id": "features-repair-race", "kind": "feature",
+            "name": "Browser A", "entries": entries,
+            "details": {"source_filename": "a.csv"},
+        }),
+        PostgresWorkbenchStore(db_session_factory).save_catalog_version({
+            "id": "features-repair-race", "kind": "feature",
+            "name": "Browser B", "entries": entries,
+            "details": {"source_filename": "b.csv"},
+        }),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(item, ValueError) for item in results) == 1
+    stored = await store.read_catalog_version("features-repair-race")
+    assert stored is not None
+    assert stored["details"] in ({"source_filename": "a.csv"}, {"source_filename": "b.csv"})
+
+
 async def test_postgres_store_lists_catalog_versions_newest_first(db_session_factory):
     store = PostgresWorkbenchStore(db_session_factory)
     await store.save_catalog_version({

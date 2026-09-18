@@ -351,7 +351,7 @@ describe("AuthoringCatalog", () => {
     expect(screen.queryByText(/old_value/i)).not.toBeInTheDocument();
   });
 
-  it("restores the reviewed immutable version linked to an authoring job", () => {
+  it("does not rewrite a reviewed immutable version linked to an authoring job", () => {
     const reviewed = [{
       key: "CALLS",
       canonical_key: "calls",
@@ -375,11 +375,11 @@ describe("AuthoringCatalog", () => {
       },
     }} />);
 
-    expect(screen.getByText(/no deprioritized variables parked/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /include 1/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /deprioritize 0/i })).toBeInTheDocument();
+    expect(screen.getByText(/1 deprioritized parked/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /include 0/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /deprioritize 1/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /deprioritize 1/i }));
     expect(screen.getByText("CALLS")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /compile 1 approved variable/i })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: /approve calls/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /compile 0 approved variables/i })).toBeDisabled();
   });
 });

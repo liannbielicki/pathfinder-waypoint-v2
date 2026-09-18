@@ -348,6 +348,11 @@ def install_hosted_workbench(
             raise HTTPException(status_code=409, detail="Context catalog version does not match evaluation")
         if feature.entries != job.request.get("feature_catalog_entries"):
             raise HTTPException(status_code=409, detail="Feature catalog version does not match evaluation")
+        if dict(context.details or {}).get("feature_catalog_version_id") != feature.id:
+            raise HTTPException(
+                status_code=409,
+                detail="Context catalog was reviewed with a different feature catalog version",
+            )
         await get_hosted_workbench(request.app).store.promote(bundle, session=db)
         await db.commit()
         return payload

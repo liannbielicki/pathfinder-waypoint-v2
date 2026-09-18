@@ -158,6 +158,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         channels,
         journey_window: journeyWindow as RunCreateInput["journey_window"],
         context_source: contextSource,
+        ...(contextSource === "staging" && stagingContext
+          ? { context_promotion_id: stagingContext.promotion_id }
+          : {}),
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
       onStarted(run);
@@ -263,7 +266,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         <p className="helper">
           {contextSource === "staging"
             ? stagingContext
-              ? <>Staging uses <strong>{stagingContext.context_catalog_name}</strong> (<code>{stagingContext.context_catalog_version_id}</code>) with <strong>{stagingContext.feature_catalog_name}</strong> (<code>{stagingContext.feature_catalog_version_id}</code>) · {stagingContext.included_variables} approved variables · {new Intl.DateTimeFormat("en-US", { timeZone: "UTC", timeZoneName: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date(stagingContext.created_at))}.</>
+              ? <>Staging uses <strong>{stagingContext.context_catalog_name}</strong> (<code>{stagingContext.context_catalog_version_id}</code>) with <strong>{stagingContext.feature_catalog_name}</strong> (<code>{stagingContext.feature_catalog_version_id}</code>) · {stagingContext.included_variables} approved variables · {new Intl.DateTimeFormat("en-US", { timeZoneName: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date(stagingContext.created_at))}.</>
               : "Staging is not ready because no active approved Workbench catalog is available."
             : "Standard uses today&apos;s production workflow."}
         </p>

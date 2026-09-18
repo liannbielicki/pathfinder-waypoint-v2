@@ -33,23 +33,6 @@ import {
 
 const DEFAULT_PROMPT = "Create a token-efficient variable catalog for identifying a Pro's core issues and useful HCP solutions. Preserve exact source keys, infer compact categories, use only exact verified feature keys, rank usefulness from 1 to 5, choose include/deprioritize/exclude, and request cohort aggregates only when they materially improve a rank 4 or 5 decision. Return JSON only.";
 
-function restoreSavedEntries(entries: CatalogVersion["entries"]): CatalogVersion["entries"] {
-  return entries.map((entry) => {
-    if (entry.disposition === "exclude") return { ...entry, approval_status: "excluded" };
-    if (entry.disposition === "deprioritize") {
-      const approved = entry.approval_status === "human_approved" || entry.review_status === "reviewed";
-      if (approved) return { ...entry, disposition: "include", approval_status: "auto_approved", review_status: "draft" };
-      return {
-        ...entry,
-        approval_status: "review_required",
-        confidence: Number(entry.confidence ?? 0),
-        uncertainty_reason: entry.uncertainty_reason || "Legacy saved rule needs review.",
-      };
-    }
-    return { ...entry, disposition: "include", approval_status: "auto_approved" };
-  });
-}
-
 export function WorkbenchRunForm({
   onRun,
   busy,
@@ -73,6 +56,7 @@ export function WorkbenchRunForm({
   const [catalogDiff, setCatalogDiff] = useState<{ added: string[]; removed: string[]; changed: string[] } | null>(null);
   const [authoringPrompt, setAuthoringPrompt] = useState(DEFAULT_PROMPT);
   const [error, setError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState(() => typeof window === "undefined" ? null : window.localStorage.getItem(WORKBENCH_ACTIVE_JOB_KEY));
   const [activeJob, setActiveJob] = useState<WorkbenchJob | null>(null);
   const deliveredJob = useRef<string | null>(null);
@@ -84,10 +68,10 @@ export function WorkbenchRunForm({
         const nextStatus = await getWorkbenchStatus();
         if (!cancelled) {
           setStatus(nextStatus);
-          setError(null);
+          setStatusError(null);
         }
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : "Backend is unavailable");
+        if (!cancelled) setStatusError(cause instanceof Error ? cause.message : "Backend is unavailable");
       }
     };
     void refreshStatus();
@@ -98,17 +82,8 @@ export function WorkbenchRunForm({
           listWorkbenchCatalogs("context"),
           listWorkbenchCatalogs("feature"),
         ]);
-        const contextIds = new Set(sharedContexts.map((item) => item.id));
-        const sharedFeatureById = new Map(sharedFeatures.map((item) => [item.id, item]));
-        const sharedContextById = new Map(sharedContexts.map((item) => [item.id, item]));
-        const localContexts = readCatalogVersions().filter((item) => {
-          const shared = sharedContextById.get(item.id);
-          return !shared || shared.details.recovered_metadata === true;
-        });
-        const localFeatures = readFeatureCatalogVersions().filter((item) => {
-          const shared = sharedFeatureById.get(item.id);
-          return !shared || shared.details.recovered_metadata === true;
-        });
+        const localContexts = readCatalogVersions();
+        const localFeatures = readFeatureCatalogVersions();
         if (localContexts.length || localFeatures.length) {
           await Promise.all([
             ...localContexts.map((item) => saveWorkbenchCatalog(contextVersionForServer(item))),
@@ -182,12 +157,27 @@ export function WorkbenchRunForm({
   const contextVersion = contextVersions.find((version) => version.id === contextVersionId);
 
   function loadSavedVersion(version: CatalogVersion) {
+    if (!version.feature_catalog_version_id) {
+      setError("This context catalog has no feature catalog lineage and cannot be opened safely.");
+      return;
+    }
+    const savedFeature = featureVersions.find(
+      (item) => item.id === version.feature_catalog_version_id,
+    );
+    if (!savedFeature) {
+      setError(`Feature catalog ${version.feature_catalog_version_id} is unavailable; this context catalog cannot be opened safely.`);
+      return;
+    }
     window.localStorage.removeItem(WORKBENCH_ACTIVE_JOB_KEY);
     deliveredJob.current = null;
     setActiveJobId(null);
     setActiveJob(null);
     onBusy?.(false);
-    const entries = restoreSavedEntries(version.entries);
+    const entries = version.entries;
+    if (savedFeature) {
+      setFeatureVersionId(savedFeature.id);
+      selectFeatureCatalogVersion(savedFeature.id);
+    }
     onRun({
       stages: [{
         name: "input",
@@ -199,8 +189,8 @@ export function WorkbenchRunForm({
           source_mode: addContextLayer ? "both" : "snowflake",
           workbench_mode: "authoring",
           authoring_prompt: version.prompt || authoringPrompt,
-          feature_catalog_entries: featureVersion?.entries,
-          feature_catalog_version_id: version.feature_catalog_version_id ?? featureVersion?.id,
+          feature_catalog_entries: savedFeature?.entries,
+          feature_catalog_version_id: savedFeature?.id,
         },
       }],
       warnings: ["Loaded from a saved context catalog without rerunning Snowflake or AI."],
@@ -229,7 +219,7 @@ export function WorkbenchRunForm({
             saved_at: version.created_at,
             prompt: version.prompt,
           },
-          feature_catalog_version_id: version.feature_catalog_version_id ?? featureVersion?.id,
+          feature_catalog_version_id: savedFeature?.id,
         },
       },
     });
@@ -363,7 +353,7 @@ export function WorkbenchRunForm({
       {activeJob.updated_at && <span>Checkpoint {new Date(activeJob.updated_at).toLocaleTimeString()}</span>}
       {activeJob.status === "failed" && <button type="button" className="secondary" onClick={() => void resume()}>Resume saved job</button>}
     </section>}
-    {!completed && error && <p className="error" role="alert">{error}</p>}
+    {(error || statusError) && <p className="error" role="alert">{error || statusError}</p>}
     {completed
       ? <div className="next-step-note">
           <p className="helper">Collection is complete. Continue to curation below, or clear this view to collect a new run.</p>

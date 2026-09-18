@@ -268,6 +268,7 @@ describe("RunStart", () => {
     await waitFor(() => expect(createCalls).toHaveLength(1));
     expect(createCalls[0]).toEqual(expect.objectContaining({
       context_source: "staging",
+      context_promotion_id: "promotion-shared",
       pro_ids: ["889901"],
     }));
   });
@@ -298,7 +299,11 @@ describe("RunStart", () => {
     expect(screen.getByText("September features")).toBeVisible();
     expect(screen.getByText("features-shared")).toBeVisible();
     expect(screen.getByText(/287 approved variables/i)).toBeVisible();
-    expect(screen.getByText(/Sep 18, 2026, 04:04:05 PM UTC/i)).toBeVisible();
+    const expected = new Intl.DateTimeFormat("en-US", {
+      timeZoneName: "short", year: "numeric", month: "short", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+    }).format(new Date(FLEET_SETTINGS.staging_context.created_at));
+    expect(screen.getByText(new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"))).toBeVisible();
   });
 
   it("disables Staging context when its Railway URL is unavailable", async () => {

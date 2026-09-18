@@ -35,7 +35,7 @@ def _ready_staging_rows() -> list[object]:
     return [
         WorkbenchCatalogVersionRow(
             id="context-ready", kind="context", name="Ready context",
-            entries=[], details={},
+            entries=[], details={"feature_catalog_version_id": "features-ready"},
         ),
         WorkbenchCatalogVersionRow(
             id="features-ready", kind="feature", name="Ready features",
@@ -496,11 +496,39 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
     await db_session.commit()
     response = await auth_client.post(
         "/api/runs",
-        json={**RUN_REQUEST, "pro_ids": ["889901"], "context_source": "staging"},
+        json={
+            **RUN_REQUEST,
+            "pro_ids": ["889901"],
+            "context_source": "staging",
+            "context_promotion_id": "promotion-ready",
+        },
     )
 
     assert response.status_code == 202
     assert response.json()["pro_ids"] == ["889901"]
+    assert response.json()["audience_query"] == "workbench:promotion-ready"
+
+
+async def test_staging_rejects_a_promotion_that_changed_after_display(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/runs",
+        json={
+            **RUN_REQUEST,
+            "pro_ids": ["889901"],
+            "context_source": "staging",
+            "context_promotion_id": "promotion-previously-displayed",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "changed" in response.text.casefold()
+    assert (await db_session.execute(select(RunRow))).scalars().all() == []
 
 
 async def test_fleet_settings_requires_session(client: httpx.AsyncClient) -> None:
@@ -613,7 +641,7 @@ async def test_fleet_settings_identifies_the_active_staging_catalog(
     db_session.add_all([
         WorkbenchCatalogVersionRow(
             id="context-shared", kind="context", name="Shared context",
-            entries=[], details={},
+            entries=[], details={"feature_catalog_version_id": "features-shared"},
         ),
         WorkbenchCatalogVersionRow(
             id="features-shared", kind="feature", name="September features",
@@ -647,6 +675,30 @@ async def test_fleet_settings_identifies_the_active_staging_catalog(
         "included_variables": 1,
         "created_at": "2026-09-18T16:04:05+00:00",
     }
+
+
+async def test_recovered_catalogs_keep_an_existing_promotion_available(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    rows = _ready_staging_rows()
+    context = rows[0]
+    feature = rows[1]
+    assert isinstance(context, WorkbenchCatalogVersionRow)
+    assert isinstance(feature, WorkbenchCatalogVersionRow)
+    context.details = {
+        "feature_catalog_version_id": "features-ready",
+        "recovered_metadata": True,
+    }
+    feature.details = {"recovered_metadata": True}
+    db_session.add_all(rows)
+    await db_session.commit()
+
+    response = await auth_client.get("/api/fleet/settings")
+
+    assert response.status_code == 200
+    assert response.json()["staging_context_available"] is True
+    assert response.json()["staging_context"]["promotion_id"] == "promotion-ready"
 
 
 async def test_active_waypoint_run_locks_the_hosted_workbench(
@@ -782,7 +834,7 @@ async def test_hosted_workbench_activates_an_immutable_promotion(
     db_session.add_all([
         WorkbenchCatalogVersionRow(
             id="context-v1", kind="context", name="Context v1",
-            entries=[entry], details={},
+            entries=[entry], details={"feature_catalog_version_id": "features-v1"},
         ),
         WorkbenchCatalogVersionRow(
             id="features-v1", kind="feature", name="Features v1",
@@ -835,6 +887,60 @@ async def test_hosted_workbench_activates_an_immutable_promotion(
 
     assert repeated.status_code == 200
     assert promotion.activated_at == activated_at
+
+
+async def test_hosted_workbench_rejects_mismatched_feature_lineage(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    entry = {
+        "key": "JOBS_CREATED_T28",
+        "canonical_key": "jobs_created_t28",
+        "value_category": "activity",
+        "related_features": ["jobs"],
+        "usefulness_rank": 5,
+        "disposition": "include",
+        "aggregate_prompt": "Calculate the matched cohort percentile.",
+        "review_status": "reviewed",
+        "approval_status": "auto_approved",
+        "confidence": 0.95,
+        "uncertainty_reason": None,
+        "source_table": "ANALYTICS.JOBS",
+    }
+    features = [{"feature": "jobs", "description": "Manage jobs"}]
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-v1", kind="context", name="Context v1",
+            entries=[entry], details={"feature_catalog_version_id": "features-v1"},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-v2", kind="feature", name="Features v2",
+            entries=features, details={},
+        ),
+        WorkbenchJobRow(
+            id="evaluation-wrong-features",
+            status="completed",
+            request={
+                "identifier": "889901",
+                "workbench_mode": "evaluate",
+                "catalog_override": [entry],
+                "feature_catalog_entries": features,
+                "catalog_version_id": "context-v1",
+                "feature_catalog_version_id": "features-v2",
+            },
+            result={"outputs": {"evaluation": {"judge": {"winner": "curated"}}}},
+        ),
+    ])
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-wrong-features"},
+    )
+
+    assert response.status_code == 409
+    assert "feature catalog" in response.text.casefold()
+    assert (await db_session.execute(select(ContextPromotionRow))).scalars().all() == []
 
 
 async def test_hosted_workbench_cannot_promote_during_a_waypoint_run(

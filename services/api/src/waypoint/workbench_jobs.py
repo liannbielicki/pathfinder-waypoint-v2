@@ -379,7 +379,13 @@ class PostgresWorkbenchStore:
             "entries": list(version.get("entries") or []),
             "details": dict(version.get("details") or {}),
         }
-        existing = await session.get(WorkbenchCatalogVersionRow, version_id)
+        existing = (
+            await session.execute(
+                select(WorkbenchCatalogVersionRow)
+                .where(WorkbenchCatalogVersionRow.id == version_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if existing is not None:
             current = _catalog_payload(existing)
             if (
@@ -387,8 +393,20 @@ class PostgresWorkbenchStore:
                 and current["entries"] == incoming["entries"]
                 and current["details"].get("recovered_metadata") is True
             ):
+                recovered_details = {
+                    key: value
+                    for key, value in current["details"].items()
+                    if key != "recovered_metadata"
+                }
+                if any(
+                    incoming["details"].get(key) != value
+                    for key, value in recovered_details.items()
+                ):
+                    raise ValueError(
+                        "catalog version id already exists with different content"
+                    )
                 existing.name = incoming["name"]
-                existing.details = incoming["details"]
+                existing.details = {**recovered_details, **incoming["details"]}
                 await session.flush()
                 await session.refresh(existing)
                 return _catalog_payload(existing)

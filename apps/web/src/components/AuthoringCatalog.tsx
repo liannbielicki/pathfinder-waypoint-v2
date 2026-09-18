@@ -42,10 +42,7 @@ function draftFromTrace(trace: WorkbenchTrace): Entry[] {
 export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace; onCompiled?: (trace: WorkbenchTrace) => void }) {
   const initialEntries = useMemo(() => draftFromTrace(trace), [trace]);
   const [entries, setEntries] = useState<Entry[]>(initialEntries);
-  const catalogEntries = entries.map((entry) => entry.disposition === "deprioritize"
-    && (entry.approval_status === "human_approved" || entry.review_status === "reviewed")
-    ? { ...entry, disposition: "include" as const, approval_status: "auto_approved" as const, review_status: "draft" as const }
-    : entry);
+  const catalogEntries = entries;
   const [activeDisposition, setActiveDisposition] = useState<NonNullable<Entry["disposition"]>>("include");
   const [query, setQuery] = useState("");
   const [versionName, setVersionName] = useState(`Context catalog ${new Date().toLocaleDateString()}`);

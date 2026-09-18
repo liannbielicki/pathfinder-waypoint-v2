@@ -136,6 +136,13 @@ describe("WorkbenchRunForm", () => {
       feature_catalog_version_id: "features-one",
       confidence_threshold: 0.8,
     }]));
+    window.localStorage.setItem("waypoint-feature-catalog-versions", JSON.stringify([{
+      id: "features-one",
+      name: "Saved features",
+      source_filename: "features.csv",
+      created_at: "2026-09-15T17:00:00Z",
+      entries: [{ feature: "jobs", description: "Manage jobs" }],
+    }]));
     const onRun = vi.fn();
     render(<WorkbenchRunForm onRun={onRun} busy={false} />);
 
@@ -145,12 +152,17 @@ describe("WorkbenchRunForm", () => {
     expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
       outputs: expect.objectContaining({
         authoring: expect.objectContaining({
-          draft: [{ ...savedEntries[0], approval_status: "auto_approved" }],
+          draft: savedEntries,
           completed_keys: 1,
           remaining_keys: 0,
+          feature_catalog_version_id: "features-one",
         }),
       }),
     }));
+    expect(onRun.mock.calls[0][0].stages[0].data.feature_catalog_entries).toEqual([
+      { feature: "jobs", description: "Manage jobs" },
+    ]);
+    expect(screen.getByLabelText(/feature catalog version/i)).toHaveValue("features-one");
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringMatching(/\/jobs$/),
       expect.objectContaining({ method: "POST" }),
@@ -168,14 +180,26 @@ describe("WorkbenchRunForm", () => {
         canonical_key: "jobs_created",
         disposition: "include",
       }],
-      details: { prompt: "shared prompt", confidence_threshold: 0.9 },
+      details: {
+        prompt: "shared prompt",
+        confidence_threshold: 0.9,
+        feature_catalog_version_id: "features-shared",
+      },
+    };
+    const sharedFeatures = {
+      id: "features-shared",
+      kind: "feature",
+      name: "Shared features",
+      created_at: "2026-09-18T15:04:05Z",
+      entries: [{ feature: "jobs", description: "Manage jobs" }],
+      details: { source_filename: "features.csv" },
     };
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string) => ({
       ok: true,
       json: async () => url.includes("/catalogs?kind=context")
         ? [shared]
         : url.includes("/catalogs?kind=feature")
-          ? []
+          ? [sharedFeatures]
           : {
               env_file: "Railway service environment",
               env_file_exists: false,
@@ -201,7 +225,7 @@ describe("WorkbenchRunForm", () => {
     }));
   });
 
-  it("restores every legacy draft using its predetermined disposition", async () => {
+  it("refuses a legacy catalog with no immutable feature lineage", async () => {
     const legacyEntries = Array.from({ length: 30 }, (_, index) => ({
       key: `LEGACY_${index}`,
       canonical_key: `legacy_${index}`,
@@ -222,11 +246,41 @@ describe("WorkbenchRunForm", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: /legacy run/i })).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText(/start from prior context catalog/i), { target: { value: "legacy-30" } });
 
-    const restored = onRun.mock.calls[0][0].outputs.authoring.draft;
-    expect(restored).toHaveLength(30);
-    expect(restored.filter((entry: { approval_status: string }) => entry.approval_status === "auto_approved")).toHaveLength(10);
-    expect(restored.filter((entry: { approval_status: string }) => entry.approval_status === "review_required")).toHaveLength(10);
-    expect(restored.filter((entry: { approval_status: string }) => entry.approval_status === "excluded")).toHaveLength(10);
+    expect(onRun).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/feature catalog lineage/i);
+  });
+
+  it("keeps local catalogs when a same-id server conflict is found", async () => {
+    const local = {
+      id: "context-collision",
+      name: "Local version",
+      created_at: "2026-09-15T18:00:00Z",
+      prompt: "local prompt",
+      entries: [{ key: "LOCAL", disposition: "include" }],
+    };
+    window.localStorage.setItem("waypoint-context-catalog-versions", JSON.stringify([local]));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string, init?: RequestInit) => ({
+      ok: !(url.endsWith("/catalogs") && init?.method === "POST"),
+      status: 409,
+      text: async () => "catalog version id already exists with different content",
+      json: async () => url.endsWith("/catalogs") && init?.method === "POST"
+        ? { detail: "catalog version id already exists with different content" }
+        : url.includes("/catalogs?kind=context")
+          ? [{ ...local, kind: "context", name: "Remote version", entries: [{ key: "REMOTE" }], details: {} }]
+          : url.includes("/catalogs?kind=feature")
+            ? []
+            : {
+              env_file: "Railway service environment",
+              configured: { snowflake: true, context_layer: true, ai: true, model: true },
+              activity: "idle",
+            },
+    })));
+
+    render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/different content/i));
+    expect(window.localStorage.getItem("waypoint-context-catalog-versions"))
+      .toBe(JSON.stringify([local]));
   });
 
   it("selects a newly saved edited catalog for the next collection pass", async () => {

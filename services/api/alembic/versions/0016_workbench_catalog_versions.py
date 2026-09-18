@@ -13,6 +13,46 @@ down_revision: str | None = "0015"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+CATALOG_CONFLICT_PREFLIGHT = """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            WITH recovered AS (
+                SELECT
+                    request->>'catalog_version_id' AS id,
+                    jsonb_build_object(
+                        'kind', 'context',
+                        'entries', request->'catalog_override',
+                        'feature_catalog_version_id',
+                        request->>'feature_catalog_version_id'
+                    ) AS payload
+                FROM workbench_jobs
+                WHERE status = 'completed'
+                  AND NULLIF(request->>'catalog_version_id', '') IS NOT NULL
+                  AND jsonb_typeof(request->'catalog_override') = 'array'
+                UNION ALL
+                SELECT
+                    request->>'feature_catalog_version_id' AS id,
+                    jsonb_build_object(
+                        'kind', 'feature',
+                        'entries', request->'feature_catalog_entries'
+                    ) AS payload
+                FROM workbench_jobs
+                WHERE status = 'completed'
+                  AND NULLIF(request->>'feature_catalog_version_id', '') IS NOT NULL
+                  AND jsonb_typeof(request->'feature_catalog_entries') = 'array'
+            )
+            SELECT 1
+            FROM recovered
+            GROUP BY id
+            HAVING COUNT(DISTINCT payload) > 1
+        ) THEN
+            RAISE EXCEPTION
+                'conflicting historical Workbench catalog versions require manual repair';
+        END IF;
+    END $$
+"""
+
 
 def upgrade() -> None:
     op.add_column(
@@ -44,6 +84,7 @@ def upgrade() -> None:
             name="ck_workbench_catalog_versions_kind",
         ),
     )
+    op.execute(CATALOG_CONFLICT_PREFLIGHT)
     op.execute("""
         INSERT INTO workbench_catalog_versions
             (id, kind, name, entries, details, created_at)

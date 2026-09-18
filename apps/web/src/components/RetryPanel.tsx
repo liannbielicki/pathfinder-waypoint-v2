@@ -43,6 +43,9 @@ export function RetryPanel({ run }: { run: RunDetail }) {
     setBusy(true);
     setError(null);
     try {
+      const contextPromotionId = run.context_source === "staging"
+        ? run.audience_query.match(/^workbench:(.+)$/)?.[1]
+        : undefined;
       // audience_query is always the sentinel at creation — the n8n flow
       // stamps the real version during the run.
       const view = await createRun({
@@ -54,6 +57,7 @@ export function RetryPanel({ run }: { run: RunDetail }) {
         // RunDetail types the window as plain string; the server validates it.
         journey_window: run.journey_window as RunCreateInput["journey_window"],
         context_source: run.context_source as RunCreateInput["context_source"],
+        ...(contextPromotionId ? { context_promotion_id: contextPromotionId } : {}),
       });
       setRetryRun(view.id);
     } catch (e) {

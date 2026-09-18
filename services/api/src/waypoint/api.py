@@ -90,10 +90,8 @@ async def _staging_context_summary(
     if (
         context is None
         or context.kind != "context"
-        or dict(context.details or {}).get("recovered_metadata") is True
         or feature is None
         or feature.kind != "feature"
-        or dict(feature.details or {}).get("recovered_metadata") is True
     ):
         return None
     rules = bundle.get("rules")
@@ -254,18 +252,22 @@ def create_app(
                 status_code=422,
                 detail="Staging context requires numeric organization IDs",
             )
-        if (
-            body.context_source == "staging"
-            and await _staging_context_summary(session, settings) is None
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="Staging context is unavailable because its sources or active Workbench catalog are missing",
-            )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)
         if await current_activity(session) == "workbench":
             raise HTTPException(status_code=409, detail="Context Workbench is running")
+        if body.context_source == "staging":
+            staging_context = await _staging_context_summary(session, settings)
+            if staging_context is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Staging context is unavailable because its sources or active Workbench catalog are missing",
+                )
+            if body.context_promotion_id != staging_context["promotion_id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The active Staging context changed; review it and start the run again",
+                )
         defaults = dict(fleet.loop_defaults or {})
         try:
             config = LoopConfig.from_mapping({**defaults, **(body.loop_config or {})})
@@ -279,7 +281,11 @@ def create_app(
         pro_ids = list(dict.fromkeys(body.pro_ids))
         run = RunRow(
             pro_ids=pro_ids,
-            audience_query=body.audience_query,
+            audience_query=(
+                f"workbench:{body.context_promotion_id}"
+                if body.context_source == "staging"
+                else body.audience_query
+            ),
             audience_run=body.audience_run,
             channels=body.channels,
             journey_window=body.journey_window,

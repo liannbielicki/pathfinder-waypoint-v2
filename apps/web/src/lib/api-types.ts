@@ -615,6 +615,8 @@ export interface components {
             audience_run: string;
             /** Channels */
             channels: ("sms" | "email" | "call")[];
+            /** Context Promotion Id */
+            context_promotion_id?: string | null;
             /**
              * Context Source
              * @default standard

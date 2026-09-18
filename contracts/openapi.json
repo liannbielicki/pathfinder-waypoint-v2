@@ -456,6 +456,17 @@
             "title": "Channels",
             "type": "array"
           },
+          "context_promotion_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Promotion Id"
+          },
           "context_source": {
             "default": "standard",
             "enum": [
