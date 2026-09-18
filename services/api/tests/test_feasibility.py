@@ -81,3 +81,14 @@ def test_unknown_lifecycle_stage_passes_onboarding_window() -> None:
 
 def test_mature_lifecycle_still_blocks_onboarding_window() -> None:
     assert gate_pro(brief(lifecycle_stage="mature"), ["sms"], "onboarding").blocked
+
+
+def test_call_has_no_consent_signal_and_passes() -> None:
+    # No consent field exists for a phone call; the audience SQL's dnc filter
+    # owns that, so the gate fails open (same rule as an unknown state).
+    result = gate_pro(brief(sms_consent_state="opted_out"), ["sms", "call"], "churn_risk")
+    assert result.allowed_channels == ("call",)
+
+
+def test_unknown_channel_is_dropped() -> None:
+    assert gate_pro(brief(), ["fax", "sms"], "churn_risk").allowed_channels == ("sms",)

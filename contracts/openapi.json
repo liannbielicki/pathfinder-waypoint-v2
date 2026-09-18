@@ -1,6 +1,245 @@
 {
   "components": {
     "schemas": {
+      "CallAlternative": {
+        "description": "A runner-up idea for the same Pro, in case the winner does not fit on the call.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "mechanism": {
+            "title": "Mechanism",
+            "type": "string"
+          },
+          "pro_facing_concept": {
+            "title": "Pro Facing Concept",
+            "type": "string"
+          },
+          "score_pp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Pp"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "mechanism",
+          "channel",
+          "pro_facing_concept",
+          "actions",
+          "score_pp"
+        ],
+        "title": "CallAlternative",
+        "type": "object"
+      },
+      "CallItem": {
+        "description": "One call-channel winner as an operator to-do (see waypoint.call_todos).",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "alternatives": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CallAlternative"
+            },
+            "title": "Alternatives",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "manager_rationale": {
+            "title": "Manager Rationale",
+            "type": "string"
+          },
+          "mechanism": {
+            "title": "Mechanism",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "org_id": {
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pro_facing_concept": {
+            "title": "Pro Facing Concept",
+            "type": "string"
+          },
+          "pro_id": {
+            "title": "Pro Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "todo",
+              "done"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "winner_id": {
+            "title": "Winner Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "winner_id",
+          "run_id",
+          "pro_id",
+          "org_id",
+          "title",
+          "mechanism",
+          "pro_facing_concept",
+          "manager_rationale",
+          "actions",
+          "created_at",
+          "status",
+          "note",
+          "updated_at"
+        ],
+        "title": "CallItem",
+        "type": "object"
+      },
+      "CallUpdate": {
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "todo",
+              "done"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "CallUpdate",
+        "type": "object"
+      },
+      "CatalogValidateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "csv_text": {
+            "minLength": 1,
+            "title": "Csv Text",
+            "type": "string"
+          },
+          "filename": {
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "filename",
+          "csv_text"
+        ],
+        "title": "CatalogValidateRequest",
+        "type": "object"
+      },
+      "CatalogVersionRequest": {
+        "properties": {
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "context",
+              "feature"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "entries"
+        ],
+        "title": "CatalogVersionRequest",
+        "type": "object"
+      },
       "ExposureIn": {
         "description": "One exposure registration. Arm \"A\" is the treated recommendation; arm\n\"B\" is the control/neutral exposure (no WinnerRow required). A\nwinner-linked item derives identity from the winner \u2014 caller identity\nfields are ignored there.",
         "properties": {
@@ -177,6 +416,21 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "PromotionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation_job_id": {
+            "minLength": 1,
+            "title": "Evaluation Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evaluation_job_id"
+        ],
+        "title": "PromotionRequest",
+        "type": "object"
+      },
       "RunCreate": {
         "properties": {
           "audience_query": {
@@ -191,11 +445,36 @@
           },
           "channels": {
             "items": {
+              "enum": [
+                "sms",
+                "email",
+                "call"
+              ],
               "type": "string"
             },
             "minItems": 1,
             "title": "Channels",
             "type": "array"
+          },
+          "context_promotion_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Promotion Id"
+          },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
+            "type": "string"
           },
           "journey_window": {
             "default": "churn_risk",
@@ -271,6 +550,15 @@
           },
           "config_version": {
             "title": "Config Version",
+            "type": "string"
+          },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
             "type": "string"
           },
           "cost_limit_usd": {
@@ -420,6 +708,15 @@
             "title": "Config Version",
             "type": "string"
           },
+          "context_source": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "staging"
+            ],
+            "title": "Context Source",
+            "type": "string"
+          },
           "cost_limit_usd": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Cost Limit Usd",
@@ -495,6 +792,38 @@
           "journey_window"
         ],
         "title": "RunView",
+        "type": "object"
+      },
+      "StagingContextCallback": {
+        "properties": {
+          "organization_id": {
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "promotion_id": {
+            "title": "Promotion Id",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "organization_id",
+          "promotion_id",
+          "rows"
+        ],
+        "title": "StagingContextCallback",
         "type": "object"
       },
       "TouchOutcomeIn": {
@@ -683,6 +1012,246 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WorkbenchRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "ai_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Api Key"
+          },
+          "authoring_prompt": {
+            "default": "Create a token-efficient, AI-only variable catalog using key, canonical_key, value_category, related_features, usefulness_rank, and aggregate_prompt. Map each variable only to exact feature keys from the supplied catalog. Do not create human descriptions, time metadata, or recommendations. Return valid JSON only.",
+            "title": "Authoring Prompt",
+            "type": "string"
+          },
+          "candidate_count": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "catalog_override": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Override"
+          },
+          "catalog_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Version Id"
+          },
+          "catalog_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Version Name"
+          },
+          "catalog_version_saved_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Version Saved At"
+          },
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "context_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Api Key"
+          },
+          "context_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Base Url"
+          },
+          "context_policy": {
+            "default": "compare",
+            "enum": [
+              "baseline",
+              "proposed",
+              "compare"
+            ],
+            "title": "Context Policy",
+            "type": "string"
+          },
+          "enrichment": {
+            "default": "catalog",
+            "enum": [
+              "none",
+              "catalog"
+            ],
+            "title": "Enrichment",
+            "type": "string"
+          },
+          "feature_catalog_csv": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feature Catalog Csv"
+          },
+          "feature_catalog_entries": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feature Catalog Entries"
+          },
+          "feature_catalog_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feature Catalog Version Id"
+          },
+          "identifier": {
+            "minLength": 1,
+            "title": "Identifier",
+            "type": "string"
+          },
+          "identifier_type": {
+            "default": "organization_id",
+            "enum": [
+              "organization_id",
+              "org_uuid",
+              "pro_uuid"
+            ],
+            "title": "Identifier Type",
+            "type": "string"
+          },
+          "journey_window": {
+            "default": "churn_risk_open",
+            "title": "Journey Window",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "n8n_webhook_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N8N Webhook Token"
+          },
+          "n8n_webhook_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N8N Webhook Url"
+          },
+          "source_mode": {
+            "default": "snowflake",
+            "enum": [
+              "snowflake",
+              "context_layer",
+              "both"
+            ],
+            "title": "Source Mode",
+            "type": "string"
+          },
+          "workbench_mode": {
+            "default": "runtime",
+            "enum": [
+              "runtime",
+              "authoring",
+              "compile",
+              "evaluate"
+            ],
+            "title": "Workbench Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier"
+        ],
+        "title": "WorkbenchRunRequest",
+        "type": "object"
       }
     }
   },
@@ -732,6 +1301,536 @@
           }
         },
         "summary": "Login"
+      }
+    },
+    "/api/calls": {
+      "get": {
+        "description": "Call-channel winners across runs: the operators' own work list.\nThese never reach LCM; Pathfinder staff place the calls.",
+        "operationId": "calls_api_calls_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CallItem"
+                  },
+                  "title": "Response Calls Api Calls Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Calls"
+      }
+    },
+    "/api/calls/{winner_id}": {
+      "patch": {
+        "operationId": "patch_call_api_calls__winner_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "winner_id",
+            "required": true,
+            "schema": {
+              "title": "Winner Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallItem"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Call"
+      }
+    },
+    "/api/context-workbench/catalog/validate": {
+      "post": {
+        "operationId": "validate_catalog_api_context_workbench_catalog_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Catalog Api Context Workbench Catalog Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Catalog"
+      }
+    },
+    "/api/context-workbench/catalogs": {
+      "get": {
+        "operationId": "list_catalogs_api_context_workbench_catalogs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "context",
+                    "feature"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Catalogs Api Context Workbench Catalogs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Catalogs"
+      },
+      "post": {
+        "operationId": "save_catalog_api_context_workbench_catalogs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogVersionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Save Catalog Api Context Workbench Catalogs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Catalog"
+      }
+    },
+    "/api/context-workbench/catalogs/{version_id}": {
+      "get": {
+        "operationId": "get_catalog_api_context_workbench_catalogs__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Catalog Api Context Workbench Catalogs  Version Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Catalog"
+      }
+    },
+    "/api/context-workbench/jobs": {
+      "post": {
+        "operationId": "start_job_api_context_workbench_jobs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbenchRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Job Api Context Workbench Jobs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Job"
+      }
+    },
+    "/api/context-workbench/jobs/latest": {
+      "get": {
+        "operationId": "latest_job_api_context_workbench_jobs_latest_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Latest Job Api Context Workbench Jobs Latest Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Latest Job"
+      }
+    },
+    "/api/context-workbench/jobs/{job_id}": {
+      "get": {
+        "operationId": "get_job_api_context_workbench_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Job Api Context Workbench Jobs  Job Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job"
+      }
+    },
+    "/api/context-workbench/jobs/{job_id}/resume": {
+      "post": {
+        "operationId": "resume_job_api_context_workbench_jobs__job_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resume Job Api Context Workbench Jobs  Job Id  Resume Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Job"
+      }
+    },
+    "/api/context-workbench/promotions": {
+      "post": {
+        "operationId": "promote_api_context_workbench_promotions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Promote Api Context Workbench Promotions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Promote"
+      }
+    },
+    "/api/context-workbench/promotions/preview": {
+      "post": {
+        "operationId": "preview_promotion_api_context_workbench_promotions_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview Promotion Api Context Workbench Promotions Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Promotion"
+      }
+    },
+    "/api/context-workbench/status": {
+      "get": {
+        "operationId": "status_api_context_workbench_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Status Api Context Workbench Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Status"
+      }
+    },
+    "/api/context/staging/callback": {
+      "post": {
+        "operationId": "complete_staging_context_api_context_staging_callback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StagingContextCallback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Complete Staging Context Api Context Staging Callback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Staging Context"
       }
     },
     "/api/exposures": {

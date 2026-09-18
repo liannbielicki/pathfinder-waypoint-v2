@@ -20,7 +20,7 @@ RECOMMENDATION_FIXTURE = {
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "waypoint_v4"
+    assert PROMPT_VERSION == "waypoint_v5"
 
 
 def test_fenced_context_wraps_untrusted_input() -> None:
@@ -217,3 +217,14 @@ def test_war_game_prompt_demands_bounded_branches() -> None:
     for branch in ("on_return", "on_click_no_use", "on_no_interaction", "on_negative"):
         assert branch in prompt
     assert "stop" in prompt
+
+
+def test_channel_directive_call_and_choice() -> None:
+    from waypoint.prompts import _CHANNEL_FRAMING, channel_directive
+
+    all_three = channel_directive(["sms", "email", "call"])
+    assert '"call"' in all_three and "agenda" in all_three  # call guidance present
+    assert "most likely to bring THIS Pro back" in all_three  # multi-channel: model chooses
+    assert "most likely" not in channel_directive(["sms"])  # single channel: nothing to choose
+    assert "call" in _CHANNEL_FRAMING
+    assert '"call"' not in channel_directive(["sms", "email"])  # not allowed unless in the run

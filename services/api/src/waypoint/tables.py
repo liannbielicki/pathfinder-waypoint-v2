@@ -39,6 +39,12 @@ class Base(DeclarativeBase):
 
 class RunRow(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        CheckConstraint(
+            "context_source IN ('standard', 'staging')",
+            name="ck_runs_context_source",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
     status: Mapped[str] = mapped_column(default="queued")
@@ -47,6 +53,7 @@ class RunRow(Base):
     audience_run: Mapped[str]
     channels: Mapped[list[str]]
     journey_window: Mapped[str] = mapped_column(default="churn_risk")
+    context_source: Mapped[str] = mapped_column(default="standard", server_default="standard")
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
@@ -191,6 +198,17 @@ class MeasurementRow(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class CallLogRow(Base):
+    """Operator to-do state for a winner recommended over the call channel.
+    Calls never go to LCM; Pathfinder operators work them from /calls."""
+
+    __tablename__ = "call_logs"
+    winner_id: Mapped[str] = mapped_column(ForeignKey("winners.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(default="todo")  # todo | done
+    note: Mapped[str] = mapped_column(default="")
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
 class HandoffRow(Base):
     __tablename__ = "handoffs"
     __table_args__ = (UniqueConstraint("idempotency_key", name="uq_handoffs_key"),)
@@ -305,6 +323,66 @@ class FleetControlRow(Base):
     day_cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
     day_cost_reserved: Mapped[Decimal] = mapped_column(default=Decimal(0))
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class WorkbenchJobRow(Base):
+    __tablename__ = "workbench_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'needs_review', 'completed', 'failed')",
+            name="ck_workbench_jobs_status",
+        ),
+        Index(
+            "uq_workbench_jobs_one_active",
+            text("(1)"),
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
+    status: Mapped[str] = mapped_column(default="queued")
+    request: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    state: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    result: Mapped[dict[str, Any] | None] = mapped_column(default=None)
+    error: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class ContextPromotionRow(Base):
+    __tablename__ = "context_promotions"
+    __table_args__ = (
+        Index(
+            "uq_context_promotions_one_active",
+            text("(1)"),
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    bundle: Mapped[dict[str, Any]]
+    active: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    activated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WorkbenchCatalogVersionRow(Base):
+    __tablename__ = "workbench_catalog_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('context', 'feature')",
+            name="ck_workbench_catalog_versions_kind",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    kind: Mapped[str]
+    name: Mapped[str]
+    entries: Mapped[list[Any]] = mapped_column(default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class UsageRow(Base):

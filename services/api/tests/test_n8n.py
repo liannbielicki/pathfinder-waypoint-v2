@@ -18,10 +18,19 @@ FIXTURE = Path(__file__).parent / "fixtures" / "n8n_context.json"
 N8N_URL = "https://n8n.example/webhook/context"
 
 
-def make_client(batch_size: int = 5) -> N8NContextClient:
+def make_client(
+    batch_size: int = 5,
+    promotion_store=None,
+    promotion_loader=None,
+) -> N8NContextClient:
     # backoff 0 so retry tests don't sleep for real
     return N8NContextClient(
-        url=N8N_URL, token="test-token", batch_size=batch_size, backoff_seconds=0.0
+        url=N8N_URL,
+        token="test-token",
+        batch_size=batch_size,
+        backoff_seconds=0.0,
+        promotion_store=promotion_store,
+        promotion_loader=promotion_loader,
     )
 
 
@@ -61,6 +70,166 @@ async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> N
     assert "leak@example.com" not in dumped
     assert "raw_due_usd" not in dumped
     assert batch.organizations[0].open_ar_band == "low"
+
+
+async def test_active_promotion_retains_only_promoted_canonical_values(
+    httpx_mock: HTTPXMock,
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "JOBS_CREATED_T28",
+            "canonical_key": "jobs_created_t28",
+            "related_features": ["jobs"],
+        }],
+        "feature_catalog": [{
+            "feature": "jobs",
+            "Product Area": "Jobs",
+            "Value Statement": "Manage job workflows.",
+        }],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    row = {
+        **_rows()[0],
+        "JOBS_CREATED_T28": 12,
+        "UNAPPROVED_VALUE": 99,
+        "customer_email": "leak@example.com",
+    }
+    httpx_mock.add_response(json=[row])
+
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {
+        "v": {"jobs_created_t28": 12},
+        "f": {"jobs_created_t28": ["jobs"]},
+        "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
+    }
+    assert "UNAPPROVED_VALUE" not in str(brief.curated_context)
+    assert "customer_email" not in str(brief.curated_context)
+    assert "curated_context" not in brief.model_dump()
+
+
+async def test_staging_can_load_the_active_promotion_from_postgres_boundary(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async def load_promotion():
+        return {
+            "rules": [{
+                "source_key": "JOBS_CREATED_T28",
+                "canonical_key": "jobs_created_t28",
+                "related_features": ["jobs"],
+            }],
+            "feature_catalog": [],
+        }
+
+    httpx_mock.add_response(json=[{**_rows()[0], "jobs_created_t28": 12}])
+
+    brief = (
+        await make_client(promotion_loader=load_promotion).fetch(["pro_1"])
+    ).organizations[0]
+
+    assert brief.curated_context == {
+        "v": {"jobs_created_t28": 12},
+        "f": {"jobs_created_t28": ["jobs"]},
+    }
+
+
+async def test_active_promotion_with_no_matching_values_fails_closed(
+    httpx_mock: HTTPXMock,
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "NEW_QUERY_FIELD",
+            "canonical_key": "new_query_field",
+            "related_features": [],
+        }],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    httpx_mock.add_response(json=[_rows()[0]])
+
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {}}
+
+
+async def test_active_promotion_drops_a_value_when_it_contains_pii(
+    httpx_mock: HTTPXMock,
+) -> None:
+    bundle = {
+        "rules": [{
+            "source_key": "CUSTOMER_SEGMENT",
+            "canonical_key": "customer_segment",
+            "related_features": [],
+        }],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    httpx_mock.add_response(json=[{
+        **_rows()[0],
+        "CUSTOMER_SEGMENT": "unexpected@example.invalid",
+    }])
+
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {}}
+    assert "unexpected@example.invalid" not in str(brief.curated_context)
+
+
+async def test_standard_client_never_applies_a_promotion(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json=[{**_rows()[0], "JOBS_CREATED_T28": 12}])
+    brief = (await make_client().fetch(["pro_1"])).organizations[0]
+    assert brief.curated_context is None
+
+
+async def test_staging_requires_canonical_aliases_instead_of_ambiguous_source_fallback(
+    httpx_mock: HTTPXMock,
+) -> None:
+    bundle = {
+        "rules": [
+            {"source_key": "count", "canonical_key": "workflow_entries_count"},
+            {"source_key": "count", "canonical_key": "workflow_progress_count"},
+        ],
+        "feature_catalog": [],
+    }
+
+    class ActivePromotion:
+        def read_active(self):
+            return bundle
+
+    httpx_mock.add_response(json=[{
+        **_rows()[0],
+        "count": 99,
+        "workflow_entries_count": 12,
+    }])
+
+    brief = (await make_client(promotion_store=ActivePromotion()).fetch(["pro_1"])).organizations[0]
+
+    assert brief.curated_context == {"v": {"workflow_entries_count": 12}}
+
+
+async def test_staging_fails_closed_when_promotion_artifact_is_missing(
+    httpx_mock: HTTPXMock,
+) -> None:
+    class MissingPromotion:
+        def read_active(self):
+            return None
+
+    httpx_mock.add_response(json=_rows())
+
+    with pytest.raises(ContextUnavailable, match="promotion"):
+        await make_client(promotion_store=MissingPromotion()).fetch(["pro_1"])
 
 
 async def test_audience_query_version_is_captured_not_stored_on_orgs(

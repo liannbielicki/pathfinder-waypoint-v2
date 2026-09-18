@@ -243,22 +243,28 @@ async def ready_rows(
     rows: list[dict[str, Any]] = []
     for winner in winners:
         candidate = candidates_by_id.get(winner.candidate_id) if winner.candidate_id else None
+        if candidate is not None and candidate.recommendation.get("channel") == "call":
+            continue  # worked by Pathfinder operators from /api/calls, never sent to LCM
         if winner.id in measured_winner_ids and candidate is not None:
-            rows.append(
-                {
-                    "pro_uuid": winner.pro_id,
-                    # Title AND the full customer-moment text: Allison's SMS
-                    # copywriter sees ONLY this field (her journeyStage). The
-                    # concept alone often omits the feature name (it is written
-                    # in plain language), the title alone collapses compound
-                    # themes to their headline, so send both.
-                    "theme": f"{candidate.recommendation['title']}: "
-                    f"{candidate.recommendation['pro_facing_concept']}",
-                    "theme_category": candidate.recommendation["mechanism"],
-                    "org_id": winner.evidence.get("org_id", ""),
-                    "row_id": winner.id,
-                }
-            )
+            row: dict[str, Any] = {
+                "pro_uuid": winner.pro_id,
+                # Title AND the full customer-moment text: Allison's SMS
+                # copywriter sees ONLY this field (her journeyStage). The
+                # concept alone often omits the feature name (it is written
+                # in plain language), the title alone collapses compound
+                # themes to their headline, so send both.
+                "theme": f"{candidate.recommendation['title']}: "
+                f"{candidate.recommendation['pro_facing_concept']}",
+                "theme_category": candidate.recommendation["mechanism"],
+                "org_id": winner.evidence.get("org_id", ""),
+                "row_id": winner.id,
+            }
+            # Per-row channel (LCM intake accepts sms|email since 2026-09-15). A
+            # row without one inherits LCM's batch default, which is sms — so an
+            # email winner would be texted. Omit rather than send anything else.
+            if candidate.recommendation.get("channel") in ("sms", "email"):
+                row["channel"] = candidate.recommendation["channel"]
+            rows.append(row)
     return rows
 
 

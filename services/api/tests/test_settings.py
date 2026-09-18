@@ -32,10 +32,13 @@ def test_missing_required_runtime_values_fail_startup() -> None:
 
 def test_all_runtime_names_are_short_and_descriptive() -> None:
     names = set(Settings.model_fields)
-    # AMPLITUDE_RETURN_EVENT (22 chars) is the longest name today.
-    assert all(len(name) < 23 for name in names)
+    # Explicit integration names are worth exceeding the general 24-character cap.
+    long_names = {"N8N_CONTEXT_URL_WORKBENCH", "CONTEXT_LAYER_BASE_URL", "CONTEXT_LAYER_API_KEY"}
+    assert all(len(name) <= 24 or name in long_names for name in names)
     assert names == {
-        "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_TOKEN",
+        "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_CONTEXT_URL_STAGING",
+        "N8N_CONTEXT_URL_WORKBENCH", "CONTEXT_LAYER_BASE_URL", "CONTEXT_LAYER_API_KEY",
+        "N8N_TOKEN",
         "N8N_TIMEOUT_SECONDS", "N8N_MAX_CONCURRENT",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",
         "BYPASS_TOKEN",
@@ -47,6 +50,16 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
         "ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY",
         "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS",
     }
+
+
+def test_staging_context_url_is_optional() -> None:
+    assert Settings.model_fields["N8N_CONTEXT_URL_STAGING"].default is None
+
+
+def test_workbench_runtime_context_values_are_optional() -> None:
+    assert Settings.model_fields["N8N_CONTEXT_URL_WORKBENCH"].default is None
+    assert Settings.model_fields["CONTEXT_LAYER_BASE_URL"].default is None
+    assert Settings.model_fields["CONTEXT_LAYER_API_KEY"].default is None
 
 
 def test_max_llm_in_flight_is_optional_and_defaults_to_four() -> None:
@@ -66,10 +79,16 @@ def test_empty_poller_keys_mean_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ITERABLE_API_KEY", "")
     monkeypatch.setenv("AMPLITUDE_API_KEY", "")
     monkeypatch.setenv("AMPLITUDE_SECRET_KEY", "")
+    monkeypatch.setenv("N8N_CONTEXT_URL_WORKBENCH", "")
+    monkeypatch.setenv("CONTEXT_LAYER_BASE_URL", "")
+    monkeypatch.setenv("CONTEXT_LAYER_API_KEY", "")
     settings = Settings.load()
     assert settings.ITERABLE_API_KEY is None
     assert settings.AMPLITUDE_API_KEY is None
     assert settings.AMPLITUDE_SECRET_KEY is None
+    assert settings.N8N_CONTEXT_URL_WORKBENCH is None
+    assert settings.CONTEXT_LAYER_BASE_URL is None
+    assert settings.CONTEXT_LAYER_API_KEY is None
 
 
 def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,3 +97,11 @@ def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setenv(key, val)
     monkeypatch.delenv("CTA_FEASIBILITY_HINTS", raising=False)
     assert Settings.load().CTA_FEASIBILITY_HINTS is False
+
+
+def test_workbench_only_dotenv_keys_do_not_break_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, val in _MINIMAL_ENV.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_URL", "https://workbench.example.com")
+    monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_TOKEN", "workbench-token")
+    assert Settings.load().WORKER_COUNT == 1

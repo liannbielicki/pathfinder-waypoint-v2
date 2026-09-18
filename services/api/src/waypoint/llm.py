@@ -183,7 +183,7 @@ class LLMGateway:
         run_id: str,
         stage: str,
         system: str | None = None,
-        max_tokens: int = 1200,
+        max_tokens: int = 2400,
         temperature: float | None = None,
     ) -> LLMResult:
         model = self.pricing.model_for(tier)

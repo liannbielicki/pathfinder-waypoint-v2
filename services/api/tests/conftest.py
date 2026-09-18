@@ -19,6 +19,9 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 _TABLES = (
+    "workbench_catalog_versions",
+    "context_promotions",
+    "workbench_jobs",
     "measurements",
     "handoffs",
     "winners",
@@ -259,12 +262,15 @@ class FakeLLM:
 class FakeContext:
     def __init__(self) -> None:
         self.unavailable = False
+        self.fetches: list[list[str]] = []
         self.audience_query_version: str | None = None
+        self.starts: list[tuple[str, str, str]] = []
         self.batch = OrgContextBatch.model_validate_json(
             (FIXTURES / "n8n_context.json").read_text()
         )
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+        self.fetches.append(pro_ids)
         if self.unavailable:
             raise ContextUnavailable("injected outage")
         orgs = [o for o in self.batch.organizations if o.pro_id in pro_ids]
@@ -273,6 +279,13 @@ class FakeContext:
             organizations=orgs,
             audience_query_version=self.audience_query_version,
         )
+
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None:
+        self.starts.append((organization_id, request_id, promotion_id))
+        if self.unavailable:
+            raise ContextUnavailable("injected outage")
 
 
 class CrashableStore(PostgresStore):
@@ -372,7 +385,11 @@ TEST_SETTINGS = Settings(
     DATABASE_URL="postgresql+asyncpg://localhost:5432/waypoint_test",
     LLM_API_KEY="test",
     N8N_CONTEXT_URL="https://n8n.example/webhook/context",
+    N8N_CONTEXT_URL_STAGING="https://n8n.example/webhook/context-staging",
+    N8N_CONTEXT_URL_WORKBENCH="https://n8n.example/webhook/context-workbench",
     N8N_TOKEN="test",
+    CONTEXT_LAYER_BASE_URL="https://context.example",
+    CONTEXT_LAYER_API_KEY="context-test",
     PERSONA_URL="https://personas.example/personas",
     PERSONA_TOKEN="test",
     HANDOFF_URL="https://lcm.example/handoff",

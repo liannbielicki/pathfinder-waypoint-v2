@@ -15,9 +15,10 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any, Protocol
@@ -30,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.catalog import feature_context
+from waypoint.catalog import waypoint_context
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
@@ -52,7 +53,7 @@ from waypoint.models import (
     Recommendation,
     validate_ranking,
 )
-from waypoint.n8n import ContextUnavailable, OrgBrief
+from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgBrief, OrgContextBatch
 from waypoint.personas import (
     InsufficientPanelFit,
     PanelSelection,
@@ -124,6 +125,12 @@ class ContextLike(Protocol):
     async def fetch(self, pro_ids: list[str]) -> Any: ...
 
 
+class StagingContextLike(Protocol):
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None: ...
+
+
 class QueueOps:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -191,6 +198,22 @@ class PostgresStore:
         await self.session.commit()
         return True
 
+    async def wait_for_staging_context(
+        self, job_id: str, promotion_id: str, wait_seconds: int
+    ) -> None:
+        job = await self.session.get(JobRow, job_id)
+        assert job is not None
+        checkpoint = dict(job.checkpoint)
+        checkpoint["staging_request"] = {"promotion_id": promotion_id}
+        job.checkpoint = checkpoint
+        # Dispatching n8n successfully is not a failed pipeline attempt. Refund
+        # this claim so the callback resume keeps the normal retry budget.
+        job.attempts = max(job.attempts - 1, 0)
+        job.status = "waiting"
+        job.worker_id = None
+        job.lease_until = datetime.now(UTC) + timedelta(seconds=wait_seconds)
+        await self.session.commit()
+
     async def rounds_for(self, run_id: str, pro_id: str) -> list[EvolveRoundRow]:
         return list(
             (
@@ -226,6 +249,7 @@ class PipelineDeps:
     get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
     create_plan: Any  # (mechanism: str, catalog) -> MeasurementPlan (deterministic)
+    staging_context: StagingContextLike | None = None
     metric_catalog: dict[str, Any] = field(default_factory=dict)
     # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
     # keeps the idea context to description+state; on adds works_on hints.
@@ -944,13 +968,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         if lstate.best_candidate_id is not None:
             best = await session.get(CandidateRow, lstate.best_candidate_id)
             best_json = json.dumps(best.recommendation) if best is not None else None
-        org_context = brief.model_dump_json()
-        # Resolve the features this brief references to their catalog meaning,
-        # so generation/critic/ranker (all reading this one string) know what
-        # each feature is and whether this Pro uses it. Additive + deterministic.
-        block = feature_context(brief, feasibility=deps.cta_feasibility_hints)
-        if block:
-            org_context = f"{org_context}\n{block}"
+        org_context = waypoint_context(
+            brief, feasibility=deps.cta_feasibility_hints
+        )
         build_prompt = _prompt_builder(
             org_context=org_context,
             best_json=best_json,
@@ -1480,7 +1500,9 @@ async def _attach_follow_up(
             base_key=f"{state.run.id}:{state.pro_id}:wargame",
             tier="fast",
             prompt=war_game_prompt(
-                state.brief.model_dump_json() if state.brief else "{}",
+                waypoint_context(
+                    state.brief, feasibility=deps.cta_feasibility_hints
+                ) if state.brief else "{}",
                 json.dumps(candidate.recommendation),
                 gated_channels,
             ),
@@ -1649,15 +1671,47 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
     run_id = run.id  # plain strings survive session rollbacks; ORM instances expire
     state = PipelineState(job=job, run=run, pro_id=job.pro_id)
 
-    resumed = any(stage in job.checkpoint for stage in STAGES)
+    resumed = any(stage in job.checkpoint for stage in (*STAGES, "staging_context"))
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
-    # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
+    # Raw source rows are ephemeral. Staging resumes from only the compact,
+    # approved brief written by the authenticated callback.
     try:
-        batch = await deps.context.fetch([state.pro_id])
+        if run.context_source == "staging":
+            if deps.staging_context is None:
+                raise ContextUnavailable("staging context source is not configured")
+            cached = job.checkpoint.get("staging_context")
+            if isinstance(cached, Mapping):
+                brief_payload = cached.get("brief")
+                if not isinstance(brief_payload, Mapping):
+                    raise ContextUnavailable("staging context checkpoint is invalid")
+                brief = OrgBrief.model_validate(dict(brief_payload))
+                batch = OrgContextBatch(
+                    contract_version=CONTRACT_VERSION,
+                    organizations=[brief],
+                    audience_query_version=run.audience_query,
+                )
+            else:
+                prefix = "workbench:"
+                promotion_id = (
+                    run.audience_query[len(prefix):]
+                    if run.audience_query.startswith(prefix)
+                    else ""
+                )
+                if not promotion_id:
+                    raise ContextUnavailable("staging context promotion artifact has no id")
+                await deps.staging_context.start(state.pro_id, job_id, promotion_id)
+                await store.wait_for_staging_context(
+                    job_id, promotion_id, deps.lease_seconds
+                )
+                await store.set_run_status(run_id, "waiting", "staging_context_pending")
+                return
+        else:
+            batch = await deps.context.fetch([state.pro_id])
     except ContextUnavailable as error:
+        failure_reason = f"context_unavailable: {run.context_source}: {error}"
         if await store.requeue_job(job_id):
-            await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
+            await store.set_run_status(run_id, "waiting", failure_reason)
         else:
             # Attempts exhausted for THIS Pro only: its job fails (requeue_job
             # already marked it) and finalize_run aggregates to failed/degraded
@@ -1665,7 +1719,7 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             # never take the whole run down.
             await queue.checkpoint_job(
                 store.session, job_id, "failure",
-                {"reason": f"context_unavailable: {error}"},
+                {"reason": failure_reason},
             )
             await finalize_run(store.session, run_id)
         return

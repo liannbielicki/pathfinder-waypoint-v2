@@ -6,7 +6,9 @@ the grounding hard rule, seeds-not-final-copy, and the internal-jargon ban.
 Org context is untrusted input and is always fenced.
 """
 
-PROMPT_VERSION = "waypoint_v4"  # v4: consent-ask ideas forbidden and critic-blocked
+from waypoint.models import CHANNELS
+
+PROMPT_VERSION = "waypoint_v5"  # v5: model picks sms/email/call per idea
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -32,9 +34,9 @@ def channel_directive(channels: list[str]) -> str:
     SMS carries an extra constraint so ideas are shaped as one realistic
     single-touch event fitting a ~160-character text — never a sequence or
     long-form mechanics that only work in email."""
-    allowed = [c for c in channels if c in ("sms", "email")]
+    allowed = [c for c in channels if c in CHANNELS]
     if not allowed:  # defensive: never leave the model unconstrained
-        allowed = ["sms", "email"]
+        allowed = list(CHANNELS)
     picks = " or ".join(f'"{c}"' for c in allowed)
     lines = [
         (
@@ -42,6 +44,20 @@ def channel_directive(channels: list[str]) -> str:
             '(use "none" only for a monitor-only hold); never propose a channel outside that set.'
         )
     ]
+    if len(allowed) > 1:
+        lines.append(
+            "Pick the channel most likely to bring THIS Pro back, per idea: weigh the "
+            "observed-outcome evidence by channel above and the Pro's engagement signals "
+            "(email_engagement_state, outreach_count_28d_band, consent states). Text for "
+            "short, time-sensitive asks; email when the idea needs room to explain."
+        )
+    if "call" in allowed:
+        lines.append(
+            "A call is a real person from Housecall Pro phoning the Pro. It costs staff "
+            "time, so recommend it only when a conversation is the mechanism (a setup "
+            "walkthrough, a billing or churn-risk save) and a text or email would likely "
+            "be ignored. Give the caller an agenda, not a script."
+        )
     if allowed == ["sms"]:
         lines.append(
             "This will be delivered as ONE short SMS: shape every idea as a "
@@ -106,6 +122,8 @@ REACTION_SYSTEM = (
 _CHANNEL_FRAMING = {
     "sms": "an SMS text message on your phone, read in a spare moment between jobs",
     "email": "an email in your inbox, skimmed alongside the day's other mail",
+    "call": "a phone call from a Housecall Pro team member, picked up (or sent to "
+    "voicemail) in the middle of your workday",
 }
 
 
@@ -255,8 +273,9 @@ metric; higher is better):
 {history_json}
 
 Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
-manager_rationale, channel, risk. Return a JSON array of exactly {count}
-{ideas_word} and nothing else.
+manager_rationale, channel, risk. Keep each string concise and actions to 1-3
+short strings. Begin the response with `[` and return a JSON array of exactly
+{count} {ideas_word}; do not add markdown, commentary, or code fences.
 
 This Pro's context:
 {fenced_context(org_context)}
@@ -313,7 +332,7 @@ WAR_GAME_SYSTEM = (
 
 
 def war_game_prompt(org_context: str, winner_json: str, channels: list[str]) -> str:
-    picks = " or ".join(f'"{c}"' for c in channels) or '"sms" or "email"'
+    picks = " or ".join(f'"{c}"' for c in channels) or " or ".join(f'"{c}"' for c in CHANNELS)
     return f"""A touch was selected to be sent to ONE specific Pro. Anticipate what happens
 next and plan ONE conditional follow-up per outcome — a small war game, not a
 campaign. Each branch is either "stop" or ONE concrete, sendable next touch

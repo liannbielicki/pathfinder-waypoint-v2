@@ -1,0 +1,422 @@
+{
+  "name": "Waypoint Variable Audit Context - Snowflake v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "waypoint/context-v1",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "variable-audit-webhook",
+      "name": "Variable audit request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "S1K5XexjImlWuwzp",
+          "name": "Header Auth account 3"
+        }
+      },
+      "notes": "POST { organization_id: 889901 }. Raw standardized Snowflake results pass through; the app owns PII exclusion."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_1_org_snapshot' as query_name,\n       'org_snapshot' as variable_name,\n       object_construct_keep_null(*) as value,\n       object_construct('source_table','marts.customer_base.agg_current_customer') as metadata\nfrom marts.customer_base.agg_current_customer\nwhere organization_id = {{$json.body.organization_id}}\nunion all\nselect 'part_1_snapshot_columns', column_name,\n       object_construct('data_type', data_type, 'ordinal_position', ordinal_position, 'comment', comment),\n       object_construct('source_table','marts.customer_base.agg_current_customer')\nfrom marts.information_schema.columns\nwhere table_schema = 'CUSTOMER_BASE' and table_name = 'AGG_CURRENT_CUSTOMER'\nunion all\nselect 'part_1_snapshot_table_inventory', table_name,\n       object_construct('table_schema', table_schema),\n       object_construct('source_database','MARTS')\nfrom marts.information_schema.tables\nwhere table_schema = 'CUSTOMER_BASE' and table_name ilike '%CURRENT_CUSTOMER%';"
+      },
+      "id": "audit-sql-1",
+      "name": "Part 1 - Org snapshot and metadata",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        360,
+        100
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata. The snapshot is one raw org_snapshot value because Snowflake does not permit SELECT * inside the nested flatten form."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_2_pro_uuid_column_inventory' as query_name, table_schema || '.' || table_name || '.' || column_name as variable_name, column_name as value, object_construct('table_schema', table_schema, 'table_name', table_name) as metadata\nfrom marts.information_schema.columns\nwhere lower(column_name) like '%pro_uuid%'\norder by table_schema, table_name;"
+      },
+      "id": "audit-sql-2",
+      "name": "Part 2 - Pro UUID column inventory",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        660,
+        100
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_2_communication_coverage' as query_name, 'DETAIL_CALLS' as variable_name, count(*) as value, object_construct('min_date', min(call_date), 'max_date', max(call_date), 'source_table','marts.communication.detail_calls') as metadata from marts.communication.detail_calls where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_CHAT_CONVERSATIONS', count(*), object_construct('min_date', min(conversation_created_date), 'max_date', max(conversation_created_date), 'source_table','marts.communication.detail_chat_conversations') from marts.communication.detail_chat_conversations where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_COMMUNICATION_LIFECYCLE', count(*), object_construct('min_date', min(comm_date), 'max_date', max(comm_date), 'source_table','marts.communication.detail_communication_lifecycle') from marts.communication.detail_communication_lifecycle where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_DEMO_TRANSACTION', count(*), object_construct('min_date', min(demo_action_date), 'max_date', max(demo_action_date), 'source_table','marts.communication.detail_demo_transaction') from marts.communication.detail_demo_transaction where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_EMAILS', count(*), object_construct('min_date', min(message_date), 'max_date', max(message_date), 'source_table','marts.communication.detail_emails') from marts.communication.detail_emails where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_IN_APP_MESSAGES', count(*), object_construct('min_date', min(message_date), 'max_date', max(message_date), 'source_table','marts.communication.detail_in_app_messages') from marts.communication.detail_in_app_messages where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_PUSH_NOTIFICATIONS', count(*), object_construct('min_date', min(message_date), 'max_date', max(message_date), 'source_table','marts.communication.detail_push_notifications') from marts.communication.detail_push_notifications where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_SMS', count(*), object_construct('min_date', min(message_date), 'max_date', max(message_date), 'source_table','marts.communication.detail_sms') from marts.communication.detail_sms where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_communication_coverage', 'DETAIL_ZOOM', count(*), object_construct('min_date', min(call_date), 'max_date', max(call_date), 'source_table','marts.communication.detail_zoom') from marts.communication.detail_zoom where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}});"
+      },
+      "id": "audit-sql-3",
+      "name": "Part 2 - Communication coverage",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        960,
+        100
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_2_latest_call' as query_name, f.key::string as variable_name, f.value as value, object_construct('source_table','marts.communication.detail_calls') as metadata from (select object_construct_keep_null(*) as row_data from marts.communication.detail_calls where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}}) qualify row_number() over (order by call_start_dt desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'part_2_email_rollup', 'total_emails', count(*), object_construct('emails_sent',sum(emails_sent_flag),'emails_opened',sum(emails_opened_flag),'emails_clicked',sum(emails_clicked_flag),'emails_bounced',sum(emails_bounced_flag),'emails_unsubscribed',sum(emails_unsubscribed_flag)) from marts.communication.detail_emails where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_nps', 'survey_count', count(*), object_construct('last_response',max(response_dt),'last_score',max_by(score,response_dt)) from marts.customer_success.detail_nps_surveys where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_workflow_entries', 'count', count(*), object_construct('source_table','marts.communication.detail_workflow_entries') from marts.communication.detail_workflow_entries where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}})\nunion all select 'part_2_workflow_progress', 'count', count(*), object_construct('source_table','marts.communication.detail_workflow_progress') from marts.communication.detail_workflow_progress where pro_uuid in (select pro_uuid from marts.sales.int__sf_account_pro_org_bridge where organization_id = {{$json.body.organization_id}});"
+      },
+      "id": "audit-sql-4",
+      "name": "Part 2 - Detail rollups",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        360,
+        280
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_3_production_column_inventory' as query_name, table_schema || '.' || table_name || '.' || column_name as variable_name, column_name as value, object_construct('table_schema',table_schema,'table_name',table_name) as metadata\nfrom production.information_schema.columns\nwhere lower(column_name) like '%organization_id%' or lower(column_name) = 'pro_uuid'\norder by table_schema, table_name;"
+      },
+      "id": "audit-sql-5",
+      "name": "Part 3 - Production column inventory",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        660,
+        280
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'part_3_cancellation_risk' as query_name, 'row_count' as variable_name, count(*) as value, object_construct('source_table','production.churn.cancellation_risk') as metadata from production.churn.cancellation_risk where organization_id = {{$json.body.organization_id}}\nunion all select 'part_3_health_index', f.key::string, f.value, object_construct('source_table','production.customer_success.health_index_yesterday') from (select object_construct_keep_null(*) as row_data from production.customer_success.health_index_yesterday where organization_id = {{$json.body.organization_id}}) r, lateral flatten(input => r.row_data) f\nunion all select 'part_3_next_bill_churn', f.key::string, f.value, object_construct('source_table','production.churn.next_bill_churn_by_orgday') from (select object_construct_keep_null(*) as row_data from production.churn.next_bill_churn_by_orgday where organization_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'part_3_plan_changes', 'plan_changes', array_agg(object_construct_keep_null(*)), object_construct('source_table','production.customer_success.plan_changes') from production.customer_success.plan_changes where organization_id = {{$json.body.organization_id}};"
+      },
+      "id": "audit-sql-6",
+      "name": "Part 3 - Churn health and plan results",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        960,
+        280
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'addendum_production_table_inventory' as query_name, table_schema || '.' || table_name as variable_name, table_name as value, object_construct('table_schema',table_schema,'comment',comment) as metadata\nfrom production.information_schema.tables\nwhere table_name ilike any ('%CHURN%','%HEALTH%','%USAGE%','%RISK%','%LTV%','%ADOPTION%','%RETENTION%','%FEATURE%')\norder by table_schema, table_name;"
+      },
+      "id": "audit-sql-7",
+      "name": "Addendum - Production table inventory",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        360,
+        460
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'addendum_payments_churn_score' as query_name, f.key::string as variable_name, f.value as value, object_construct('source_table','production.payments_churn.payments_churn_score') as metadata from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'addendum_payments_churn_score_new', f.key::string, f.value, object_construct('source_table','production.payments_churn.payments_churn_score_new') from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score_new where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f;"
+      },
+      "id": "audit-sql-8",
+      "name": "Addendum - Payment churn scores",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        660,
+        460
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select 'addendum_ltv_feature_adoption' as query_name,\n       f.key::string as variable_name,\n       f.value as value,\n       object_construct('source_table','production.ltv.ltv_feature_adoption_scores') as metadata\nfrom (\n  select object_construct_keep_null(\n    'organization_id', organization_id,\n    'bizdate', bizdate,\n    'plan_tier', plan_tier,\n    'segment_actual', segment_actual,\n    'months_enrolled', months_enrolled,\n    'total_mrr', total_mrr,\n    'features', features\n  ) as row_data\n  from production.ltv.ltv_feature_adoption_scores\n  where organization_id = {{$json.body.organization_id}}\n  qualify row_number() over (order by bizdate desc) = 1\n) r,\nlateral flatten(input => r.row_data) f;"
+      },
+      "id": "audit-sql-9",
+      "name": "Addendum - LTV feature adoption",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        960,
+        460
+      ],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      },
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 9,
+        "options": {}
+      },
+      "id": "append-audit-results",
+      "name": "Append audit results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1320,
+        300
+      ],
+      "notes": "Append standardized variable/value rows from all audit query groups; 9 inputs."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($input.all().map(item => item.json)) }}",
+        "options": {}
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Variable audit request": {
+      "main": [
+        [
+          {
+            "node": "Part 1 - Org snapshot and metadata",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Part 2 - Pro UUID column inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Part 2 - Communication coverage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Part 2 - Detail rollups",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Part 3 - Production column inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Part 3 - Churn health and plan results",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Addendum - Production table inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Addendum - Payment churn scores",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Addendum - LTV feature adoption",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Part 1 - Org snapshot and metadata": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Part 2 - Pro UUID column inventory": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Part 2 - Communication coverage": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Part 2 - Detail rollups": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Part 3 - Production column inventory": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Part 3 - Churn health and plan results": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "Addendum - Production table inventory": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 6
+          }
+        ]
+      ]
+    },
+    "Addendum - Payment churn scores": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 7
+          }
+        ]
+      ]
+    },
+    "Addendum - LTV feature adoption": {
+      "main": [
+        [
+          {
+            "node": "Append audit results",
+            "type": "main",
+            "index": 8
+          }
+        ]
+      ]
+    },
+    "Append audit results": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "versionId": "waypoint-variable-audit-context-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

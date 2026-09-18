@@ -29,13 +29,16 @@ from waypoint.pipeline import (
     PipelineDeps,
     PostgresStore,
     QueueOps,
+    StagingContextLike,
     finalize_stalled_runs,
     run_job,
 )
 from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import Calibration, load_calibration
 from waypoint.settings import Settings
+from waypoint.staging_context import WorkbenchStagingContextClient
 from waypoint.tables import FleetControlRow
+from waypoint.workbench_jobs import PostgresWorkbenchStore
 
 log = logging.getLogger("waypoint.worker")
 
@@ -218,6 +221,7 @@ async def _worker_loop(
     slots: FleetSlots,
     llm_stacks: LLMStacks,
     context: N8NContextClient,
+    staging_context: StagingContextLike | None,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
     persona_source: Callable[[str], Awaitable[list[Persona]]],
@@ -269,6 +273,7 @@ async def _worker_loop(
                         reconcile=partial(queue.reconcile_cost, usage_session),
                     ),
                     context=context,
+                    staging_context=staging_context,
                     queue=QueueOps(session),
                     get_personas=persona_source,
                     calibration=calibration,
@@ -348,6 +353,25 @@ async def main() -> None:
         timeout=settings.N8N_TIMEOUT_SECONDS,
         max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
+    promotion_store = PostgresWorkbenchStore(factory)
+
+    staging_context = (
+        WorkbenchStagingContextClient(
+            workbench_url=str(settings.N8N_CONTEXT_URL_WORKBENCH),
+            n8n_token=settings.N8N_TOKEN.get_secret_value(),
+            context_layer_url=str(settings.CONTEXT_LAYER_BASE_URL),
+            context_layer_key=settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
+            max_concurrent=settings.N8N_MAX_CONCURRENT,
+            n8n_timeout=settings.N8N_TIMEOUT_SECONDS,
+            promotion_loader=promotion_store.read_active_promotion,
+        )
+        if (
+            settings.N8N_CONTEXT_URL_WORKBENCH is not None
+            and settings.CONTEXT_LAYER_BASE_URL is not None
+            and settings.CONTEXT_LAYER_API_KEY is not None
+        )
+        else None
+    )
 
     # One long-lived LCM transport shared by every loop (like the n8n client):
     # no per-Pro TLS handshake on the trickle path.
@@ -371,6 +395,7 @@ async def main() -> None:
                 slots=FleetSlots(slots_connection, max_slots=settings.MAX_LLM_IN_FLIGHT),
                 llm_stacks=llm_stacks,
                 context=context,
+                staging_context=staging_context,
                 anthropic=anthropic,
                 pricing=pricing,
                 persona_source=persona_source,

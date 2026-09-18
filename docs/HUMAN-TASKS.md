@@ -22,7 +22,15 @@ A human must set these values (never their values in git). All names match
 
 - `DATABASE_URL` — Supabase/Postgres connection string (asyncpg form)
 - `LLM_API_KEY` — Anthropic API key
-- `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing n8n context webhook
+- `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing Standard n8n context webhook;
+  Standard remains the default and is not changed by the Workbench
+- `N8N_CONTEXT_URL_WORKBENCH` — unchanged full experimental webhook used by
+  Workbench authoring and Staging runtime; it shares `N8N_TOKEN` and never
+  replaces Standard
+- `CONTEXT_LAYER_BASE_URL`, `CONTEXT_LAYER_API_KEY` — direct Context Layer API
+  used by Workbench authoring and Staging runtime
+- `N8N_CONTEXT_URL_STAGING` — deprecated compatibility value; current runtime
+  routing and readiness checks do not use it
 - `PERSONA_URL`, `PERSONA_TOKEN` — persona snapshot service
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
 - `BYPASS_TOKEN` — Vercel Deployment Protection bypass secret for the LCM
@@ -57,6 +65,13 @@ Docker was not installed on the build machine, so
   `org_size_bucket`, `trade_bucket`, `open_ar_band`) the rebuild added for
   persona matching. Proof: `cd services/api && N8N_CONTEXT_URL=… N8N_TOKEN=…
   LIVE_TEST_PRO=… uv run pytest tests/test_n8n_live.py -q -m live`.
+- **Staging context sources**: Staging sends each numeric organization ID to
+  the unchanged `N8N_CONTEXT_URL_WORKBENCH` webhook and directly to the
+  Context Layer API. After both return, Waypoint applies the active Postgres
+  promotion as an exact allowlist, canonicalizes retained values, and discards
+  every unapproved value before prompt construction. It does not use
+  `N8N_CONTEXT_URL_STAGING`, fall back to Standard, or load a packaged
+  promotion in hosted runtime.
 - **Persona service**: confirm it serves
   `{"snapshot_version": …, "personas": [{persona_id, family, label, features}]}`
   as consumed by `waypoint.worker.load_personas` and shaped like
@@ -91,12 +106,17 @@ Docker was not installed on the build machine, so
    holds ~3 Postgres connections — size it to `MAX_IN_FLIGHT_LLM_CALLS` and
    mind `max_connections`.
 2. Run migrations once: `uv run alembic upgrade head` with the production
-   `DATABASE_URL`.
+   `DATABASE_URL`. Migration `0014` adds the immutable per-run
+   `standard`/`staging` selection; migration `0015` adds durable sanitized
+   Workbench jobs and immutable active context promotions.
 3. Vercel: deploy `apps/web` with `API_BASE_URL` pointing at Railway.
 4. Health checks:
    - `curl https://<railway-domain>/health` → `{"status": "ok"}`
    - open the Vercel URL, sign in with `APP_PASSWORD`, confirm `/api/*`
      reaches Railway through the rewrite.
+   - open `/context-workbench`, sign in with the same password, and confirm
+     the Environment card reports the Railway service environment. Waypoint
+     runs and Workbench jobs are mutually exclusive while either is active.
 5. Verify startup fails loudly with a missing variable (delete one, redeploy,
    confirm the crash names it) and that no secret appears in logs, health
    responses, or the browser bundle.
