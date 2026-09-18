@@ -174,6 +174,60 @@ def _compile_values(
     )
 
 
+def compile_staging_brief(
+    organization_id: str,
+    snowflake_result: Any,
+    context_layer_result: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+) -> OrgBrief:
+    """Deterministically reduce raw sources to the promoted runtime contract."""
+    try:
+        rows = _snowflake_rows(snowflake_result)
+    except (TypeError, ValueError) as error:
+        raise ContextUnavailable(
+            f"staging snowflake contract violation ({type(error).__name__})"
+        ) from error
+
+    firmographics = _authoritative_firmographics(context_layer_result)
+    runtime_bundle = _without_authoritative_rules(bundle)
+    values, matched_rules, counts = _compile_values(
+        rows, context_layer_values(context_layer_result), runtime_bundle
+    )
+    if not values:
+        raise ContextUnavailable("staging context matched zero approved variables")
+    values.update(firmographics)
+
+    log.info(
+        "staging context compiled promotion=%s received=%d matched=%d "
+        "discarded=%d missing=%d ambiguous=%d conflicts=%d",
+        str(bundle.get("id") or "unknown"),
+        counts["received"],
+        counts["matched"],
+        counts["discarded"],
+        counts["missing"],
+        counts["ambiguous"],
+        counts["conflicts"],
+    )
+    typed = {
+        key: value
+        for key, value in values.items()
+        if key in OrgBrief.model_fields
+        and key not in {"org_uuid", "curated_context"}
+        and isinstance(value, str)
+    }
+    matched_bundle = {**runtime_bundle, "rules": matched_rules}
+    curated_context = compile_promoted_context(values, matched_bundle)
+    compiled_values = curated_context.get("v")
+    if not isinstance(compiled_values, dict):
+        compiled_values = {}
+    curated_context["v"] = dict(sorted({**compiled_values, **firmographics}.items()))
+    return OrgBrief(
+        org_uuid=organization_id,
+        **typed,
+        curated_context=curated_context,
+    )
+
+
 class WorkbenchStagingContextClient:
     def __init__(
         self,
@@ -196,6 +250,24 @@ class WorkbenchStagingContextClient:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self.snowflake = snowflake or WorkbenchN8NClient(timeout=n8n_timeout)
         self.context_layer = context_layer or ContextLayerClient()
+
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None:
+        if not organization_id.isdigit():
+            raise ContextUnavailable("staging context requires a numeric organization ID")
+        if not promotion_id:
+            raise ContextUnavailable("staging context promotion artifact has no id")
+        try:
+            await self.snowflake.start(
+                organization_id,
+                self.workbench_url,
+                self.n8n_token,
+                request_id=request_id,
+                promotion_id=promotion_id,
+            )
+        except BaseException as error:
+            raise _source_failure("snowflake", error) from error
 
     async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:
         if any(not identifier.isdigit() for identifier in organization_ids):
@@ -233,50 +305,11 @@ class WorkbenchStagingContextClient:
         if isinstance(context_layer_result, BaseException):
             raise _source_failure("context_layer", context_layer_result) from context_layer_result
 
-        try:
-            rows = _snowflake_rows(snowflake_result)
-        except (TypeError, ValueError) as error:
-            raise ContextUnavailable(
-                f"staging snowflake contract violation ({type(error).__name__})"
-            ) from error
         if not isinstance(context_layer_result, Mapping):
             raise ContextUnavailable("staging context_layer contract violation (TypeError)")
-
-        firmographics = _authoritative_firmographics(context_layer_result)
-        runtime_bundle = _without_authoritative_rules(bundle)
-        values, matched_rules, counts = _compile_values(
-            rows, context_layer_values(context_layer_result), runtime_bundle
-        )
-        if not values:
-            raise ContextUnavailable("staging context matched zero approved variables")
-        values.update(firmographics)
-
-        log.info(
-            "staging context compiled promotion=%s received=%d matched=%d "
-            "discarded=%d missing=%d ambiguous=%d conflicts=%d",
-            str(bundle.get("id") or "unknown"),
-            counts["received"],
-            counts["matched"],
-            counts["discarded"],
-            counts["missing"],
-            counts["ambiguous"],
-            counts["conflicts"],
-        )
-        typed = {
-            key: value
-            for key, value in values.items()
-            if key in OrgBrief.model_fields
-            and key not in {"org_uuid", "curated_context"}
-            and isinstance(value, str)
-        }
-        matched_bundle = {**runtime_bundle, "rules": matched_rules}
-        curated_context = compile_promoted_context(values, matched_bundle)
-        compiled_values = curated_context.get("v")
-        if not isinstance(compiled_values, dict):
-            compiled_values = {}
-        curated_context["v"] = dict(sorted({**compiled_values, **firmographics}.items()))
-        return OrgBrief(
-            org_uuid=organization_id,
-            **typed,
-            curated_context=curated_context,
+        return compile_staging_brief(
+            organization_id,
+            snowflake_result,
+            context_layer_result,
+            bundle,
         )

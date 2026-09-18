@@ -26,10 +26,10 @@ from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
 from waypoint.pipeline import (
-    ContextLike,
     PipelineDeps,
     PostgresStore,
     QueueOps,
+    StagingContextLike,
     finalize_stalled_runs,
     run_job,
 )
@@ -221,7 +221,7 @@ async def _worker_loop(
     slots: FleetSlots,
     llm_stacks: LLMStacks,
     context: N8NContextClient,
-    staging_context: ContextLike | None,
+    staging_context: StagingContextLike | None,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
     persona_source: Callable[[str], Awaitable[list[Persona]]],

@@ -264,6 +264,7 @@ class FakeContext:
         self.unavailable = False
         self.fetches: list[list[str]] = []
         self.audience_query_version: str | None = None
+        self.starts: list[tuple[str, str, str]] = []
         self.batch = OrgContextBatch.model_validate_json(
             (FIXTURES / "n8n_context.json").read_text()
         )
@@ -278,6 +279,13 @@ class FakeContext:
             organizations=orgs,
             audience_query_version=self.audience_query_version,
         )
+
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None:
+        self.starts.append((organization_id, request_id, promotion_id))
+        if self.unavailable:
+            raise ContextUnavailable("injected outage")
 
 
 class CrashableStore(PostgresStore):

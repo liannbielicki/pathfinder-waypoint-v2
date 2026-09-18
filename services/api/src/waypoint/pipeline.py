@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -52,7 +52,7 @@ from waypoint.models import (
     Recommendation,
     validate_ranking,
 )
-from waypoint.n8n import ContextUnavailable, OrgBrief
+from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgBrief, OrgContextBatch
 from waypoint.personas import (
     InsufficientPanelFit,
     PanelSelection,
@@ -124,6 +124,12 @@ class ContextLike(Protocol):
     async def fetch(self, pro_ids: list[str]) -> Any: ...
 
 
+class StagingContextLike(Protocol):
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None: ...
+
+
 class QueueOps:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -191,6 +197,20 @@ class PostgresStore:
         await self.session.commit()
         return True
 
+    async def wait_for_staging_context(self, job_id: str, promotion_id: str) -> None:
+        await queue.checkpoint_job(
+            self.session,
+            job_id,
+            "staging_request",
+            {"promotion_id": promotion_id},
+        )
+        job = await self.session.get(JobRow, job_id)
+        assert job is not None
+        job.status = "waiting"
+        job.worker_id = None
+        job.lease_until = None
+        await self.session.commit()
+
     async def rounds_for(self, run_id: str, pro_id: str) -> list[EvolveRoundRow]:
         return list(
             (
@@ -226,7 +246,7 @@ class PipelineDeps:
     get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
     create_plan: Any  # (mechanism: str, catalog) -> MeasurementPlan (deterministic)
-    staging_context: ContextLike | None = None
+    staging_context: StagingContextLike | None = None
     metric_catalog: dict[str, Any] = field(default_factory=dict)
     # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
     # keeps the idea context to description+state; on adds works_on hints.
@@ -1648,17 +1668,40 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
     run_id = run.id  # plain strings survive session rollbacks; ORM instances expire
     state = PipelineState(job=job, run=run, pro_id=job.pro_id)
 
-    resumed = any(stage in job.checkpoint for stage in STAGES)
+    resumed = any(stage in job.checkpoint for stage in (*STAGES, "staging_context"))
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
     # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
     try:
-        context = deps.context
         if run.context_source == "staging":
             if deps.staging_context is None:
                 raise ContextUnavailable("staging context source is not configured")
-            context = deps.staging_context
-        batch = await context.fetch([state.pro_id])
+            cached = job.checkpoint.get("staging_context")
+            if isinstance(cached, Mapping):
+                brief_payload = cached.get("brief")
+                if not isinstance(brief_payload, Mapping):
+                    raise ContextUnavailable("staging context checkpoint is invalid")
+                brief = OrgBrief.model_validate(dict(brief_payload))
+                batch = OrgContextBatch(
+                    contract_version=CONTRACT_VERSION,
+                    organizations=[brief],
+                    audience_query_version=run.audience_query,
+                )
+            else:
+                prefix = "workbench:"
+                promotion_id = (
+                    run.audience_query[len(prefix):]
+                    if run.audience_query.startswith(prefix)
+                    else ""
+                )
+                if not promotion_id:
+                    raise ContextUnavailable("staging context promotion artifact has no id")
+                await deps.staging_context.start(state.pro_id, job_id, promotion_id)
+                await store.wait_for_staging_context(job_id, promotion_id)
+                await store.set_run_status(run_id, "waiting", "staging_context_pending")
+                return
+        else:
+            batch = await deps.context.fetch([state.pro_id])
     except ContextUnavailable as error:
         failure_reason = f"context_unavailable: {run.context_source}: {error}"
         if await store.requeue_job(job_id):

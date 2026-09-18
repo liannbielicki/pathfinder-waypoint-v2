@@ -155,6 +155,50 @@ async def test_n8n_context_client_posts_organization_id_with_bearer_token():
     }
 
 
+@pytest.mark.asyncio
+async def test_n8n_context_client_starts_async_request_with_correlation_ids():
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            202,
+            json={"status": "accepted", "request_id": "job-123"},
+        )
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler), timeout=1)
+    result = await client.start(
+        "889901",
+        "https://n8n.test/webhook/context",
+        "test-token",
+        request_id="job-123",
+        promotion_id="promotion-456",
+    )
+
+    assert result == {"status": "accepted", "request_id": "job-123"}
+    assert seen["body"] == {
+        "organization_id": "889901",
+        "request_id": "job-123",
+        "promotion_id": "promotion-456",
+    }
+
+
+@pytest.mark.asyncio
+async def test_n8n_context_client_rejects_a_mismatched_async_ack():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"status": "accepted", "request_id": "wrong"})
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler), timeout=1)
+    with pytest.raises(ValueError, match="request ID"):
+        await client.start(
+            "889901",
+            "https://n8n.test/webhook/context",
+            "test-token",
+            request_id="job-123",
+            promotion_id="promotion-456",
+        )
+
+
 def test_n8n_context_client_allows_four_minutes_for_a_response():
     client = N8NContextClient()
     assert client._timeout.read == 240.0

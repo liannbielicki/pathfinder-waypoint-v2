@@ -277,6 +277,57 @@ class N8NContextClient:
             raise TypeError("Snowflake/n8n response was not an object or array")
         return payload
 
+    async def start(
+        self,
+        organization_id: str,
+        webhook_url: str,
+        token: str,
+        *,
+        request_id: str,
+        promotion_id: str,
+    ) -> dict[str, Any]:
+        """Start the long Workbench flow; its result arrives at the callback."""
+        try:
+            async with httpx.AsyncClient(
+                transport=self._transport,
+                timeout=self._timeout,
+                follow_redirects=False,
+            ) as client:
+                response = await client.post(
+                    webhook_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "organization_id": organization_id,
+                        "request_id": request_id,
+                        "promotion_id": promotion_id,
+                    },
+                )
+        except httpx.ConnectTimeout as error:
+            raise TimeoutError("Snowflake/n8n could not connect within 10 seconds") from error
+        except httpx.ReadTimeout as error:
+            raise TimeoutError(
+                f"Snowflake/n8n timed out after {self._timeout_seconds:g} seconds"
+            ) from error
+        except httpx.TimeoutException as error:
+            raise TimeoutError(
+                f"Snowflake/n8n request timed out ({type(error).__name__})"
+            ) from error
+        except httpx.RequestError as error:
+            raise ConnectionError(
+                f"Snowflake/n8n connection failed ({type(error).__name__})"
+            ) from error
+        if response.status_code != 202:
+            raise ValueError(f"Snowflake/n8n returned HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as error:
+            raise ValueError("Snowflake/n8n returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise TypeError("Snowflake/n8n response was not an object")
+        if str(payload.get("request_id") or "") != request_id:
+            raise ValueError("Snowflake/n8n acknowledged the wrong request ID")
+        return payload
+
 
 def unwrap_source_payload(source: str, payload: Mapping[str, Any] | list[Any]) -> dict[str, Any]:
     """Remove the n8n transport envelope before context normalization."""

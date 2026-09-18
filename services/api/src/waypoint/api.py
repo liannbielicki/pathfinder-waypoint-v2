@@ -45,6 +45,7 @@ from waypoint.models import (
 )
 from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
+from waypoint.staging_context import compile_staging_brief
 from waypoint.tables import (
     CandidateRow,
     ContextPromotionRow,
@@ -57,6 +58,7 @@ from waypoint.tables import (
     WinnerRow,
     WorkbenchCatalogVersionRow,
 )
+from waypoint.workbench import ContextLayerClient
 from waypoint.workbench_api import execute_run
 
 
@@ -108,6 +110,13 @@ async def _staging_context_summary(
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class StagingContextCallback(BaseModel):
+    request_id: str
+    organization_id: str
+    promotion_id: str
+    rows: list[dict[str, Any]]
 
 
 class RunDetail(RunView):
@@ -185,6 +194,7 @@ AuthDep = Annotated[None, Depends(auth.require_session)]
 # work list. Both accept the scoped OUTCOMES_TOKEN as well as an operator
 # cookie. Every other endpoint is operator-only.
 OutcomeAuthDep = Annotated[None, Depends(auth.require_session_or_outcomes_token)]
+N8NAuthDep = Annotated[None, Depends(auth.require_n8n_token)]
 
 
 async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
@@ -227,6 +237,81 @@ def create_app(
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/context/staging/callback")
+    async def complete_staging_context(
+        request: Request,
+        body: StagingContextCallback,
+        session: SessionDep,
+        _: N8NAuthDep,
+    ) -> dict[str, str]:
+        job = await session.get(JobRow, body.request_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Staging context request not found")
+        run = await session.get(RunRow, job.run_id)
+        if (
+            run is None
+            or run.context_source != "staging"
+            or job.stage != "pro"
+            or job.pro_id != body.organization_id
+            or run.audience_query != f"workbench:{body.promotion_id}"
+        ):
+            raise HTTPException(status_code=409, detail="Staging context request does not match")
+        if "staging_context" in job.checkpoint:
+            return {"status": "already_completed", "request_id": body.request_id}
+        requested = job.checkpoint.get("staging_request")
+        if not isinstance(requested, dict) or requested.get("promotion_id") != body.promotion_id:
+            raise HTTPException(status_code=409, detail="Staging context request is not waiting")
+
+        promotion = await session.get(ContextPromotionRow, body.promotion_id)
+        if promotion is None:
+            raise HTTPException(status_code=409, detail="Staging context promotion is missing")
+        settings: Settings = request.app.state.settings
+        if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
+            raise HTTPException(status_code=503, detail="Context Layer is not configured")
+        try:
+            context_layer = await ContextLayerClient().fetch(
+                body.organization_id,
+                str(settings.CONTEXT_LAYER_BASE_URL),
+                settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
+            )
+            brief = compile_staging_brief(
+                body.organization_id,
+                body.rows,
+                context_layer,
+                dict(promotion.bundle or {}),
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Staging context could not be compiled ({type(error).__name__})",
+            ) from error
+
+        job = (
+            await session.execute(
+                select(JobRow)
+                .where(JobRow.id == body.request_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if "staging_context" in job.checkpoint:
+            await session.rollback()
+            return {"status": "already_completed", "request_id": body.request_id}
+        checkpoint = dict(job.checkpoint)
+        checkpoint["staging_context"] = {
+            "promotion_id": body.promotion_id,
+            "brief": {
+                **brief.model_dump(mode="json", exclude_none=True),
+                "curated_context": brief.curated_context,
+            },
+        }
+        job.checkpoint = checkpoint
+        job.status = "queued"
+        job.worker_id = None
+        job.lease_until = None
+        await session.commit()
+        return {"status": "queued", "request_id": body.request_id}
 
     @app.post("/api/auth/login")
     async def login(request: Request, response: Response, body: LoginRequest) -> dict[str, str]:

@@ -68,3 +68,15 @@ def require_session_or_outcomes_token(request: Request) -> None:
             raise HTTPException(status_code=401, detail="Invalid token")
         return
     require_session(request)
+
+
+def require_n8n_token(request: Request) -> None:
+    """Authenticate the narrow n8n completion callback with its existing token."""
+    settings: Settings = request.app.state.settings
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not secrets.compare_digest(
+        header[7:].strip(), settings.N8N_TOKEN.get_secret_value()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid token")

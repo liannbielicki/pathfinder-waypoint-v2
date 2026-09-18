@@ -509,6 +509,98 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
     assert response.json()["audience_query"] == "workbench:promotion-ready"
 
 
+async def test_staging_callback_compiles_compact_context_and_requeues_once(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    promotion = ContextPromotionRow(
+        id="promotion-callback",
+        active=True,
+        bundle={
+            "id": "promotion-callback",
+            "rules": [{
+                "source_key": "SAFE_SIGNAL",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "safe_signal",
+                "related_features": [],
+            }],
+            "feature_catalog": [],
+        },
+    )
+    run = RunRow(
+        id="run-callback",
+        pro_ids=["889901"],
+        audience_query="workbench:promotion-callback",
+        audience_run="2026-09-18T18:00:00Z",
+        channels=["sms"],
+        context_source="staging",
+        cost_limit=Decimal("25.00"),
+        status="waiting",
+    )
+    job = JobRow(
+        id="job-callback",
+        run_id=run.id,
+        stage="pro",
+        pro_id="889901",
+        status="waiting",
+        checkpoint={"staging_request": {"promotion_id": promotion.id}},
+    )
+    db_session.add_all([promotion, run])
+    await db_session.flush()
+    db_session.add(job)
+    await db_session.commit()
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        assert organization_id == "889901"
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
+    payload = {
+        "request_id": job.id,
+        "organization_id": "889901",
+        "promotion_id": promotion.id,
+        "rows": [{
+            "VARIABLE_NAME": "SAFE_SIGNAL",
+            "VALUE": 7,
+            "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+        }],
+    }
+    headers = {"authorization": "Bearer test"}
+
+    first = await client.post("/api/context/staging/callback", json=payload, headers=headers)
+    second = await client.post("/api/context/staging/callback", json=payload, headers=headers)
+
+    await db_session.refresh(job)
+    assert first.status_code == 200
+    assert first.json()["status"] == "queued"
+    assert second.status_code == 200
+    assert second.json()["status"] == "already_completed"
+    assert job.status == "queued"
+    stored = job.checkpoint["staging_context"]
+    assert stored["promotion_id"] == promotion.id
+    assert stored["brief"]["curated_context"] == {
+        "v": {"industry": "HVAC", "safe_signal": 7, "segment": "1A"}
+    }
+    assert "SAFE_SIGNAL" not in str(stored)
+
+
+async def test_staging_callback_requires_the_n8n_token(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/context/staging/callback",
+        json={
+            "request_id": "job",
+            "organization_id": "889901",
+            "promotion_id": "promotion",
+            "rows": [],
+        },
+        headers={"authorization": "Bearer wrong"},
+    )
+    assert response.status_code == 401
+
+
 async def test_staging_rejects_a_promotion_that_changed_after_display(
     auth_client: httpx.AsyncClient,
     db_session: AsyncSession,

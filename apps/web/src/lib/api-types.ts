@@ -230,6 +230,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/context/staging/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete Staging Context */
+        post: operations["complete_staging_context_api_context_staging_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/exposures": {
         parameters: {
             query?: never;
@@ -747,6 +764,19 @@ export interface components {
             status: string;
             /** Stop Reason */
             stop_reason: string | null;
+        };
+        /** StagingContextCallback */
+        StagingContextCallback: {
+            /** Organization Id */
+            organization_id: string;
+            /** Promotion Id */
+            promotion_id: string;
+            /** Request Id */
+            request_id: string;
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
         };
         /**
          * TouchOutcomeIn
@@ -1373,6 +1403,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    complete_staging_context_api_context_staging_callback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StagingContextCallback"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

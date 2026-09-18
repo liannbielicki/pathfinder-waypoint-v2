@@ -794,6 +794,38 @@
         "title": "RunView",
         "type": "object"
       },
+      "StagingContextCallback": {
+        "properties": {
+          "organization_id": {
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "promotion_id": {
+            "title": "Promotion Id",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "organization_id",
+          "promotion_id",
+          "rows"
+        ],
+        "title": "StagingContextCallback",
+        "type": "object"
+      },
       "TouchOutcomeIn": {
         "description": "One observed-outcome record from an outcome source (n8n Iterable/Amplitude\nflow, or manual backfill).\n\nTHREE ways to name the touch, any one is enough:\n\n* `recommendation_id` \u2014 the Waypoint winner_id (or an exposure id), echoed\n  back under either spelling (`recommendation_id` or `row_id`).\n* `exposure_id` \u2014 the exposure-level unit; alone it also keys the record.\n* `run_id` + `pro_id` \u2014 the NATURAL key, and the one that needs nothing\n  stamped into a message: `uq_winners_run_pro` makes one run plus one pro\n  exactly one winner. Both halves already cross the boundary on their own\n  (the LCM intake batch IS the run id, and the Iterable recipient IS the\n  pro_uuid), so an outcome is attributable without Waypoint ids ever\n  entering Iterable.\n\n`routing` is how a REAL send is told apart from a guardrailed test send that\nmerely carries a real Pro's context. It must be `route-to-pro` for the\nrecord to count as evidence \u2014 see waypoint.outcomes. Where an exposure\nexists, ITS routing is authoritative and the caller claim is ignored.\n\nV3 authority rules: attribution identity (pro, org, item, arm) comes ONLY\nfrom the winner/exposure records \u2014 caller identity is observational, and\nreturned_* horizon fields are not part of the wire contract at all. Return\nhorizons are derived from first_return_at against a confirmed send, or\nresolved by the checkpoint sweep \u2014 never asserted by a caller.",
         "properties": {
@@ -1757,6 +1789,48 @@
           }
         },
         "summary": "Status"
+      }
+    },
+    "/api/context/staging/callback": {
+      "post": {
+        "operationId": "complete_staging_context_api_context_staging_callback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StagingContextCallback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Complete Staging Context Api Context Staging Callback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Staging Context"
       }
     },
     "/api/exposures": {
