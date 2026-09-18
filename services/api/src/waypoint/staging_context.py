@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -21,6 +22,21 @@ from waypoint.workbench import (
 
 log = logging.getLogger("waypoint.staging_context")
 _MISSING = object()
+_SAFE_SOURCE_ERROR = re.compile(
+    r"(?:Snowflake/n8n|Context Layer) returned HTTP [1-5][0-9]{2}"
+    r"|Snowflake/n8n (?:timed out after|could not connect within) "
+    r"[0-9]+(?:\.[0-9]+)? seconds"
+    r"|Snowflake/n8n (?:request timed out|connection failed) "
+    r"\([A-Za-z][A-Za-z0-9_]*\)"
+    r"|Snowflake/n8n returned invalid JSON"
+)
+
+
+def _source_failure(source: str, error: BaseException) -> ContextUnavailable:
+    detail = str(error)
+    if not _SAFE_SOURCE_ERROR.fullmatch(detail):
+        detail = type(error).__name__
+    return ContextUnavailable(f"staging {source} source failed ({detail})")
 
 
 def _row_value(row: Mapping[str, Any], name: str, default: Any = None) -> Any:
@@ -127,6 +143,7 @@ class WorkbenchStagingContextClient:
         context_layer_key: str,
         promotion_loader: Callable[[], Awaitable[dict[str, Any] | None]],
         max_concurrent: int = 3,
+        n8n_timeout: float = 240.0,
         snowflake: Any | None = None,
         context_layer: Any | None = None,
     ) -> None:
@@ -136,7 +153,7 @@ class WorkbenchStagingContextClient:
         self.context_layer_key = context_layer_key
         self.promotion_loader = promotion_loader
         self._semaphore = asyncio.Semaphore(max_concurrent)
-        self.snowflake = snowflake or WorkbenchN8NClient()
+        self.snowflake = snowflake or WorkbenchN8NClient(timeout=n8n_timeout)
         self.context_layer = context_layer or ContextLayerClient()
 
     async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:
@@ -145,6 +162,9 @@ class WorkbenchStagingContextClient:
         bundle = await self.promotion_loader()
         if bundle is None:
             raise ContextUnavailable("staging context promotion artifact is missing")
+        promotion_id = str(bundle.get("id") or "")
+        if not promotion_id:
+            raise ContextUnavailable("staging context promotion artifact has no id")
 
         organizations = await asyncio.gather(
             *(self._fetch_one(identifier, bundle) for identifier in organization_ids)
@@ -152,6 +172,7 @@ class WorkbenchStagingContextClient:
         return OrgContextBatch(
             contract_version=CONTRACT_VERSION,
             organizations=list(organizations),
+            audience_query_version=f"workbench:{promotion_id}",
         )
 
     async def _fetch_one(
@@ -171,13 +192,9 @@ class WorkbenchStagingContextClient:
         context_layer_result: Any = results[1]
 
         if isinstance(snowflake_result, BaseException):
-            raise ContextUnavailable(
-                f"staging snowflake source failed ({type(snowflake_result).__name__})"
-            ) from snowflake_result
+            raise _source_failure("snowflake", snowflake_result) from snowflake_result
         if isinstance(context_layer_result, BaseException):
-            raise ContextUnavailable(
-                f"staging context_layer source failed ({type(context_layer_result).__name__})"
-            ) from context_layer_result
+            raise _source_failure("context_layer", context_layer_result) from context_layer_result
 
         try:
             rows = _snowflake_rows(snowflake_result)

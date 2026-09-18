@@ -75,6 +75,22 @@ def make_client(
     )
 
 
+def test_staging_applies_the_configured_n8n_timeout() -> None:
+    async def load_promotion() -> dict[str, Any] | None:
+        return promotion()
+
+    client = WorkbenchStagingContextClient(
+        workbench_url="https://n8n.example/workbench",
+        n8n_token="n8n-token",
+        context_layer_url="https://context.example",
+        context_layer_key="context-token",
+        promotion_loader=load_promotion,
+        n8n_timeout=900,
+    )
+
+    assert client.snowflake._timeout_seconds == 900
+
+
 async def test_staging_fetches_both_sources_then_compiles_only_approved_values() -> None:
     snowflake = FakeSnowflake({
         "889901": [
@@ -114,6 +130,7 @@ async def test_staging_fetches_both_sources_then_compiles_only_approved_values()
         bundle=bundle, snowflake=snowflake, context_layer=context_layer
     ).fetch(["889901"])
 
+    assert batch.audience_query_version == "workbench:promotion-approved"
     assert snowflake.calls == [("889901", "https://n8n.example/workbench", "n8n-token")]
     assert context_layer.calls == [
         ("889901", "https://context.example", "context-token")
@@ -227,6 +244,17 @@ async def test_staging_requires_numeric_ids_an_active_promotion_and_a_match() ->
         await make_client(bundle=None, snowflake=source, context_layer=context).fetch(
             ["889901"]
         )
+    missing_id = promotion({
+        "source_key": "OTHER",
+        "source_table": "UNKNOWN",
+        "canonical_key": "other",
+        "related_features": [],
+    })
+    missing_id.pop("id")
+    with pytest.raises(ContextUnavailable, match="promotion artifact has no id"):
+        await make_client(
+            bundle=missing_id, snowflake=source, context_layer=context
+        ).fetch(["889901"])
     with pytest.raises(ContextUnavailable, match="zero approved variables"):
         await make_client(
             bundle=promotion({
@@ -265,6 +293,32 @@ async def test_staging_source_failures_do_not_expose_values(failed_source: str) 
 
     assert failed_source in str(raised.value)
     assert secret not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        (ValueError("Snowflake/n8n returned HTTP 504"), "HTTP 504"),
+        (TimeoutError("Snowflake/n8n timed out after 900 seconds"), "900 seconds"),
+    ],
+)
+async def test_staging_preserves_safe_snowflake_failure_details(
+    error: Exception, detail: str
+) -> None:
+    snowflake = FakeSnowflake(error=error)
+    context_layer = FakeContextLayer({"889901": {}})
+
+    with pytest.raises(ContextUnavailable, match=detail):
+        await make_client(
+            bundle=promotion({
+                "source_key": "SAFE",
+                "source_table": "UNKNOWN",
+                "canonical_key": "safe",
+                "related_features": [],
+            }),
+            snowflake=snowflake,
+            context_layer=context_layer,
+        ).fetch(["889901"])
 
 
 @pytest.mark.parametrize(

@@ -362,6 +362,7 @@ async def main() -> None:
             context_layer_url=str(settings.CONTEXT_LAYER_BASE_URL),
             context_layer_key=settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
             max_concurrent=settings.N8N_MAX_CONCURRENT,
+            n8n_timeout=settings.N8N_TIMEOUT_SECONDS,
             promotion_loader=promotion_store.read_active_promotion,
         )
         if (
