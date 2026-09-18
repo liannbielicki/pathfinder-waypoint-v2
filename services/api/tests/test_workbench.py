@@ -1120,6 +1120,7 @@ async def test_all_source_failures_include_each_safe_reason(monkeypatch):
             workbench_mode="runtime",
             n8n_webhook_url="https://n8n.test",
             n8n_webhook_token="token",
+            ai_api_key="test-key",
         ))
 
     assert caught.value.status_code == 502
