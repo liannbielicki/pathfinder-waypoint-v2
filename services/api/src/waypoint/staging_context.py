@@ -146,6 +146,12 @@ def _compile_values(
         if value is _MISSING:
             missing += 1
             continue
+        # Runtime context is deliberately scalar. Approved object/array rows
+        # can still contain an entire Snowflake record, so they never cross the
+        # compact persisted boundary.
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            missing += 1
+            continue
         matched += 1
         candidates[canonical].append(value)
         matched_rules.append(rule)
@@ -266,7 +272,7 @@ class WorkbenchStagingContextClient:
                 request_id=request_id,
                 promotion_id=promotion_id,
             )
-        except BaseException as error:
+        except Exception as error:
             raise _source_failure("snowflake", error) from error
 
     async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:

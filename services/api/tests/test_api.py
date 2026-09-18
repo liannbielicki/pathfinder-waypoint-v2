@@ -524,6 +524,11 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
                 "source_table": "ANALYTICS.SIGNALS",
                 "canonical_key": "safe_signal",
                 "related_features": [],
+            }, {
+                "source_key": "RAW_PROFILE",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "raw_profile",
+                "related_features": [],
             }],
             "feature_catalog": [],
         },
@@ -560,11 +565,18 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         "request_id": job.id,
         "organization_id": "889901",
         "promotion_id": promotion.id,
-        "rows": [{
-            "VARIABLE_NAME": "SAFE_SIGNAL",
-            "VALUE": 7,
-            "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
-        }],
+        "rows": [
+            {
+                "VARIABLE_NAME": "SAFE_SIGNAL",
+                "VALUE": 7,
+                "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+            },
+            {
+                "VARIABLE_NAME": "RAW_PROFILE",
+                "VALUE": {"email": "must-not-persist@example.test"},
+                "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+            },
+        ],
     }
     headers = {"authorization": "Bearer test"}
 
@@ -583,6 +595,88 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         "v": {"industry": "HVAC", "safe_signal": 7, "segment": "1A"}
     }
     assert "SAFE_SIGNAL" not in str(stored)
+    assert "must-not-persist" not in str(stored)
+
+
+async def test_staging_callback_never_resurrects_a_stopped_job(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    promotion = ContextPromotionRow(
+        id="promotion-stopped",
+        active=True,
+        bundle={
+            "id": "promotion-stopped",
+            "rules": [{
+                "source_key": "SAFE_SIGNAL",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "safe_signal",
+                "related_features": [],
+            }],
+            "feature_catalog": [],
+        },
+    )
+    run = RunRow(
+        id="run-stopped-callback",
+        pro_ids=["889901"],
+        audience_query="workbench:promotion-stopped",
+        audience_run="2026-09-18T18:00:00Z",
+        channels=["sms"],
+        context_source="staging",
+        cost_limit=Decimal("25.00"),
+        status="waiting",
+    )
+    job = JobRow(
+        id="job-stopped-callback",
+        run_id=run.id,
+        stage="pro",
+        pro_id="889901",
+        status="waiting",
+        checkpoint={"staging_request": {"promotion_id": promotion.id}},
+    )
+    db_session.add_all([promotion, run])
+    await db_session.flush()
+    db_session.add(job)
+    await db_session.commit()
+
+    fetch_started = asyncio.Event()
+    finish_fetch = asyncio.Event()
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        fetch_started.set()
+        await finish_fetch.wait()
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
+    callback = asyncio.create_task(
+        client.post(
+            "/api/context/staging/callback",
+            json={
+                "request_id": job.id,
+                "organization_id": "889901",
+                "promotion_id": promotion.id,
+                "rows": [{
+                    "VARIABLE_NAME": "SAFE_SIGNAL",
+                    "VALUE": 7,
+                    "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+                }],
+            },
+            headers={"authorization": "Bearer test"},
+        )
+    )
+    await fetch_started.wait()
+    run.status = "stopped"
+    job.status = "stopped"
+    await db_session.commit()
+    finish_fetch.set()
+    response = await callback
+
+    await db_session.refresh(job)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert job.status == "stopped"
+    assert "staging_context" not in job.checkpoint
 
 
 async def test_staging_callback_requires_the_n8n_token(

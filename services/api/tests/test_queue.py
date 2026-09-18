@@ -217,6 +217,26 @@ async def test_attempts_exhausted_jobs_are_reaped_as_failed(db_session) -> None:
     assert run.status == "queued"
 
 
+async def test_expired_staging_callback_wait_is_reaped_as_failed(db_session) -> None:
+    await seed_run(db_session)
+    job_id = await enqueue(db_session, "run-1", stage="pro", pro_id="pro_1")
+    await db_session.commit()
+    job = await db_session.get(JobRow, job_id)
+    assert job is not None
+    job.status = "waiting"
+    job.lease_until = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    assert await claim_job(db_session, "worker-a") is None
+    assert await fail_stale_jobs(db_session) == [(job_id, "run-1")]
+    await db_session.commit()
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.checkpoint["failure"]["reason"] == (
+        "context_unavailable: staging: callback timed out"
+    )
+
+
 async def test_reconcile_moves_reserved_to_actual_spend(db_session) -> None:
     from waypoint.queue import reconcile_cost
 

@@ -134,6 +134,9 @@ async def test_staging_run_starts_async_context_and_waits_without_retrying(
     assert run is not None
     run.context_source = "staging"
     run.audience_query = "workbench:promotion-ready"
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert job is not None
+    job.attempts = 2
     await deps.db.commit()
     standard = deps.context
     staging = FakeContext()
@@ -142,12 +145,10 @@ async def test_staging_run_starts_async_context_and_waits_without_retrying(
     await run_job(seeded_job.id, deps)
 
     assert standard.fetches == []
-    job = await deps.db.get(JobRow, seeded_job.id)
-    assert job is not None
     assert staging.fetches == []
     assert staging.starts == [("pro_1", seeded_job.id, "promotion-ready")]
     assert job.status == "waiting"
-    assert job.attempts == 0
+    assert job.attempts == 1
     assert job.checkpoint["staging_request"] == {"promotion_id": "promotion-ready"}
 
 

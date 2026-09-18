@@ -259,6 +259,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="Staging context request does not match")
         if "staging_context" in job.checkpoint:
             return {"status": "already_completed", "request_id": body.request_id}
+        if job.status in {"done", "failed", "stopped"} or run.status in TERMINAL_RUN_STATUSES:
+            return {"status": "ignored", "request_id": body.request_id}
         requested = job.checkpoint.get("staging_request")
         if not isinstance(requested, dict) or requested.get("promotion_id") != body.promotion_id:
             raise HTTPException(status_code=409, detail="Staging context request is not waiting")
@@ -266,6 +268,10 @@ def create_app(
         promotion = await session.get(ContextPromotionRow, body.promotion_id)
         if promotion is None:
             raise HTTPException(status_code=409, detail="Staging context promotion is missing")
+        promotion_bundle = dict(promotion.bundle or {})
+        # Do not hold a database transaction or connection open while calling
+        # the external Context Layer service.
+        await session.rollback()
         settings: Settings = request.app.state.settings
         if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
             raise HTTPException(status_code=503, detail="Context Layer is not configured")
@@ -279,7 +285,7 @@ def create_app(
                 body.organization_id,
                 body.rows,
                 context_layer,
-                dict(promotion.bundle or {}),
+                promotion_bundle,
             )
         except Exception as error:
             raise HTTPException(
@@ -298,6 +304,23 @@ def create_app(
         if "staging_context" in job.checkpoint:
             await session.rollback()
             return {"status": "already_completed", "request_id": body.request_id}
+        run = (
+            await session.execute(
+                select(RunRow)
+                .where(RunRow.id == job.run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if job.status in {"done", "failed", "stopped"} or run.status in TERMINAL_RUN_STATUSES:
+            await session.rollback()
+            return {"status": "ignored", "request_id": body.request_id}
+        if job.status != "waiting":
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="Staging context request is not waiting")
+        requested = job.checkpoint.get("staging_request")
+        if not isinstance(requested, dict) or requested.get("promotion_id") != body.promotion_id:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="Staging context request does not match")
         checkpoint = dict(job.checkpoint)
         checkpoint["staging_context"] = {
             "promotion_id": body.promotion_id,

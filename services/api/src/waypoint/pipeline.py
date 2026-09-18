@@ -18,6 +18,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any, Protocol
@@ -197,18 +198,20 @@ class PostgresStore:
         await self.session.commit()
         return True
 
-    async def wait_for_staging_context(self, job_id: str, promotion_id: str) -> None:
-        await queue.checkpoint_job(
-            self.session,
-            job_id,
-            "staging_request",
-            {"promotion_id": promotion_id},
-        )
+    async def wait_for_staging_context(
+        self, job_id: str, promotion_id: str, wait_seconds: int
+    ) -> None:
         job = await self.session.get(JobRow, job_id)
         assert job is not None
+        checkpoint = dict(job.checkpoint)
+        checkpoint["staging_request"] = {"promotion_id": promotion_id}
+        job.checkpoint = checkpoint
+        # Dispatching n8n successfully is not a failed pipeline attempt. Refund
+        # this claim so the callback resume keeps the normal retry budget.
+        job.attempts = max(job.attempts - 1, 0)
         job.status = "waiting"
         job.worker_id = None
-        job.lease_until = None
+        job.lease_until = datetime.now(UTC) + timedelta(seconds=wait_seconds)
         await self.session.commit()
 
     async def rounds_for(self, run_id: str, pro_id: str) -> list[EvolveRoundRow]:
@@ -1671,7 +1674,8 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
     resumed = any(stage in job.checkpoint for stage in (*STAGES, "staging_context"))
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
-    # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
+    # Raw source rows are ephemeral. Staging resumes from only the compact,
+    # approved brief written by the authenticated callback.
     try:
         if run.context_source == "staging":
             if deps.staging_context is None:
@@ -1697,7 +1701,9 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
                 if not promotion_id:
                     raise ContextUnavailable("staging context promotion artifact has no id")
                 await deps.staging_context.start(state.pro_id, job_id, promotion_id)
-                await store.wait_for_staging_context(job_id, promotion_id)
+                await store.wait_for_staging_context(
+                    job_id, promotion_id, deps.lease_seconds
+                )
                 await store.set_run_status(run_id, "waiting", "staging_context_pending")
                 return
         else:
