@@ -138,6 +138,7 @@ def compile_promoted_context(
     compiled: dict[str, Any] = {}
     nulls: list[str] = []
     features: dict[str, list[str]] = {}
+    referenced_features: set[str] = set()
     rules = bundle.get("rules")
     if isinstance(rules, list):
         for rule in rules:
@@ -154,13 +155,18 @@ def compile_promoted_context(
             related = rule.get("related_features")
             if isinstance(related, list) and related:
                 exact = [str(item) for item in related]
-                features[canonical] = exact
+                features[canonical] = sorted({*features.get(canonical, []), *exact})
+                referenced_features.update(exact)
     context: dict[str, Any] = {"v": dict(sorted(compiled.items()))}
     if nulls:
         context["n"] = sorted(nulls)
     if features:
         context["f"] = dict(sorted(features.items()))
-    cards = _feature_cards(bundle.get("feature_catalog"))
+    cards = {
+        key: card
+        for key, card in _feature_cards(bundle.get("feature_catalog")).items()
+        if key in referenced_features
+    }
     if cards:
         context["pc"] = cards
     return context

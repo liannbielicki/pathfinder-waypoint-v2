@@ -58,6 +58,16 @@ from waypoint.tables import (
 from waypoint.workbench_api import execute_run
 
 
+def _staging_context_available(settings: Settings) -> bool:
+    return all(
+        (
+            settings.N8N_CONTEXT_URL_WORKBENCH,
+            settings.CONTEXT_LAYER_BASE_URL,
+            settings.CONTEXT_LAYER_API_KEY,
+        )
+    )
+
+
 class LoginRequest(BaseModel):
     password: str
 
@@ -197,10 +207,17 @@ def create_app(
         request: Request, body: RunCreate, session: SessionDep, _: AuthDep
     ) -> RunView:
         settings: Settings = request.app.state.settings
-        if body.context_source == "staging" and settings.N8N_CONTEXT_URL_STAGING is None:
+        if body.context_source == "staging" and not _staging_context_available(settings):
             raise HTTPException(
                 status_code=422,
-                detail="Staging context is unavailable because N8N_CONTEXT_URL_STAGING is not configured",
+                detail="Staging context is unavailable because its Workbench and Context Layer sources are not configured",
+            )
+        if body.context_source == "staging" and any(
+            not identifier.isdigit() for identifier in body.pro_ids
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Staging context requires numeric organization IDs",
             )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)
@@ -245,7 +262,7 @@ def create_app(
         return {
             "loop_defaults": effective.to_dict(),
             "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
-            "staging_context_available": settings.N8N_CONTEXT_URL_STAGING is not None,
+            "staging_context_available": _staging_context_available(settings),
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)

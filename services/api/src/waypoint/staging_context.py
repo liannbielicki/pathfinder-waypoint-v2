@@ -1,0 +1,220 @@
+"""Runtime Staging context compiled from Workbench-owned sources."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
+
+from waypoint.context_promotion import compile_promoted_context
+from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgBrief, OrgContextBatch
+from waypoint.workbench import (
+    ContextLayerClient,
+    context_layer_values,
+    unwrap_source_payload,
+)
+from waypoint.workbench import (
+    N8NContextClient as WorkbenchN8NClient,
+)
+
+log = logging.getLogger("waypoint.staging_context")
+_MISSING = object()
+
+
+def _row_value(row: Mapping[str, Any], name: str, default: Any = None) -> Any:
+    return next(
+        (value for key, value in row.items() if str(key).casefold() == name.casefold()),
+        default,
+    )
+
+
+def _source_table(row: Mapping[str, Any]) -> str:
+    table = _row_value(row, "source_table")
+    metadata = _row_value(row, "metadata")
+    if not table and isinstance(metadata, Mapping):
+        table = _row_value(metadata, "source_table") or _row_value(metadata, "table_name")
+    return str(table or "")
+
+
+def _snowflake_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(payload, (dict, list)):
+        raise TypeError("response was not an object or array")
+    rows = unwrap_source_payload("snowflake", payload).get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
+        raise TypeError("response did not contain a row array")
+    return rows
+
+
+def _compile_values(
+    rows: list[Mapping[str, Any]],
+    context_values: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[Mapping[str, Any]], dict[str, int]]:
+    rules = bundle.get("rules")
+    if not isinstance(rules, list):
+        raise TypeError("promotion rules were not an array")
+
+    snowflake_by_key: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = _row_value(row, "variable_name")
+        if isinstance(key, str) and key:
+            snowflake_by_key[key].append(row)
+
+    candidates: dict[str, list[Any]] = defaultdict(list)
+    matched_rules: list[Mapping[str, Any]] = []
+    missing = ambiguous = matched = 0
+    for rule in rules:
+        if not isinstance(rule, Mapping):
+            continue
+        source_key = str(rule.get("source_key") or "")
+        canonical = str(rule.get("canonical_key") or "")
+        if not source_key or not canonical:
+            continue
+
+        value: Any = _MISSING
+        if source_key.startswith("context_layer."):
+            value = context_values.get(source_key, _MISSING)
+        else:
+            matches = snowflake_by_key.get(source_key, [])
+            lineage = str(rule.get("source_table") or "UNKNOWN")
+            if lineage != "UNKNOWN":
+                matches = [row for row in matches if _source_table(row) == lineage]
+            if len(matches) == 1:
+                value = _row_value(matches[0], "value", _MISSING)
+            elif len(matches) > 1:
+                ambiguous += 1
+
+        if value is _MISSING:
+            missing += 1
+            continue
+        matched += 1
+        candidates[canonical].append(value)
+        matched_rules.append(rule)
+
+    values: dict[str, Any] = {}
+    conflicts = 0
+    for canonical, found in candidates.items():
+        first = found[0]
+        if any(value != first for value in found[1:]):
+            conflicts += 1
+            continue
+        values[canonical] = first
+
+    received = len(rows) + len(context_values)
+    return (
+        values,
+        [rule for rule in matched_rules if str(rule.get("canonical_key") or "") in values],
+        {
+            "received": received,
+            "matched": matched,
+            "discarded": max(received - matched, 0),
+            "missing": missing,
+            "ambiguous": ambiguous,
+            "conflicts": conflicts,
+        },
+    )
+
+
+class WorkbenchStagingContextClient:
+    def __init__(
+        self,
+        *,
+        workbench_url: str,
+        n8n_token: str,
+        context_layer_url: str,
+        context_layer_key: str,
+        promotion_loader: Callable[[], Awaitable[dict[str, Any] | None]],
+        max_concurrent: int = 3,
+        snowflake: Any | None = None,
+        context_layer: Any | None = None,
+    ) -> None:
+        self.workbench_url = workbench_url
+        self.n8n_token = n8n_token
+        self.context_layer_url = context_layer_url
+        self.context_layer_key = context_layer_key
+        self.promotion_loader = promotion_loader
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self.snowflake = snowflake or WorkbenchN8NClient()
+        self.context_layer = context_layer or ContextLayerClient()
+
+    async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:
+        if any(not identifier.isdigit() for identifier in organization_ids):
+            raise ContextUnavailable("staging context requires a numeric organization ID")
+        bundle = await self.promotion_loader()
+        if bundle is None:
+            raise ContextUnavailable("staging context promotion artifact is missing")
+
+        organizations = await asyncio.gather(
+            *(self._fetch_one(identifier, bundle) for identifier in organization_ids)
+        )
+        return OrgContextBatch(
+            contract_version=CONTRACT_VERSION,
+            organizations=list(organizations),
+        )
+
+    async def _fetch_one(
+        self, organization_id: str, bundle: Mapping[str, Any]
+    ) -> OrgBrief:
+        async with self._semaphore:
+            results = await asyncio.gather(
+                self.snowflake.fetch(
+                    organization_id, self.workbench_url, self.n8n_token
+                ),
+                self.context_layer.fetch(
+                    organization_id, self.context_layer_url, self.context_layer_key
+                ),
+                return_exceptions=True,
+            )
+        snowflake_result: Any = results[0]
+        context_layer_result: Any = results[1]
+
+        if isinstance(snowflake_result, BaseException):
+            raise ContextUnavailable(
+                f"staging snowflake source failed ({type(snowflake_result).__name__})"
+            ) from snowflake_result
+        if isinstance(context_layer_result, BaseException):
+            raise ContextUnavailable(
+                f"staging context_layer source failed ({type(context_layer_result).__name__})"
+            ) from context_layer_result
+
+        try:
+            rows = _snowflake_rows(snowflake_result)
+        except (TypeError, ValueError) as error:
+            raise ContextUnavailable(
+                f"staging snowflake contract violation ({type(error).__name__})"
+            ) from error
+        if not isinstance(context_layer_result, Mapping):
+            raise ContextUnavailable("staging context_layer contract violation (TypeError)")
+
+        values, matched_rules, counts = _compile_values(
+            rows, context_layer_values(context_layer_result), bundle
+        )
+        if not values:
+            raise ContextUnavailable("staging context matched zero approved variables")
+
+        log.info(
+            "staging context compiled promotion=%s received=%d matched=%d "
+            "discarded=%d missing=%d ambiguous=%d conflicts=%d",
+            str(bundle.get("id") or "unknown"),
+            counts["received"],
+            counts["matched"],
+            counts["discarded"],
+            counts["missing"],
+            counts["ambiguous"],
+            counts["conflicts"],
+        )
+        typed = {
+            key: value
+            for key, value in values.items()
+            if key in OrgBrief.model_fields
+            and key not in {"org_uuid", "curated_context"}
+            and isinstance(value, str)
+        }
+        matched_bundle = {**bundle, "rules": matched_rules}
+        return OrgBrief(
+            org_uuid=organization_id,
+            **typed,
+            curated_context=compile_promoted_context(values, matched_bundle),
+        )

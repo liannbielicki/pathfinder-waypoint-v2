@@ -52,10 +52,10 @@ does not contain credentials, PII variable rows, raw pre-PII payloads, or full
 authoring prompts/responses. The ignored SQLite store remains only for the
 standalone local test application.
 
-Deployed promotions live in the Postgres `context_promotions` table. Staging
-prefers its one active immutable promotion and falls back to the reviewed
-artifact under `services/api/data/context-promotions/` only when Postgres has
-no active version. A bundle contains no organization values or credentials.
+Deployed promotions live in the Postgres `context_promotions` table. Hosted
+Staging requires its one active immutable promotion and fails closed when none
+is active. Packaged artifacts remain available only to explicit local/test
+wiring. A bundle contains no organization values or credentials.
 
 Only one workload can execute at a time. An active Waypoint run disables a new
 Workbench collection, and an active Workbench job blocks Waypoint login and run
@@ -65,13 +65,15 @@ status.
 ## Data boundaries
 
 - The browser never collects credentials.
-- Raw provider values remain server-side until the app-side PII gate completes.
+- Raw provider values remain ephemeral and server-side. Runtime Staging does
+  not repeat Workbench authoring's PII classifier; the approved promotion is
+  the exact allowlist applied before prompt construction.
 - Identity-variable rows are removed before the Workbench inventory exists. Business fields such as `FEATURE_VOIP_STATE`, and feature-catalog labels such as `Value Statement`, are not confused with geographic state.
 - The authoring model receives variable keys, source query/path, observed type/state, and the verified feature catalog. It does not receive organization values.
-- Runtime compilation attaches the complete selected feature catalog as compact product cards containing only the exact feature key, product area, and short value statement. Waypoint receives company-wide feature knowledge without the unused CSV columns.
+- Runtime compilation attaches only feature cards referenced by retained approved rules, containing the exact feature key, product area, and short value statement.
 - Standard Waypoint runs keep the existing `org-context-v2` prompt context and never load a Workbench promotion.
-- Staging runs keep only exact promoted canonical aliases returned by `N8N_CONTEXT_URL_STAGING`. Missing promoted keys remain missing, nulls remain explicit nulls, ambiguous generic names such as `count` are never guessed, and unapproved response columns are dropped.
-- A missing Staging promotion or URL fails closed; it never silently falls back to Standard.
+- Staging runs call the unchanged `N8N_CONTEXT_URL_WORKBENCH` flow and Context Layer API with the same numeric organization ID, then match exact promoted source keys and table lineage before canonicalizing. Missing promoted keys remain missing, nulls remain explicit nulls, ambiguous generic names such as `count` are never guessed, and unapproved values are dropped.
+- A missing active Postgres promotion or required source configuration fails closed; Staging never silently falls back to Standard or a packaged artifact.
 - A missing or null value describes only this observed organization response.
 - Global missingness, freshness, reliability, distributions, and conflict frequency remain unavailable unless evidence is supplied.
 - Aggregate prompts must request cohort-level statistics, not calculations from one Pro's value.

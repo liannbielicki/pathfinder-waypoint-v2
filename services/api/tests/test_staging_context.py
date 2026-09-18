@@ -1,0 +1,387 @@
+import asyncio
+import logging
+from typing import Any
+
+import pytest
+
+from waypoint.n8n import ContextUnavailable
+from waypoint.staging_context import WorkbenchStagingContextClient
+
+
+class FakeSnowflake:
+    def __init__(self, payloads: dict[str, Any] | None = None, error: Exception | None = None):
+        self.payloads = payloads or {}
+        self.error = error
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def fetch(self, organization_id: str, url: str, token: str) -> Any:
+        self.calls.append((organization_id, url, token))
+        if self.error:
+            raise self.error
+        return self.payloads[organization_id]
+
+
+class FakeContextLayer:
+    def __init__(self, payloads: dict[str, Any] | None = None, error: Exception | None = None):
+        self.payloads = payloads or {}
+        self.error = error
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def fetch(self, organization_id: str, url: str, api_key: str) -> Any:
+        self.calls.append((organization_id, url, api_key))
+        if self.error:
+            raise self.error
+        return self.payloads[organization_id]
+
+
+def promotion(*rules: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "promotion-approved",
+        "rules": list(rules),
+        "feature_catalog": [
+            {
+                "feature": "jobs",
+                "Product Area": "Jobs",
+                "Value Statement": "Manage job workflows.",
+            },
+            {
+                "feature": "unused",
+                "Product Area": "Other",
+                "Value Statement": "Must not reach runtime.",
+            },
+        ],
+    }
+
+
+def make_client(
+    *,
+    bundle: dict[str, Any] | None,
+    snowflake: Any,
+    context_layer: Any,
+    max_concurrent: int = 3,
+) -> WorkbenchStagingContextClient:
+    async def load_promotion() -> dict[str, Any] | None:
+        return bundle
+
+    return WorkbenchStagingContextClient(
+        workbench_url="https://n8n.example/workbench",
+        n8n_token="n8n-token",
+        context_layer_url="https://context.example",
+        context_layer_key="context-token",
+        promotion_loader=load_promotion,
+        max_concurrent=max_concurrent,
+        snowflake=snowflake,
+        context_layer=context_layer,
+    )
+
+
+async def test_staging_fetches_both_sources_then_compiles_only_approved_values() -> None:
+    snowflake = FakeSnowflake({
+        "889901": [
+            {
+                "VARIABLE_NAME": "JOBS_CREATED_T28",
+                "VALUE": 12,
+                "SOURCE_TABLE": "ANALYTICS.JOBS",
+            },
+            {"VARIABLE_NAME": "UNAPPROVED", "VALUE": "drop-me"},
+        ]
+    })
+    context_layer = FakeContextLayer({
+        "889901": {"firmographics": {"segment": "1A", "email": "drop@example.com"}}
+    })
+    bundle = promotion(
+        {
+            "source_key": "JOBS_CREATED_T28",
+            "source_table": "ANALYTICS.JOBS",
+            "canonical_key": "jobs_created_t28",
+            "related_features": ["jobs"],
+        },
+        {
+            "source_key": "context_layer.firmographics.segment",
+            "source_table": "UNKNOWN",
+            "canonical_key": "segment",
+            "related_features": [],
+        },
+        {
+            "source_key": "MISSING_JOB_ALIAS",
+            "source_table": "UNKNOWN",
+            "canonical_key": "jobs_created_t28",
+            "related_features": ["unused"],
+        },
+    )
+
+    batch = await make_client(
+        bundle=bundle, snowflake=snowflake, context_layer=context_layer
+    ).fetch(["889901"])
+
+    assert snowflake.calls == [("889901", "https://n8n.example/workbench", "n8n-token")]
+    assert context_layer.calls == [
+        ("889901", "https://context.example", "context-token")
+    ]
+    brief = batch.organizations[0]
+    assert brief.pro_id == "889901"
+    assert brief.segment == "1A"
+    assert brief.curated_context == {
+        "v": {"jobs_created_t28": 12, "segment": "1A"},
+        "f": {"jobs_created_t28": ["jobs"]},
+        "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
+    }
+    assert "UNAPPROVED" not in str(brief.curated_context)
+    assert "drop@example.com" not in str(brief.curated_context)
+
+
+async def test_staging_matches_exact_lineage_and_preserves_nulls() -> None:
+    snowflake = FakeSnowflake({
+        "889901": [
+            {"VARIABLE_NAME": "COUNT", "VALUE": 2, "SOURCE_TABLE": "RECENT"},
+            {"VARIABLE_NAME": "COUNT", "VALUE": 99, "SOURCE_TABLE": "HISTORY"},
+            {"VARIABLE_NAME": "OPTIONAL", "VALUE": None},
+        ]
+    })
+    context_layer = FakeContextLayer({"889901": {}})
+    bundle = promotion(
+        {
+            "source_key": "COUNT",
+            "source_table": "RECENT",
+            "canonical_key": "recent_count",
+            "related_features": [],
+        },
+        {
+            "source_key": "OPTIONAL",
+            "source_table": "UNKNOWN",
+            "canonical_key": "optional_signal",
+            "related_features": [],
+        },
+        {
+            "source_key": "MISSING",
+            "source_table": "UNKNOWN",
+            "canonical_key": "missing_signal",
+            "related_features": [],
+        },
+    )
+
+    brief = (await make_client(
+        bundle=bundle, snowflake=snowflake, context_layer=context_layer
+    ).fetch(["889901"])).organizations[0]
+
+    assert brief.curated_context == {
+        "v": {"recent_count": 2},
+        "n": ["optional_signal"],
+    }
+
+
+async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
+    snowflake = FakeSnowflake({
+        "889901": [
+            {"VARIABLE_NAME": "COUNT", "VALUE": 2, "SOURCE_TABLE": "RECENT"},
+            {"VARIABLE_NAME": "COUNT", "VALUE": 99, "SOURCE_TABLE": "HISTORY"},
+            {"VARIABLE_NAME": "LEFT", "VALUE": "a"},
+            {"VARIABLE_NAME": "RIGHT", "VALUE": "b"},
+            {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        ]
+    })
+    context_layer = FakeContextLayer({"889901": {}})
+    bundle = promotion(
+        {
+            "source_key": "COUNT",
+            "source_table": "UNKNOWN",
+            "canonical_key": "ambiguous_count",
+            "related_features": [],
+        },
+        {
+            "source_key": "LEFT",
+            "source_table": "UNKNOWN",
+            "canonical_key": "collision",
+            "related_features": [],
+        },
+        {
+            "source_key": "RIGHT",
+            "source_table": "UNKNOWN",
+            "canonical_key": "collision",
+            "related_features": [],
+        },
+        {
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": [],
+        },
+    )
+
+    brief = (await make_client(
+        bundle=bundle, snowflake=snowflake, context_layer=context_layer
+    ).fetch(["889901"])).organizations[0]
+
+    assert brief.curated_context == {"v": {"safe": 1}}
+
+
+async def test_staging_requires_numeric_ids_an_active_promotion_and_a_match() -> None:
+    source = FakeSnowflake({"889901": [{"VARIABLE_NAME": "OTHER", "VALUE": 1}]})
+    context = FakeContextLayer({"889901": {}})
+
+    with pytest.raises(ContextUnavailable, match="numeric organization ID"):
+        await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
+            ["pro_abc"]
+        )
+    with pytest.raises(ContextUnavailable, match="promotion"):
+        await make_client(bundle=None, snowflake=source, context_layer=context).fetch(
+            ["889901"]
+        )
+    with pytest.raises(ContextUnavailable, match="zero approved variables"):
+        await make_client(
+            bundle=promotion({
+                "source_key": "MISSING",
+                "source_table": "UNKNOWN",
+                "canonical_key": "missing",
+                "related_features": [],
+            }),
+            snowflake=source,
+            context_layer=context,
+        ).fetch(["889901"])
+
+
+@pytest.mark.parametrize("failed_source", ["snowflake", "context_layer"])
+async def test_staging_source_failures_do_not_expose_values(failed_source: str) -> None:
+    secret = "sensitive-source-value"
+    snowflake = FakeSnowflake(
+        {"889901": [{"VARIABLE_NAME": "SAFE", "VALUE": 1}]},
+        ValueError(secret) if failed_source == "snowflake" else None,
+    )
+    context_layer = FakeContextLayer(
+        {"889901": {}}, ValueError(secret) if failed_source == "context_layer" else None
+    )
+
+    with pytest.raises(ContextUnavailable) as raised:
+        await make_client(
+            bundle=promotion({
+                "source_key": "SAFE",
+                "source_table": "UNKNOWN",
+                "canonical_key": "safe",
+                "related_features": [],
+            }),
+            snowflake=snowflake,
+            context_layer=context_layer,
+        ).fetch(["889901"])
+
+    assert failed_source in str(raised.value)
+    assert secret not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("snowflake_payload", "context_payload", "source"),
+    [({}, {}, "snowflake"), ([], [], "context_layer")],
+)
+async def test_staging_rejects_malformed_source_contracts(
+    snowflake_payload: Any, context_payload: Any, source: str
+) -> None:
+    snowflake = FakeSnowflake({"889901": snowflake_payload})
+    context_layer = FakeContextLayer({"889901": context_payload})
+
+    with pytest.raises(ContextUnavailable, match=source):
+        await make_client(
+            bundle=promotion({
+                "source_key": "SAFE",
+                "source_table": "UNKNOWN",
+                "canonical_key": "safe",
+                "related_features": [],
+            }),
+            snowflake=snowflake,
+            context_layer=context_layer,
+        ).fetch(["889901"])
+
+
+async def test_staging_logs_only_promotion_and_counts(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="waypoint.staging_context")
+    raw_secret = "do-not-log-this"
+    snowflake = FakeSnowflake({
+        "889901": [
+            {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+            {"VARIABLE_NAME": "EXTRA", "VALUE": raw_secret},
+        ]
+    })
+    context_layer = FakeContextLayer({"889901": {}})
+
+    await make_client(
+        bundle=promotion({
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": [],
+        }),
+        snowflake=snowflake,
+        context_layer=context_layer,
+    ).fetch(["889901"])
+
+    assert "promotion-approved" in caplog.text
+    assert "received=2" in caplog.text
+    assert "matched=1" in caplog.text
+    assert raw_secret not in caplog.text
+
+
+async def test_staging_fetches_the_two_sources_concurrently() -> None:
+    both_started = asyncio.Event()
+    started = 0
+
+    class CoordinatedSource:
+        async def _wait(self) -> None:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=0.2)
+
+    class Snowflake(CoordinatedSource):
+        async def fetch(self, organization_id: str, url: str, token: str) -> Any:
+            await self._wait()
+            return [{"VARIABLE_NAME": "SAFE", "VALUE": 1}]
+
+    class ContextLayer(CoordinatedSource):
+        async def fetch(self, organization_id: str, url: str, token: str) -> Any:
+            await self._wait()
+            return {}
+
+    await make_client(
+        bundle=promotion({
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": [],
+        }),
+        snowflake=Snowflake(),
+        context_layer=ContextLayer(),
+    ).fetch(["889901"])
+
+
+async def test_staging_bounds_multi_organization_concurrency() -> None:
+    active = 0
+    maximum = 0
+
+    class SlowSnowflake:
+        async def fetch(self, organization_id: str, url: str, token: str) -> Any:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [{"VARIABLE_NAME": "SAFE", "VALUE": 1}]
+
+    class EmptyContext:
+        async def fetch(self, organization_id: str, url: str, token: str) -> Any:
+            return {}
+
+    client = make_client(
+        bundle=promotion({
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": [],
+        }),
+        snowflake=SlowSnowflake(),
+        context_layer=EmptyContext(),
+        max_concurrent=2,
+    )
+
+    batch = await client.fetch(["1", "2", "3", "4"])
+
+    assert len(batch.organizations) == 4
+    assert maximum == 2

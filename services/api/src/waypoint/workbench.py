@@ -225,8 +225,8 @@ class ContextLayerClient:
         self._transport = transport
         self._timeout = httpx.Timeout(timeout, connect=min(timeout, 10.0))
 
-    async def fetch(self, organization_uuid: str, base_url: str, api_key: str) -> dict[str, Any]:
-        url = f"{base_url.rstrip('/')}/api/context_layer/{organization_uuid}"
+    async def fetch(self, organization_id: str, base_url: str, api_key: str) -> dict[str, Any]:
+        url = f"{base_url.rstrip('/')}/api/context_layer/{organization_id}"
         async with httpx.AsyncClient(
             transport=self._transport,
             timeout=self._timeout,
@@ -322,7 +322,7 @@ def _observed_type(value: Any) -> str:
     return type(value).__name__
 
 
-def _context_layer_values(payload: Mapping[str, Any]) -> dict[str, Any]:
+def context_layer_values(payload: Mapping[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     firmographics = payload.get("firmographics")
     if isinstance(firmographics, Mapping):
@@ -350,7 +350,7 @@ def build_audit_inventory(sources: Mapping[str, Any]) -> list[dict[str, str]]:
         rows = payload.get("rows") if isinstance(payload, Mapping) else None
         if not isinstance(rows, list):
             if source == "context_layer" and isinstance(payload, Mapping):
-                for key, value in sorted(_context_layer_values(payload).items()):
+                for key, value in sorted(context_layer_values(payload).items()):
                     inventory.append(
                         {
                             "key": key,
@@ -655,7 +655,7 @@ def compile_context(
                     values[key] = _row_value(row, "value")
     context_layer = sources.get("context_layer")
     if isinstance(context_layer, Mapping):
-        values.update(_context_layer_values(context_layer))
+        values.update(context_layer_values(context_layer))
     compiled_values: dict[str, Any] = {}
     nulls: list[str] = []
     features: dict[str, list[str]] = {}

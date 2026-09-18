@@ -409,12 +409,12 @@ async def test_fleet_settings_endpoint_exposes_defaults_and_the_cap(
     assert body["staging_context_available"] is True
 
 
-async def test_staging_run_is_rejected_when_staging_url_is_unavailable(
+async def test_staging_run_is_rejected_when_workbench_url_is_unavailable(
     db_session_factory,
 ) -> None:
     from waypoint.api import create_app
 
-    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_STAGING": None})
+    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_WORKBENCH": None})
     app = create_app(settings=settings, session_factory=db_session_factory)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
@@ -427,6 +427,48 @@ async def test_staging_run_is_rejected_when_staging_url_is_unavailable(
 
     assert response.status_code == 422
     assert "staging" in response.text.casefold()
+
+
+async def test_staging_readiness_ignores_deprecated_staging_url(
+    db_session_factory,
+) -> None:
+    from waypoint.api import create_app
+
+    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_STAGING": None})
+    app = create_app(settings=settings, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        response = await client.get("/api/fleet/settings")
+
+    assert response.status_code == 200
+    assert response.json()["staging_context_available"] is True
+
+
+async def test_staging_rejects_non_numeric_ids_before_enqueue(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    response = await auth_client.post(
+        "/api/runs",
+        json={**RUN_REQUEST, "pro_ids": ["pro_abc"], "context_source": "staging"},
+    )
+
+    assert response.status_code == 422
+    assert "numeric organization id" in response.text.casefold()
+
+
+async def test_staging_preserves_numeric_organization_id_as_a_string(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    response = await auth_client.post(
+        "/api/runs",
+        json={**RUN_REQUEST, "pro_ids": ["889901"], "context_source": "staging"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["pro_ids"] == ["889901"]
 
 
 async def test_fleet_settings_requires_session(client: httpx.AsyncClient) -> None:

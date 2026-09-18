@@ -243,16 +243,38 @@ describe("RunStart", () => {
     );
   });
 
-  it("defaults to Standard context and submits Staging only when selected", async () => {
+  it("defaults to Standard and submits a numeric organization ID in Staging", async () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
     await fillRequiredInputs();
     await screen.findByLabelText(/max rounds per pro/i);
     expect(screen.getByLabelText(/standard context/i)).toBeChecked();
+    expect(screen.getByLabelText(/pro ids \(one per line\)/i)).toHaveValue("pro_1");
     await userEvent.click(screen.getByLabelText(/staging context/i));
+    const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
+    await userEvent.clear(organizationIds);
+    await userEvent.type(organizationIds, "889901");
+    expect(screen.getByText(/approved workbench catalog/i)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
     await waitFor(() => expect(createCalls).toHaveLength(1));
-    expect(createCalls[0]).toEqual(expect.objectContaining({ context_source: "staging" }));
+    expect(createCalls[0]).toEqual(expect.objectContaining({
+      context_source: "staging",
+      pro_ids: ["889901"],
+    }));
+  });
+
+  it("blocks a non-numeric organization ID in Staging", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /numeric organization ids/i,
+    );
+    expect(createCalls).toEqual([]);
   });
 
   it("disables Staging context when its Railway URL is unavailable", async () => {

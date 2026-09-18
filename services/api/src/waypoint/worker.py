@@ -20,13 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from waypoint import amplitude_source, iterable_source, queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.checkpoints import sweep_if_enabled
-from waypoint.context_promotion import PACKAGED_PROMOTION_ROOT, PromotionStore
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
 from waypoint.n8n import N8NContextClient
 from waypoint.personas import Persona
 from waypoint.pipeline import (
+    ContextLike,
     PipelineDeps,
     PostgresStore,
     QueueOps,
@@ -36,6 +36,7 @@ from waypoint.pipeline import (
 from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import Calibration, load_calibration
 from waypoint.settings import Settings
+from waypoint.staging_context import WorkbenchStagingContextClient
 from waypoint.tables import FleetControlRow
 from waypoint.workbench_jobs import PostgresWorkbenchStore
 
@@ -220,7 +221,7 @@ async def _worker_loop(
     slots: FleetSlots,
     llm_stacks: LLMStacks,
     context: N8NContextClient,
-    staging_context: N8NContextClient | None,
+    staging_context: ContextLike | None,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
     persona_source: Callable[[str], Awaitable[list[Persona]]],
@@ -353,23 +354,21 @@ async def main() -> None:
         max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
     promotion_store = PostgresWorkbenchStore(factory)
-    packaged_promotions = PromotionStore(PACKAGED_PROMOTION_ROOT)
-
-    async def load_active_promotion() -> dict[str, Any] | None:
-        return (
-            await promotion_store.read_active_promotion()
-            or packaged_promotions.read_active()
-        )
 
     staging_context = (
-        N8NContextClient(
-            url=str(settings.N8N_CONTEXT_URL_STAGING),
-            token=settings.N8N_TOKEN.get_secret_value(),
-            timeout=settings.N8N_TIMEOUT_SECONDS,
+        WorkbenchStagingContextClient(
+            workbench_url=str(settings.N8N_CONTEXT_URL_WORKBENCH),
+            n8n_token=settings.N8N_TOKEN.get_secret_value(),
+            context_layer_url=str(settings.CONTEXT_LAYER_BASE_URL),
+            context_layer_key=settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
             max_concurrent=settings.N8N_MAX_CONCURRENT,
-            promotion_loader=load_active_promotion,
+            promotion_loader=promotion_store.read_active_promotion,
         )
-        if settings.N8N_CONTEXT_URL_STAGING is not None
+        if (
+            settings.N8N_CONTEXT_URL_WORKBENCH is not None
+            and settings.CONTEXT_LAYER_BASE_URL is not None
+            and settings.CONTEXT_LAYER_API_KEY is not None
+        )
         else None
     )
 

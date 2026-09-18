@@ -24,10 +24,13 @@ A human must set these values (never their values in git). All names match
 - `LLM_API_KEY` — Anthropic API key
 - `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing Standard n8n context webhook;
   Standard remains the default and is not changed by the Workbench
-- `N8N_CONTEXT_URL_WORKBENCH` — full experimental authoring webhook used only
-  by Context Workbench; it shares `N8N_TOKEN` and never replaces Standard
-- `N8N_CONTEXT_URL_STAGING` — optional compressed n8n context webhook used
-  only when an operator selects Staging on Start a run; it shares `N8N_TOKEN`
+- `N8N_CONTEXT_URL_WORKBENCH` — unchanged full experimental webhook used by
+  Workbench authoring and Staging runtime; it shares `N8N_TOKEN` and never
+  replaces Standard
+- `CONTEXT_LAYER_BASE_URL`, `CONTEXT_LAYER_API_KEY` — direct Context Layer API
+  used by Workbench authoring and Staging runtime
+- `N8N_CONTEXT_URL_STAGING` — deprecated compatibility value; current runtime
+  routing and readiness checks do not use it
 - `PERSONA_URL`, `PERSONA_TOKEN` — persona snapshot service
 - `HANDOFF_URL`, `HANDOFF_TOKEN` — Allison's LCM intake
 - `BYPASS_TOKEN` — Vercel Deployment Protection bypass secret for the LCM
@@ -62,12 +65,13 @@ Docker was not installed on the build machine, so
   `org_size_bucket`, `trade_bucket`, `open_ar_band`) the rebuild added for
   persona matching. Proof: `cd services/api && N8N_CONTEXT_URL=… N8N_TOKEN=…
   LIVE_TEST_PRO=… uv run pytest tests/test_n8n_live.py -q -m live`.
-- **Staging n8n context flow**: configure `N8N_CONTEXT_URL_STAGING` only after
-  its query emits the exact canonical aliases from the Workbench handoff CSV.
-  It must not return raw PII fields. Waypoint applies the app-side PII gate
-  again, drops unpromoted fields, and fails closed if no active Postgres or
-  packaged promotion is available. The Railway-hosted Workbench uses
-  `N8N_CONTEXT_URL_WORKBENCH` and never replaces either runtime URL.
+- **Staging context sources**: Staging sends each numeric organization ID to
+  the unchanged `N8N_CONTEXT_URL_WORKBENCH` webhook and directly to the
+  Context Layer API. After both return, Waypoint applies the active Postgres
+  promotion as an exact allowlist, canonicalizes retained values, and discards
+  every unapproved value before prompt construction. It does not use
+  `N8N_CONTEXT_URL_STAGING`, fall back to Standard, or load a packaged
+  promotion in hosted runtime.
 - **Persona service**: confirm it serves
   `{"snapshot_version": …, "personas": [{persona_id, family, label, features}]}`
   as consumed by `waypoint.worker.load_personas` and shaped like

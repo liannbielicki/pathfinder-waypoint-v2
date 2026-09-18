@@ -85,7 +85,7 @@ def test_promotion_keeps_only_approved_include_rules_and_exact_csv_columns():
     ]
 
 
-def test_runtime_compilation_keeps_promoted_values_and_full_feature_catalog():
+def test_runtime_compilation_keeps_promoted_values_and_referenced_feature_cards():
     context = compile_promoted_context(
         {
             "org_uuid": "secret-org-id",
@@ -104,13 +104,25 @@ def test_runtime_compilation_keeps_promoted_values_and_full_feature_catalog():
             "jobs_created_t28": ["jobs"],
         },
         "pc": {
-            "feature_only": {},
             "jobs": {"a": "Jobs", "v": "Manage job workflows."},
-            "unused": {"a": "Other", "v": "Must not reach runtime."},
             "voip": {"a": "Phones", "v": "Manage customer calls."},
         },
     }
     assert "secret-org-id" not in str(context)
+
+
+def test_runtime_compilation_unions_feature_mappings_for_one_canonical_value():
+    bundle = _bundle()
+    bundle["rules"].append({
+        "source_key": "JOBS_ALIAS",
+        "canonical_key": "jobs_created_t28",
+        "related_features": ["voip"],
+    })
+
+    context = compile_promoted_context({"jobs_created_t28": 12}, bundle)
+
+    assert context["f"] == {"jobs_created_t28": ["jobs", "voip"]}
+    assert set(context["pc"]) == {"jobs", "voip"}
 
 
 def test_promotion_store_keeps_immutable_versions_and_an_active_pointer(tmp_path):

@@ -135,6 +135,11 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       setError(invalid);
       return;
     }
+    if (contextSource === "staging" && ids.some((id) => !/^\d+$/.test(id))) {
+      focusField("pro-ids");
+      setError("Staging context requires numeric organization IDs.");
+      return;
+    }
     setBusy(true);
     const overrides = Object.fromEntries(
       LOOP_FIELDS.filter((f) => changed(f.key))
@@ -170,7 +175,11 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
 
       <fieldset>
         <legend>Run inputs</legend>
-        <label htmlFor="pro-ids">Pro IDs (one per line)</label>
+        <label htmlFor="pro-ids">
+          {contextSource === "staging"
+            ? "Organization IDs (one per line)"
+            : "Pro IDs (one per line)"}
+        </label>
         <textarea
           id="pro-ids"
           value={proIds}
@@ -250,8 +259,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           </label>
         </div>
         <p className="helper">
-          Standard uses today&apos;s production workflow. Staging uses the compressed,
-          PII-gated context catalog.
+          {contextSource === "staging"
+            ? "Staging filters the full Workbench source and Context Layer API through the active approved Workbench catalog."
+            : "Standard uses today&apos;s production workflow."}
         </p>
       </fieldset>
 
