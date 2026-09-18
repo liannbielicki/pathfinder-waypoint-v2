@@ -144,6 +144,15 @@ export interface FleetSettings {
   loop_defaults: Record<string, number>;
   max_in_flight_llm_calls: number;
   staging_context_available: boolean;
+  staging_context: {
+    promotion_id: string;
+    context_catalog_version_id: string;
+    context_catalog_name: string;
+    feature_catalog_version_id: string;
+    feature_catalog_name: string;
+    included_variables: number;
+    created_at: string;
+  } | null;
 }
 
 export const getFleetSettings = () => api<FleetSettings>("/fleet/settings");

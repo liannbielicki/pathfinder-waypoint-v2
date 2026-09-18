@@ -11,6 +11,15 @@ const FLEET_SETTINGS = {
   },
   max_in_flight_llm_calls: 7,
   staging_context_available: true,
+  staging_context: {
+    promotion_id: "promotion-shared",
+    context_catalog_version_id: "context-shared",
+    context_catalog_name: "Shared context",
+    feature_catalog_version_id: "features-shared",
+    feature_catalog_name: "September features",
+    included_variables: 287,
+    created_at: "2026-09-18T16:04:05Z",
+  },
 };
 
 function stubFetch(overrides?: {
@@ -254,7 +263,7 @@ describe("RunStart", () => {
     const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
     await userEvent.clear(organizationIds);
     await userEvent.type(organizationIds, "889901");
-    expect(screen.getByText(/approved workbench catalog/i)).toBeVisible();
+    expect(screen.getByText(/staging uses/i)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
     await waitFor(() => expect(createCalls).toHaveLength(1));
     expect(createCalls[0]).toEqual(expect.objectContaining({
@@ -275,6 +284,21 @@ describe("RunStart", () => {
       /numeric organization ids/i,
     );
     expect(createCalls).toEqual([]);
+  });
+
+  it("shows the exact active catalog and second-precise timestamp for Staging", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+
+    expect(screen.getByText("Shared context")).toBeVisible();
+    expect(screen.getByText("context-shared")).toBeVisible();
+    expect(screen.getByText("September features")).toBeVisible();
+    expect(screen.getByText("features-shared")).toBeVisible();
+    expect(screen.getByText(/287 approved variables/i)).toBeVisible();
+    expect(screen.getByText(/Sep 18, 2026, 04:04:05 PM UTC/i)).toBeVisible();
   });
 
   it("disables Staging context when its Railway URL is unavailable", async () => {

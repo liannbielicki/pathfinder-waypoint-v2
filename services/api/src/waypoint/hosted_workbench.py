@@ -6,15 +6,17 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth
 from waypoint.activity import current_activity, lock_fleet
-from waypoint.workbench import parse_feature_catalog_csv
+from waypoint.tables import WorkbenchCatalogVersionRow
+from waypoint.workbench import parse_feature_catalog_csv, scrub_pii
 from waypoint.workbench_api import (
     CatalogValidateRequest,
     PromotionRequest,
@@ -24,9 +26,44 @@ from waypoint.workbench_api import (
     build_promotion_preview,
     execute_run,
 )
-from waypoint.workbench_jobs import PostgresWorkbenchStore, prune_job_result
+from waypoint.workbench_jobs import (
+    PostgresWorkbenchStore,
+    prune_job_result,
+    sanitize_job_request,
+)
 
 JobExecutor = Callable[..., Awaitable[dict[str, Any]]]
+
+
+class CatalogVersionRequest(BaseModel):
+    id: str = Field(min_length=1)
+    kind: Literal["context", "feature"]
+    name: str = Field(min_length=1)
+    entries: list[dict[str, Any]]
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+def _safe_catalog_version(body: CatalogVersionRequest) -> dict[str, Any]:
+    field = "catalog_override" if body.kind == "context" else "feature_catalog_entries"
+    entries = sanitize_job_request({field: body.entries}).get(field, [])
+    allowed_details = (
+        {"prompt", "feature_catalog_version_id", "confidence_threshold", "tag"}
+        if body.kind == "context"
+        else {"source_filename"}
+    )
+    metadata, _ledger = scrub_pii({
+        "catalog_name": body.name,
+        **{
+            key: value for key, value in body.details.items() if key in allowed_details
+        },
+    })
+    return {
+        "id": body.id,
+        "kind": body.kind,
+        "name": str(metadata.pop("catalog_name", "") or f"{body.kind} catalog"),
+        "entries": entries,
+        "details": metadata,
+    }
 
 
 async def _get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -141,19 +178,68 @@ def install_hosted_workbench(
         return {**payload, "activity": await current_activity(db)}
 
     @router.post("/catalog/validate")
-    async def validate_catalog(body: CatalogValidateRequest) -> dict[str, Any]:
+    async def validate_catalog(request: Request, body: CatalogValidateRequest) -> dict[str, Any]:
         try:
             entries = parse_feature_catalog_csv(body.csv_text)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+        store = get_hosted_workbench(request.app).store
+        safe_entries = _safe_catalog_version(CatalogVersionRequest(
+            id="feature-candidate",
+            kind="feature",
+            name=body.name,
+            entries=entries,
+            details={"source_filename": body.filename},
+        ))["entries"]
+        canonical = json.dumps(safe_entries, sort_keys=True, separators=(",", ":"))
+        version_id = f"features-{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
+        safe_version = _safe_catalog_version(CatalogVersionRequest(
+            id=version_id,
+            kind="feature",
+            name=body.name,
+            entries=safe_entries,
+            details={"source_filename": body.filename},
+        ))
+        version: dict[str, Any] | None
+        try:
+            version = await store.save_catalog_version(safe_version)
+        except ValueError:
+            version = await store.read_catalog_version(version_id)
+            if version is None:
+                raise
         return {
-            "id": f"features-{hashlib.sha256(canonical.encode()).hexdigest()[:16]}",
-            "name": body.name,
+            **version,
             "source_filename": body.filename,
-            "entries": entries,
             "csv_text": body.csv_text,
         }
+
+    @router.get("/catalogs")
+    async def list_catalogs(
+        request: Request,
+        kind: Literal["context", "feature"] | None = None,
+    ) -> list[dict[str, Any]]:
+        return await get_hosted_workbench(request.app).store.list_catalog_versions(kind)
+
+    @router.get("/catalogs/{version_id}")
+    async def get_catalog(request: Request, version_id: str) -> dict[str, Any]:
+        version = await get_hosted_workbench(request.app).store.read_catalog_version(
+            version_id
+        )
+        if version is None:
+            raise HTTPException(status_code=404, detail="Catalog version not found")
+        return version
+
+    @router.post("/catalogs", status_code=201)
+    async def save_catalog(
+        request: Request,
+        body: CatalogVersionRequest,
+    ) -> dict[str, Any]:
+        try:
+            return await get_hosted_workbench(request.app).store.save_catalog_version(
+                _safe_catalog_version(body)
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @router.post("/jobs", status_code=202)
     async def start_job(
@@ -238,6 +324,30 @@ def install_hosted_workbench(
             label = "Waypoint run" if activity == "waypoint" else "Context Workbench job"
             raise HTTPException(status_code=409, detail=f"A {label} is active")
         bundle, payload = await preview(request, body.evaluation_job_id)
+        job = await get_hosted_workbench(request.app).store.get(body.evaluation_job_id)
+        assert job is not None
+        context = await db.get(
+            WorkbenchCatalogVersionRow, bundle["context_catalog_version_id"]
+        )
+        feature = await db.get(
+            WorkbenchCatalogVersionRow, bundle["feature_catalog_version_id"]
+        )
+        if (
+            context is None
+            or context.kind != "context"
+            or dict(context.details or {}).get("recovered_metadata") is True
+        ):
+            raise HTTPException(status_code=422, detail="Context catalog version is unavailable")
+        if (
+            feature is None
+            or feature.kind != "feature"
+            or dict(feature.details or {}).get("recovered_metadata") is True
+        ):
+            raise HTTPException(status_code=422, detail="Feature catalog version is unavailable")
+        if context.entries != job.request.get("catalog_override"):
+            raise HTTPException(status_code=409, detail="Context catalog version does not match evaluation")
+        if feature.entries != job.request.get("feature_catalog_entries"):
+            raise HTTPException(status_code=409, detail="Feature catalog version does not match evaluation")
         await get_hosted_workbench(request.app).store.promote(bundle, session=db)
         await db.commit()
         return payload

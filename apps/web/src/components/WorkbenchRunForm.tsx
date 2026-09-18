@@ -3,9 +3,13 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   compareFeatureCatalogVersions,
+  clearLocalCatalogData,
+  contextVersionForServer,
+  contextVersionFromShared,
+  featureVersionForServer,
+  featureVersionFromShared,
   readCatalogVersions,
   readFeatureCatalogVersions,
-  saveFeatureCatalogVersion,
   selectCatalogVersion,
   selectFeatureCatalogVersion,
   selectedCatalogVersionId,
@@ -16,7 +20,9 @@ import {
 import {
   getWorkbenchStatus,
   getWorkbenchJob,
+  listWorkbenchCatalogs,
   resumeWorkbenchJob,
+  saveWorkbenchCatalog,
   startWorkbenchJob,
   validateFeatureCatalog,
   WORKBENCH_ACTIVE_JOB_KEY,
@@ -86,21 +92,53 @@ export function WorkbenchRunForm({
     };
     void refreshStatus();
     const statusTimer = window.setInterval(() => void refreshStatus(), 5000);
-    const refresh = () => {
-      const features = readFeatureCatalogVersions();
-      const contexts = readCatalogVersions();
-      setFeatureVersions(features);
-      setContextVersions(contexts);
-      setFeatureVersionId(selectedFeatureCatalogVersionId() || features.at(-1)?.id || "");
-      const selectedContext = selectedCatalogVersionId();
-      setContextVersionId(contexts.some((version) => version.id === selectedContext) ? selectedContext : "fresh");
+    const refresh = async () => {
+      try {
+        let [sharedContexts, sharedFeatures] = await Promise.all([
+          listWorkbenchCatalogs("context"),
+          listWorkbenchCatalogs("feature"),
+        ]);
+        const contextIds = new Set(sharedContexts.map((item) => item.id));
+        const sharedFeatureById = new Map(sharedFeatures.map((item) => [item.id, item]));
+        const sharedContextById = new Map(sharedContexts.map((item) => [item.id, item]));
+        const localContexts = readCatalogVersions().filter((item) => {
+          const shared = sharedContextById.get(item.id);
+          return !shared || shared.details.recovered_metadata === true;
+        });
+        const localFeatures = readFeatureCatalogVersions().filter((item) => {
+          const shared = sharedFeatureById.get(item.id);
+          return !shared || shared.details.recovered_metadata === true;
+        });
+        if (localContexts.length || localFeatures.length) {
+          await Promise.all([
+            ...localContexts.map((item) => saveWorkbenchCatalog(contextVersionForServer(item))),
+            ...localFeatures.map((item) => saveWorkbenchCatalog(featureVersionForServer(item))),
+          ]);
+          [sharedContexts, sharedFeatures] = await Promise.all([
+            listWorkbenchCatalogs("context"),
+            listWorkbenchCatalogs("feature"),
+          ]);
+          clearLocalCatalogData();
+        }
+        if (cancelled) return;
+        const features = sharedFeatures.map(featureVersionFromShared);
+        const contexts = sharedContexts.map(contextVersionFromShared);
+        setFeatureVersions(features);
+        setContextVersions(contexts);
+        setFeatureVersionId(selectedFeatureCatalogVersionId() || features.at(0)?.id || "");
+        const selectedContext = selectedCatalogVersionId();
+        setContextVersionId(contexts.some((version) => version.id === selectedContext) ? selectedContext : "fresh");
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Catalog history is unavailable");
+      }
     };
-    refresh();
-    window.addEventListener("waypoint-catalog-updated", refresh);
+    void refresh();
+    const refreshListener = () => void refresh();
+    window.addEventListener("waypoint-catalog-updated", refreshListener);
     return () => {
       cancelled = true;
       window.clearInterval(statusTimer);
-      window.removeEventListener("waypoint-catalog-updated", refresh);
+      window.removeEventListener("waypoint-catalog-updated", refreshListener);
     };
   }, []);
 
@@ -213,12 +251,14 @@ export function WorkbenchRunForm({
     setError(null);
     try {
       const previous = featureVersion;
-      const validated = await validateFeatureCatalog({
+      const validated = featureVersionFromShared(await validateFeatureCatalog({
         name: file.name.replace(/\.csv$/i, ""),
         filename: file.name,
         csv_text: await file.text(),
-      }) as FeatureCatalogVersion;
-      saveFeatureCatalogVersion(validated);
+      }));
+      setFeatureVersions((current) => [validated, ...current.filter((item) => item.id !== validated.id)]);
+      setFeatureVersionId(validated.id);
+      selectFeatureCatalogVersion(validated.id);
       setCatalogDiff(compareFeatureCatalogVersions(previous, validated));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Feature catalog validation failed");

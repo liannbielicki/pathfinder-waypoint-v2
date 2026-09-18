@@ -365,6 +365,24 @@ class ContextPromotionRow(Base):
     bundle: Mapped[dict[str, Any]]
     active: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    activated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WorkbenchCatalogVersionRow(Base):
+    __tablename__ = "workbench_catalog_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('context', 'feature')",
+            name="ck_workbench_catalog_versions_kind",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    kind: Mapped[str]
+    name: Mapped[str]
+    entries: Mapped[list[Any]] = mapped_column(default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class UsageRow(Base):

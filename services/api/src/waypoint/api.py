@@ -47,6 +47,7 @@ from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
 from waypoint.tables import (
     CandidateRow,
+    ContextPromotionRow,
     EvolveRoundRow,
     FleetControlRow,
     HandoffRow,
@@ -54,6 +55,7 @@ from waypoint.tables import (
     MeasurementRow,
     RunRow,
     WinnerRow,
+    WorkbenchCatalogVersionRow,
 )
 from waypoint.workbench_api import execute_run
 
@@ -66,6 +68,44 @@ def _staging_context_available(settings: Settings) -> bool:
             settings.CONTEXT_LAYER_API_KEY,
         )
     )
+
+
+async def _staging_context_summary(
+    session: AsyncSession, settings: Settings
+) -> dict[str, Any] | None:
+    if not _staging_context_available(settings):
+        return None
+    promotion = (
+        await session.execute(
+            select(ContextPromotionRow).where(ContextPromotionRow.active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if promotion is None:
+        return None
+    bundle = dict(promotion.bundle or {})
+    context_id = str(bundle.get("context_catalog_version_id") or "")
+    feature_id = str(bundle.get("feature_catalog_version_id") or "")
+    context = await session.get(WorkbenchCatalogVersionRow, context_id)
+    feature = await session.get(WorkbenchCatalogVersionRow, feature_id)
+    if (
+        context is None
+        or context.kind != "context"
+        or dict(context.details or {}).get("recovered_metadata") is True
+        or feature is None
+        or feature.kind != "feature"
+        or dict(feature.details or {}).get("recovered_metadata") is True
+    ):
+        return None
+    rules = bundle.get("rules")
+    return {
+        "promotion_id": promotion.id,
+        "context_catalog_version_id": context_id,
+        "context_catalog_name": context.name,
+        "feature_catalog_version_id": feature_id,
+        "feature_catalog_name": feature.name,
+        "included_variables": len(rules) if isinstance(rules, list) else 0,
+        "created_at": promotion.activated_at.isoformat(),
+    }
 
 
 class LoginRequest(BaseModel):
@@ -207,17 +247,20 @@ def create_app(
         request: Request, body: RunCreate, session: SessionDep, _: AuthDep
     ) -> RunView:
         settings: Settings = request.app.state.settings
-        if body.context_source == "staging" and not _staging_context_available(settings):
-            raise HTTPException(
-                status_code=422,
-                detail="Staging context is unavailable because its Workbench and Context Layer sources are not configured",
-            )
         if body.context_source == "staging" and any(
             not identifier.isdigit() for identifier in body.pro_ids
         ):
             raise HTTPException(
                 status_code=422,
                 detail="Staging context requires numeric organization IDs",
+            )
+        if (
+            body.context_source == "staging"
+            and await _staging_context_summary(session, settings) is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Staging context is unavailable because its sources or active Workbench catalog are missing",
             )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)
@@ -259,10 +302,12 @@ def create_app(
         assert fleet is not None
         effective = LoopConfig.from_mapping(dict(fleet.loop_defaults or {}))
         await session.commit()
+        staging_context = await _staging_context_summary(session, settings)
         return {
             "loop_defaults": effective.to_dict(),
             "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
-            "staging_context_available": _staging_context_available(settings),
+            "staging_context_available": staging_context is not None,
+            "staging_context": staging_context,
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)

@@ -19,6 +19,7 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 _TABLES = (
+    "workbench_catalog_versions",
     "context_promotions",
     "workbench_jobs",
     "measurements",

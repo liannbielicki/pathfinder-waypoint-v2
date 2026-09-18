@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -18,6 +19,7 @@ from waypoint.tables import (
     RunRow,
     TouchOutcomeRow,
     WinnerRow,
+    WorkbenchCatalogVersionRow,
     WorkbenchJobRow,
 )
 
@@ -27,6 +29,29 @@ RUN_REQUEST = {
     "audience_run": "2026-08-06T18:00:00Z",
     "channels": ["sms"],
 }
+
+
+def _ready_staging_rows() -> list[object]:
+    return [
+        WorkbenchCatalogVersionRow(
+            id="context-ready", kind="context", name="Ready context",
+            entries=[], details={},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-ready", kind="feature", name="Ready features",
+            entries=[], details={},
+        ),
+        ContextPromotionRow(
+            id="promotion-ready",
+            active=True,
+            bundle={
+                "id": "promotion-ready",
+                "context_catalog_version_id": "context-ready",
+                "feature_catalog_version_id": "features-ready",
+                "rules": [],
+            },
+        ),
+    ]
 
 
 
@@ -406,7 +431,8 @@ async def test_fleet_settings_endpoint_exposes_defaults_and_the_cap(
     body = response.json()
     assert body["max_in_flight_llm_calls"] == 4
     assert body["loop_defaults"]["MAX_ROUNDS"] == 10
-    assert body["staging_context_available"] is True
+    assert body["staging_context_available"] is False
+    assert body["staging_context"] is None
 
 
 async def test_staging_run_is_rejected_when_workbench_url_is_unavailable(
@@ -431,10 +457,13 @@ async def test_staging_run_is_rejected_when_workbench_url_is_unavailable(
 
 async def test_staging_readiness_ignores_deprecated_staging_url(
     db_session_factory,
+    db_session: AsyncSession,
 ) -> None:
     from waypoint.api import create_app
 
     settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_STAGING": None})
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
     app = create_app(settings=settings, session_factory=db_session_factory)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
@@ -461,7 +490,10 @@ async def test_staging_rejects_non_numeric_ids_before_enqueue(
 
 async def test_staging_preserves_numeric_organization_id_as_a_string(
     auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
 ) -> None:
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
     response = await auth_client.post(
         "/api/runs",
         json={**RUN_REQUEST, "pro_ids": ["889901"], "context_source": "staging"},
@@ -483,6 +515,138 @@ async def test_hosted_workbench_routes_require_the_waypoint_session(
         "/api/context-workbench/jobs",
         json={"identifier": "889901", "workbench_mode": "compile"},
     )).status_code == 401
+
+
+async def test_hosted_workbench_catalog_versions_are_shared_and_immutable(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    version = {
+        "id": "context-shared",
+        "kind": "context",
+        "name": "Shared context",
+        "entries": [{
+            "key": "JOBS_CREATED_T28",
+            "canonical_key": "jobs_created_t28",
+            "disposition": "include",
+        }],
+        "details": {"feature_catalog_version_id": "features-shared"},
+    }
+
+    created = await auth_client.post("/api/context-workbench/catalogs", json=version)
+    listed = await auth_client.get("/api/context-workbench/catalogs?kind=context")
+    loaded = await auth_client.get("/api/context-workbench/catalogs/context-shared")
+    conflict = await auth_client.post(
+        "/api/context-workbench/catalogs", json={**version, "name": "Changed"}
+    )
+
+    assert created.status_code == 201
+    assert listed.json()[0]["id"] == "context-shared"
+    assert loaded.json()["entries"][0]["key"] == "JOBS_CREATED_T28"
+    assert conflict.status_code == 409
+
+
+async def test_catalog_metadata_is_scrubbed_before_persistence(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    response = await auth_client.post("/api/context-workbench/catalogs", json={
+        "id": "context-safe-metadata",
+        "kind": "context",
+        "name": "pro@example.com",
+        "entries": [],
+        "details": {"prompt": "Contact pro@example.com", "confidence_threshold": 0.8},
+    })
+
+    assert response.status_code == 201
+    assert response.json()["name"] == "context catalog"
+    assert response.json()["details"] == {"confidence_threshold": 0.8}
+
+
+async def test_reuploading_the_same_feature_catalog_is_idempotent(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    csv_text = "feature,description,customer_email\njobs,Manage jobs,pro@example.com\n"
+
+    first = await auth_client.post(
+        "/api/context-workbench/catalog/validate",
+        json={"name": "September features", "filename": "features.csv", "csv_text": csv_text},
+    )
+    repeated = await auth_client.post(
+        "/api/context-workbench/catalog/validate",
+        json={
+            "name": "Renamed upload",
+            "filename": "renamed.csv",
+            "csv_text": csv_text.replace("pro@example.com", "other@example.com"),
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["entries"] == [{"feature": "jobs", "description": "Manage jobs"}]
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == first.json()["id"]
+
+
+async def test_orphaned_promotion_does_not_make_staging_available(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(ContextPromotionRow(
+        id="promotion-orphaned",
+        active=True,
+        bundle={
+            "context_catalog_version_id": "missing-context",
+            "feature_catalog_version_id": "missing-features",
+            "rules": [],
+        },
+    ))
+    await db_session.commit()
+
+    body = (await auth_client.get("/api/fleet/settings")).json()
+
+    assert body["staging_context_available"] is False
+    assert body["staging_context"] is None
+
+
+async def test_fleet_settings_identifies_the_active_staging_catalog(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-shared", kind="context", name="Shared context",
+            entries=[], details={},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-shared", kind="feature", name="September features",
+            entries=[], details={},
+        ),
+        ContextPromotionRow(
+            id="promotion-shared",
+            active=True,
+                bundle={
+                    "id": "promotion-shared",
+                    "created_at": "2026-09-18T16:04:05+00:00",
+                    "activated_at": "2026-09-18T16:04:05+00:00",
+                "context_catalog_version_id": "context-shared",
+                "feature_catalog_version_id": "features-shared",
+                "rules": [{"canonical_key": "jobs_created_t28"}],
+            },
+            activated_at=datetime(2026, 9, 18, 16, 4, 5, tzinfo=UTC),
+        ),
+    ])
+    await db_session.commit()
+
+    body = (await auth_client.get("/api/fleet/settings")).json()
+
+    assert body["staging_context_available"] is True
+    assert body["staging_context"] == {
+        "promotion_id": "promotion-shared",
+        "context_catalog_version_id": "context-shared",
+        "context_catalog_name": "Shared context",
+        "feature_catalog_version_id": "features-shared",
+        "feature_catalog_name": "September features",
+        "included_variables": 1,
+        "created_at": "2026-09-18T16:04:05+00:00",
+    }
 
 
 async def test_active_waypoint_run_locks_the_hosted_workbench(
@@ -615,7 +779,20 @@ async def test_hosted_workbench_activates_an_immutable_promotion(
         "uncertainty_reason": None,
         "source_table": "ANALYTICS.JOBS",
     }
-    db_session.add(WorkbenchJobRow(
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-v1", kind="context", name="Context v1",
+            entries=[entry], details={},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-v1", kind="feature", name="Features v1",
+            entries=[{
+                "feature": "jobs",
+                "Product Area": "Operations",
+                "Value Statement": "Create and manage jobs.",
+            }], details={},
+        ),
+        WorkbenchJobRow(
         id="evaluation-complete",
         status="completed",
         request={
@@ -631,7 +808,8 @@ async def test_hosted_workbench_activates_an_immutable_promotion(
             "feature_catalog_version_id": "features-v1",
         },
         result={"outputs": {"evaluation": {"judge": {"winner": "curated"}}}},
-    ))
+        ),
+    ])
     await db_session.commit()
 
     response = await auth_client.post(
@@ -646,7 +824,17 @@ async def test_hosted_workbench_activates_an_immutable_promotion(
     )
     promotion = await db_session.get(ContextPromotionRow, response.json()["id"])
     assert promotion is not None and promotion.active is True
+    activated_at = promotion.activated_at
     assert promotion.bundle["feature_catalog"][0]["feature"] == "jobs"
+
+    repeated = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-complete"},
+    )
+    await db_session.refresh(promotion)
+
+    assert repeated.status_code == 200
+    assert promotion.activated_at == activated_at
 
 
 async def test_hosted_workbench_cannot_promote_during_a_waypoint_run(

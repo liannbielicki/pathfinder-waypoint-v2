@@ -1,6 +1,6 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { previewContextPromotion, promoteContext, startWorkbenchJob } from "@/lib/workbench";
+import { previewContextPromotion, promoteContext, saveWorkbenchCatalog, startWorkbenchJob } from "@/lib/workbench";
 import { AuthoringCatalog } from "./AuthoringCatalog";
 
 vi.mock("@/lib/workbench", async (importOriginal) => ({
@@ -9,12 +9,12 @@ vi.mock("@/lib/workbench", async (importOriginal) => ({
   getWorkbenchJob: vi.fn(),
   promoteContext: vi.fn(),
   previewContextPromotion: vi.fn(),
+  saveWorkbenchCatalog: vi.fn(),
 }));
 
 vi.mock("@/lib/catalogVersions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/catalogVersions")>()),
   newCatalogVersionId: () => "context-test",
-  saveCatalogVersion: vi.fn(),
 }));
 
 const trace = {
@@ -48,6 +48,11 @@ describe("AuthoringCatalog", () => {
     vi.mocked(startWorkbenchJob).mockReset();
     vi.mocked(promoteContext).mockReset();
     vi.mocked(previewContextPromotion).mockReset();
+    vi.mocked(saveWorkbenchCatalog).mockReset();
+    vi.mocked(saveWorkbenchCatalog).mockImplementation(async (version) => ({
+      ...version,
+      created_at: "2026-09-18T16:04:05Z",
+    }));
     vi.mocked(previewContextPromotion).mockResolvedValue({
       id: "promotion-preview",
       included_variables: 1,
@@ -82,7 +87,7 @@ describe("AuthoringCatalog", () => {
     render(<AuthoringCatalog trace={trace} />);
 
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
-    fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /compile 1 approved variable/i }));
 
     expect(await screen.findByText(/baseline compiled successfully/i)).toBeInTheDocument();
     expect(screen.getByText(/1 approved selection.*1 compiled rule.*11 estimated tokens/i)).toBeInTheDocument();
@@ -109,7 +114,7 @@ describe("AuthoringCatalog", () => {
       });
     render(<AuthoringCatalog trace={trace} />);
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
-    fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /compile 1 approved variable/i }));
 
     const evaluate = await screen.findByRole("button", { name: /test curated context/i });
     fireEvent.click(evaluate);
@@ -173,7 +178,7 @@ describe("AuthoringCatalog", () => {
 
     expect(screen.queryByRole("button", { name: /promote to waypoint/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
-    fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /compile 1 approved variable/i }));
     fireEvent.click(await screen.findByRole("button", { name: /test curated context/i }));
     const download = await screen.findByRole("link", { name: /download snowflake handoff csv/i });
     expect(download).toHaveAttribute("download", "promotion-one-snowflake-handoff.csv");
@@ -197,7 +202,7 @@ describe("AuthoringCatalog", () => {
       });
     render(<AuthoringCatalog trace={trace} />);
     fireEvent.click(screen.getByRole("button", { name: /save new immutable version/i }));
-    fireEvent.click(screen.getByRole("button", { name: /compile 1 approved variable/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /compile 1 approved variable/i }));
     fireEvent.click(await screen.findByRole("button", { name: /test curated context/i }));
     expect(await screen.findByRole("button", { name: /activate in waypoint/i })).toBeInTheDocument();
 
@@ -224,7 +229,7 @@ describe("AuthoringCatalog", () => {
     expect(container.querySelector("table")).toBeNull();
   });
 
-  it("promotes an approved deprioritized variable into include", () => {
+  it("promotes an approved deprioritized variable into include", async () => {
     render(<AuthoringCatalog trace={trace} />);
     const save = screen.getByRole("button", { name: /save new immutable version/i });
     const compile = screen.getByRole("button", { name: /compile 1 approved variable/i });
@@ -242,17 +247,17 @@ describe("AuthoringCatalog", () => {
     expect(screen.getAllByText("auto approved")).toHaveLength(2);
     expect(save).toBeEnabled();
     fireEvent.click(save);
-    expect(compile).toBeEnabled();
+    await waitFor(() => expect(compile).toBeEnabled());
   });
 
-  it("saves parked deprioritized variables as an edited version", () => {
+  it("saves parked deprioritized variables as an edited version", async () => {
     render(<AuthoringCatalog trace={trace} />);
 
     const save = screen.getByRole("button", { name: /save new immutable version/i });
     expect(save).toBeEnabled();
     fireEvent.click(save);
 
-    expect(screen.getByText("Edited")).toBeInTheDocument();
+    expect(await screen.findByText("Edited")).toBeInTheDocument();
     expect(screen.getByText(/next step.*compile 1 approved variable/i)).toBeInTheDocument();
     const compile = screen.getByRole("button", { name: /compile 1 approved variable/i });
     expect(compile).toBeEnabled();
@@ -359,16 +364,16 @@ describe("AuthoringCatalog", () => {
       approval_status: "human_approved",
       review_status: "reviewed",
     }];
-    localStorage.setItem("waypoint-context-catalog-versions", JSON.stringify([{
-      id: "context-reviewed",
-      name: "Reviewed",
-      created_at: "2026-09-16T00:00:00Z",
-      prompt: "prompt",
-      entries: reviewed,
-    }]));
     localStorage.setItem("waypoint-context-workbench-job-version:authoring-1", "context-reviewed");
 
-    render(<AuthoringCatalog trace={{ ...trace, job_id: "authoring-1" }} />);
+    render(<AuthoringCatalog trace={{
+      ...trace,
+      job_id: "authoring-1",
+      outputs: {
+        ...trace.outputs,
+        authoring: { ...trace.outputs.authoring, draft: reviewed },
+      },
+    }} />);
 
     expect(screen.getByText(/no deprioritized variables parked/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /include 1/i })).toBeInTheDocument();

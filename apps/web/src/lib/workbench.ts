@@ -1,3 +1,5 @@
+import type { SharedCatalogVersion } from "@/lib/catalogVersions";
+
 export type WorkbenchStage = {
   name: string;
   status: string;
@@ -90,6 +92,24 @@ export async function validateFeatureCatalog(input: { name: string; filename: st
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }));
+}
+
+export async function listWorkbenchCatalogs(
+  kind: "context" | "feature",
+): Promise<SharedCatalogVersion[]> {
+  return responsePayload(
+    await request(`/api/context-workbench/catalogs?kind=${kind}`),
+  ) as Promise<SharedCatalogVersion[]>;
+}
+
+export async function saveWorkbenchCatalog(
+  version: Omit<SharedCatalogVersion, "created_at">,
+): Promise<SharedCatalogVersion> {
+  return responsePayload(await request("/api/context-workbench/catalogs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(version),
+  })) as Promise<SharedCatalogVersion>;
 }
 
 export async function promoteContext(input: {

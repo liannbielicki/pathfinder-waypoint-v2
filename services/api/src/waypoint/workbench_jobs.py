@@ -12,10 +12,15 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint.db import session_scope
-from waypoint.tables import ContextPromotionRow, WorkbenchJobRow
+from waypoint.tables import (
+    ContextPromotionRow,
+    WorkbenchCatalogVersionRow,
+    WorkbenchJobRow,
+)
 from waypoint.workbench import is_pii_variable_key, scrub_pii
 
 _SAFE_REQUEST_FIELDS = {
@@ -47,6 +52,14 @@ def _now() -> str:
 
 def sanitize_job_request(value: dict[str, Any]) -> dict[str, Any]:
     sanitized = {key: item for key, item in value.items() if key in _SAFE_REQUEST_FIELDS}
+    for key in ("authoring_prompt", "catalog_version_name"):
+        if key not in sanitized:
+            continue
+        safe_metadata, _ledger = scrub_pii({key: sanitized[key]})
+        if key in safe_metadata:
+            sanitized[key] = safe_metadata[key]
+        else:
+            sanitized.pop(key)
     feature_entries = sanitized.get("feature_catalog_entries")
     if isinstance(feature_entries, list):
         safe_features = []
@@ -71,11 +84,15 @@ def sanitize_job_request(value: dict[str, Any]) -> dict[str, Any]:
             if is_pii_variable_key(str(entry.get("key") or ""))
             or is_pii_variable_key(str(entry.get("canonical_key") or ""))
         ]
-        sanitized["catalog_override"] = [
-            {key: item for key, item in entry.items() if key in _CATALOG_FIELDS}
-            for entry in entries
-            if entry not in pii_entries
-        ]
+        safe_catalog = []
+        for entry in entries:
+            if entry in pii_entries:
+                continue
+            safe, _ledger = scrub_pii(
+                {key: item for key, item in entry.items() if key in _CATALOG_FIELDS}
+            )
+            safe_catalog.append(safe)
+        sanitized["catalog_override"] = safe_catalog
         sanitized["catalog_approved_count"] = len(approved)
         sanitized["catalog_pii_removed_count"] = sum(
             1 for entry in approved if entry in pii_entries
@@ -217,6 +234,17 @@ def _postgres_job(row: WorkbenchJobRow) -> WorkbenchJob:
     )
 
 
+def _catalog_payload(row: WorkbenchCatalogVersionRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "kind": row.kind,
+        "name": row.name,
+        "entries": list(row.entries or []),
+        "details": dict(row.details or {}),
+        "created_at": row.created_at.isoformat(),
+    }
+
+
 class PostgresWorkbenchStore:
     """Async durable store used by the Railway-hosted Workbench."""
 
@@ -302,13 +330,28 @@ class PostgresWorkbenchStore:
         existing = await session.get(ContextPromotionRow, promotion_id)
         if existing is not None and existing.bundle != bundle:
             raise ValueError("promotion id already exists with different content")
-        await session.execute(update(ContextPromotionRow).values(active=False))
+        await session.execute(
+            update(ContextPromotionRow)
+            .where(ContextPromotionRow.id != promotion_id)
+            .values(active=False)
+        )
         if existing is None:
-            session.add(
-                ContextPromotionRow(id=promotion_id, bundle=bundle, active=True)
-            )
-        else:
+            inserted = (
+                await session.execute(
+                    insert(ContextPromotionRow)
+                    .values(id=promotion_id, bundle=bundle, active=True)
+                    .on_conflict_do_nothing(index_elements=["id"])
+                    .returning(ContextPromotionRow.id)
+                )
+            ).scalar_one_or_none()
+            if inserted is None:
+                existing = await session.get(ContextPromotionRow, promotion_id)
+                assert existing is not None
+                if existing.bundle != bundle:
+                    raise ValueError("promotion id already exists with different content")
+        if existing is not None and not existing.active:
             existing.active = True
+            existing.activated_at = datetime.now(UTC)
         await session.flush()
 
     async def read_active_promotion(self) -> dict[str, Any] | None:
@@ -319,6 +362,77 @@ class PostgresWorkbenchStore:
                 )
             ).scalar_one_or_none()
             return dict(row.bundle) if row is not None else None
+
+    async def save_catalog_version(
+        self,
+        version: dict[str, Any],
+        *,
+        session: AsyncSession | None = None,
+    ) -> dict[str, Any]:
+        if session is None:
+            async with session_scope(self.factory) as owned:
+                return await self.save_catalog_version(version, session=owned)
+        version_id = str(version.get("id") or "")
+        incoming: dict[str, Any] = {
+            "kind": str(version.get("kind") or ""),
+            "name": str(version.get("name") or version_id),
+            "entries": list(version.get("entries") or []),
+            "details": dict(version.get("details") or {}),
+        }
+        existing = await session.get(WorkbenchCatalogVersionRow, version_id)
+        if existing is not None:
+            current = _catalog_payload(existing)
+            if (
+                current["kind"] == incoming["kind"]
+                and current["entries"] == incoming["entries"]
+                and current["details"].get("recovered_metadata") is True
+            ):
+                existing.name = incoming["name"]
+                existing.details = incoming["details"]
+                await session.flush()
+                await session.refresh(existing)
+                return _catalog_payload(existing)
+            if any(current[key] != incoming[key] for key in incoming):
+                raise ValueError("catalog version id already exists with different content")
+            return current
+        inserted = (
+            await session.execute(
+                insert(WorkbenchCatalogVersionRow)
+                .values(id=version_id, **incoming)
+                .on_conflict_do_nothing(index_elements=["id"])
+                .returning(WorkbenchCatalogVersionRow.id)
+            )
+        ).scalar_one_or_none()
+        row = await session.get(WorkbenchCatalogVersionRow, version_id)
+        assert row is not None
+        current = _catalog_payload(row)
+        if inserted is None and any(
+            current[key] != incoming[key] for key in incoming
+        ):
+            raise ValueError("catalog version id already exists with different content")
+        return current
+
+    async def read_catalog_version(self, version_id: str) -> dict[str, Any] | None:
+        async with self.factory() as session:
+            row = await session.get(WorkbenchCatalogVersionRow, version_id)
+            return _catalog_payload(row) if row is not None else None
+
+    async def list_catalog_versions(
+        self, kind: str | None = None
+    ) -> list[dict[str, Any]]:
+        async with self.factory() as session:
+            query = select(WorkbenchCatalogVersionRow)
+            if kind is not None:
+                query = query.where(WorkbenchCatalogVersionRow.kind == kind)
+            rows = (
+                await session.execute(
+                    query.order_by(
+                        WorkbenchCatalogVersionRow.created_at.desc(),
+                        WorkbenchCatalogVersionRow.id.desc(),
+                    )
+                )
+            ).scalars().all()
+            return [_catalog_payload(row) for row in rows]
 
     async def _update(self, job_id: str, **values: Any) -> None:
         async with session_scope(self.factory) as session:

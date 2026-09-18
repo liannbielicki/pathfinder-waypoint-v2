@@ -170,6 +170,116 @@ async def test_postgres_store_activates_one_immutable_promotion(db_session_facto
         await store.promote({**second, "rules": []})
 
 
+async def test_postgres_store_shares_immutable_catalog_versions(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    version = {
+        "id": "context-one",
+        "kind": "context",
+        "name": "First context",
+        "entries": [_complete_entry("JOBS_CREATED_T28")],
+        "details": {"feature_catalog_version_id": "features-one"},
+    }
+
+    saved = await store.save_catalog_version(version)
+    repeated = await store.save_catalog_version(version)
+    loaded = await PostgresWorkbenchStore(db_session_factory).read_catalog_version(
+        "context-one"
+    )
+
+    assert repeated == saved
+    assert loaded == saved
+    assert loaded["created_at"].endswith("+00:00")
+    with pytest.raises(ValueError, match="different content"):
+        await store.save_catalog_version({**version, "name": "Changed"})
+
+
+async def test_concurrent_identical_catalog_saves_are_idempotent(db_session_factory):
+    version = {
+        "id": "context-concurrent",
+        "kind": "context",
+        "name": "Concurrent context",
+        "entries": [_complete_entry("JOBS_CREATED_T28")],
+        "details": {},
+    }
+
+    first, second = await asyncio.gather(
+        PostgresWorkbenchStore(db_session_factory).save_catalog_version(version),
+        PostgresWorkbenchStore(db_session_factory).save_catalog_version(version),
+    )
+
+    assert first == second
+
+
+async def test_backfilled_feature_metadata_can_be_repaired_once(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    entries = [{"feature": "jobs", "description": "Manage jobs"}]
+    await store.save_catalog_version({
+        "id": "features-recovered", "kind": "feature",
+        "name": "features-recovered", "entries": entries,
+        "details": {"recovered_metadata": True},
+    })
+
+    repaired = await store.save_catalog_version({
+        "id": "features-recovered", "kind": "feature",
+        "name": "September features", "entries": entries,
+        "details": {"source_filename": "features.csv"},
+    })
+
+    assert repaired["name"] == "September features"
+    assert repaired["details"] == {"source_filename": "features.csv"}
+    with pytest.raises(ValueError, match="different content"):
+        await store.save_catalog_version({**repaired, "name": "Changed again"})
+
+
+async def test_backfilled_context_metadata_keeps_its_feature_reference_on_repair(
+    db_session_factory,
+):
+    store = PostgresWorkbenchStore(db_session_factory)
+    entries = [_complete_entry("JOBS_CREATED_T28")]
+    await store.save_catalog_version({
+        "id": "context-recovered", "kind": "context",
+        "name": "Recovered context", "entries": entries,
+        "details": {
+            "feature_catalog_version_id": "features-one",
+            "recovered_metadata": True,
+        },
+    })
+
+    repaired = await store.save_catalog_version({
+        "id": "context-recovered", "kind": "context",
+        "name": "September context", "entries": entries,
+        "details": {
+            "feature_catalog_version_id": "features-one",
+            "prompt": "Create compact context.",
+        },
+    })
+
+    assert repaired["name"] == "September context"
+    assert repaired["details"] == {
+        "feature_catalog_version_id": "features-one",
+        "prompt": "Create compact context.",
+    }
+
+
+async def test_postgres_store_lists_catalog_versions_newest_first(db_session_factory):
+    store = PostgresWorkbenchStore(db_session_factory)
+    await store.save_catalog_version({
+        "id": "context-one", "kind": "context", "name": "First",
+        "entries": [], "details": {},
+    })
+    await store.save_catalog_version({
+        "id": "features-one", "kind": "feature", "name": "Features",
+        "entries": [{"feature": "jobs"}], "details": {},
+    })
+
+    assert [item["id"] for item in await store.list_catalog_versions()] == [
+        "features-one", "context-one",
+    ]
+    assert [item["id"] for item in await store.list_catalog_versions("context")] == [
+        "context-one"
+    ]
+
+
 async def test_two_hosted_processes_execute_one_workbench_job_once(
     db_session_factory,
 ) -> None:

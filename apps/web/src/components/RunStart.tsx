@@ -53,6 +53,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [journeyWindow, setJourneyWindow] = useState("churn_risk");
   const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
   const [stagingAvailable, setStagingAvailable] = useState(false);
+  const [stagingContext, setStagingContext] = useState<Awaited<ReturnType<typeof getFleetSettings>>["staging_context"]>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaults, setDefaults] = useState<Record<string, number> | null>(null);
@@ -70,6 +71,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         setDefaults(settings.loop_defaults);
         setFleetCap(settings.max_in_flight_llm_calls);
         setStagingAvailable(settings.staging_context_available);
+        setStagingContext(settings.staging_context);
         // Only fields the server actually advertises get a value. A key the
         // API does not know (an older API than this UI) would otherwise render
         // as the string "undefined" — an empty number input that reads as
@@ -260,7 +262,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         </div>
         <p className="helper">
           {contextSource === "staging"
-            ? "Staging filters the full Workbench source and Context Layer API through the active approved Workbench catalog."
+            ? stagingContext
+              ? <>Staging uses <strong>{stagingContext.context_catalog_name}</strong> (<code>{stagingContext.context_catalog_version_id}</code>) with <strong>{stagingContext.feature_catalog_name}</strong> (<code>{stagingContext.feature_catalog_version_id}</code>) · {stagingContext.included_variables} approved variables · {new Intl.DateTimeFormat("en-US", { timeZone: "UTC", timeZoneName: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date(stagingContext.created_at))}.</>
+              : "Staging is not ready because no active approved Workbench catalog is available."
             : "Standard uses today&apos;s production workflow."}
         </p>
       </fieldset>

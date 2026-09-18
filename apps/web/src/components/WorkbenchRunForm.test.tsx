@@ -11,15 +11,27 @@ describe("WorkbenchRunForm", () => {
       removeItem: (key: string) => values.delete(key),
       clear: () => values.clear(),
     });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    const shared = { context: [] as Record<string, unknown>[], feature: [] as Record<string, unknown>[] };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string, init?: RequestInit) => ({
       ok: true,
-      json: async () => ({
-        env_file: "/project/services/api/.env",
-        env_file_exists: true,
-        configured: { snowflake: true, context_layer: true, ai: true, model: true },
-        activity: "idle",
-      }),
-    }));
+      json: async () => {
+        if (url.includes("/catalogs?kind=context")) return shared.context;
+        if (url.includes("/catalogs?kind=feature")) return shared.feature;
+        if (url.endsWith("/catalogs") && init?.method === "POST") {
+          const version = JSON.parse(String(init.body));
+          const saved = { ...version, created_at: "2026-09-18T16:04:05Z" };
+          const versions = shared[version.kind as "context" | "feature"];
+          if (!versions.some((item) => item.id === version.id)) versions.unshift(saved);
+          return saved;
+        }
+        return {
+          env_file: "/project/services/api/.env",
+          env_file_exists: true,
+          configured: { snowflake: true, context_layer: true, ai: true, model: true },
+          activity: "idle",
+        };
+      },
+    })));
   });
 
   it("does not collect credential fields in the browser", () => {
@@ -143,6 +155,50 @@ describe("WorkbenchRunForm", () => {
       expect.stringMatching(/\/jobs$/),
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("loads shared Postgres catalog versions without browser-local data", async () => {
+    const shared = {
+      id: "context-shared",
+      kind: "context",
+      name: "Shared context",
+      created_at: "2026-09-18T16:04:05Z",
+      entries: [{
+        key: "JOBS_CREATED",
+        canonical_key: "jobs_created",
+        disposition: "include",
+      }],
+      details: { prompt: "shared prompt", confidence_threshold: 0.9 },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string) => ({
+      ok: true,
+      json: async () => url.includes("/catalogs?kind=context")
+        ? [shared]
+        : url.includes("/catalogs?kind=feature")
+          ? []
+          : {
+              env_file: "Railway service environment",
+              env_file_exists: false,
+              configured: { snowflake: true, context_layer: true, ai: true, model: true },
+              activity: "idle",
+            },
+    })));
+    const onRun = vi.fn();
+
+    render(<WorkbenchRunForm onRun={onRun} busy={false} />);
+
+    const option = await screen.findByRole("option", { name: /shared context/i });
+    fireEvent.change(screen.getByLabelText(/start from prior context catalog/i), {
+      target: { value: "context-shared" },
+    });
+    expect(option).toBeVisible();
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      outputs: expect.objectContaining({
+        authoring: expect.objectContaining({
+          draft: [expect.objectContaining({ key: "JOBS_CREATED" })],
+        }),
+      }),
+    }));
   });
 
   it("restores every legacy draft using its predetermined disposition", async () => {

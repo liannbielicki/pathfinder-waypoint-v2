@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { newCatalogVersionId, readCatalogVersions, saveCatalogVersion, selectedCatalogVersionId, type CatalogVersion } from "@/lib/catalogVersions";
-import { getWorkbenchJob, previewContextPromotion, promoteContext, startWorkbenchJob, WORKBENCH_ACTIVE_JOB_KEY, type PromotionResult, type WorkbenchTrace } from "@/lib/workbench";
+import { contextVersionForServer, newCatalogVersionId, selectCatalogVersion, type CatalogVersion } from "@/lib/catalogVersions";
+import { getWorkbenchJob, previewContextPromotion, promoteContext, saveWorkbenchCatalog, startWorkbenchJob, WORKBENCH_ACTIVE_JOB_KEY, type PromotionResult, type WorkbenchTrace } from "@/lib/workbench";
 
 type Entry = {
   key?: string;
@@ -40,11 +40,7 @@ function draftFromTrace(trace: WorkbenchTrace): Entry[] {
 }
 
 export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace; onCompiled?: (trace: WorkbenchTrace) => void }) {
-  const initialEntries = useMemo(() => {
-    const linked = linkedVersionId(trace);
-    const version = linked ? readCatalogVersions().find((item) => item.id === linked) : undefined;
-    return (version?.entries as Entry[] | undefined) ?? draftFromTrace(trace);
-  }, [trace]);
+  const initialEntries = useMemo(() => draftFromTrace(trace), [trace]);
   const [entries, setEntries] = useState<Entry[]>(initialEntries);
   const catalogEntries = entries.map((entry) => entry.disposition === "deprioritize"
     && (entry.approval_status === "human_approved" || entry.review_status === "reviewed")
@@ -55,11 +51,10 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
   const [versionName, setVersionName] = useState(`Context catalog ${new Date().toLocaleDateString()}`);
   const [savedVersionId, setSavedVersionId] = useState<string | null>(() => {
     const linked = linkedVersionId(trace);
-    if (linked && readCatalogVersions().some((item) => item.id === linked)) return linked;
-    const selected = selectedCatalogVersionId();
-    const version = readCatalogVersions().find((item) => item.id === selected);
-    return version && JSON.stringify(version.entries) === JSON.stringify(initialEntries) ? version.id : null;
+    const restored = (trace.outputs.authoring as { catalog_version?: { id?: string | null } } | undefined)?.catalog_version?.id;
+    return linked || restored || null;
   });
+  const [saving, setSaving] = useState(false);
   const [compiling, setCompiling] = useState(false);
   const [compiled, setCompiled] = useState<WorkbenchTrace | null>(null);
   const [evaluating, setEvaluating] = useState(false);
@@ -131,7 +126,7 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
     changeDisposition(index, "include");
   }
 
-  function save() {
+  async function save() {
     const now = new Date().toISOString();
     const version: CatalogVersion = {
       id: newCatalogVersionId(),
@@ -144,13 +139,22 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
       confidence_threshold: authoring?.confidence_threshold ?? 0.8,
       excluded_keys: catalogEntries.filter((entry) => entry.approval_status === "excluded").map((entry) => String(entry.key ?? "")),
     };
-    saveCatalogVersion(version);
-    if (trace.job_id) window.localStorage.setItem(`${JOB_VERSION_PREFIX}${trace.job_id}`, version.id);
-    setSavedVersionId(version.id);
-    setCompiled(null);
-    setEvaluationTrace(null);
-    setPromotionPreview(null);
-    setPromotion(null);
+    setSaving(true);
+    setError(null);
+    try {
+      await saveWorkbenchCatalog(contextVersionForServer(version));
+      selectCatalogVersion(version.id);
+      if (trace.job_id) window.localStorage.setItem(`${JOB_VERSION_PREFIX}${trace.job_id}`, version.id);
+      setSavedVersionId(version.id);
+      setCompiled(null);
+      setEvaluationTrace(null);
+      setPromotionPreview(null);
+      setPromotion(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Catalog could not be saved");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function compile() {
@@ -258,7 +262,7 @@ export function AuthoringCatalog({ trace, onCompiled }: { trace: WorkbenchTrace;
     {parseError && <p className="error">Authoring failed: {parseError.error ?? "invalid model response"}</p>}
     <div className="compile-bar">
       <div className="compile-actions">
-        <button type="button" className={savedVersionId ? "secondary" : undefined} aria-label="Save new immutable version" onClick={save} disabled={catalogEntries.length === 0 || Boolean(savedVersionId)}>{savedVersionId ? "Saved immutable version" : "Save immutable version"}</button>
+        <button type="button" className={savedVersionId ? "secondary" : undefined} aria-label="Save new immutable version" onClick={() => void save()} disabled={catalogEntries.length === 0 || Boolean(savedVersionId) || saving}>{saving ? "Saving…" : savedVersionId ? "Saved immutable version" : "Save immutable version"}</button>
         <button type="button" className={savedVersionId ? undefined : "secondary"} aria-label={completedOutput ? `Compiled ${compiledRuleCount} rule${compiledRuleCount === 1 ? "" : "s"}` : `Compile ${included} approved variable${included === 1 ? "" : "s"}`} onClick={() => void compile()} disabled={!savedVersionId || included === 0 || compiling || Boolean(completedOutput)}>{compiling ? "Compiling…" : completedOutput ? `Compiled ${compiledRuleCount} rule${compiledRuleCount === 1 ? "" : "s"}` : `Compile ${included} approved variable${included === 1 ? "" : "s"}`}</button>
         {savedVersionId && <span className="edited-tag">Edited</span>}
       </div>

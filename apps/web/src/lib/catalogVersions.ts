@@ -19,7 +19,16 @@ export type FeatureCatalogVersion = {
   source_filename: string;
   created_at: string;
   entries: FeatureCatalogEntry[];
-  csv_text: string;
+  csv_text?: string;
+};
+
+export type SharedCatalogVersion = {
+  id: string;
+  kind: "context" | "feature";
+  name: string;
+  entries: Record<string, unknown>[];
+  details: Record<string, unknown>;
+  created_at: string;
 };
 
 const CONTEXT_VERSIONS_KEY = "waypoint-context-catalog-versions";
@@ -49,7 +58,8 @@ export function readCatalogVersions(): CatalogVersion[] {
     const legacy = JSON.parse(window.localStorage.getItem(LEGACY_KEY) ?? "{}");
     if (Array.isArray(legacy.entries) && legacy.entries.length > 0) {
       const timestamp = legacy.saved_at ?? new Date().toISOString();
-      return [{ id: "legacy", name: "Imported draft", created_at: timestamp, prompt: "", entries: legacy.entries }];
+      const legacyId = `legacy-${String(timestamp).replace(/[^a-zA-Z0-9]/g, "")}-${legacy.entries.length}`;
+      return [{ id: legacyId, name: "Imported draft", created_at: timestamp, prompt: "", entries: legacy.entries }];
     }
   } catch { /* corrupt legacy state is empty */ }
   return [];
@@ -102,6 +112,62 @@ export function writeCatalogVersions(versions: CatalogVersion[], selectedId?: st
   const unique = versions.filter((version, index) => versions.findIndex((item) => item.id === version.id) === index);
   window.localStorage.setItem(CONTEXT_VERSIONS_KEY, JSON.stringify(unique));
   if (selectedId) selectCatalogVersion(selectedId);
+}
+
+export function contextVersionFromShared(version: SharedCatalogVersion): CatalogVersion {
+  return {
+    id: version.id,
+    name: version.name,
+    created_at: version.created_at,
+    entries: version.entries,
+    prompt: String(version.details.prompt ?? ""),
+    feature_catalog_version_id: typeof version.details.feature_catalog_version_id === "string"
+      ? version.details.feature_catalog_version_id : undefined,
+    confidence_threshold: typeof version.details.confidence_threshold === "number"
+      ? version.details.confidence_threshold : undefined,
+    tag: version.details.tag === "Edited" ? "Edited" : undefined,
+  };
+}
+
+export function featureVersionFromShared(version: SharedCatalogVersion): FeatureCatalogVersion {
+  return {
+    id: version.id,
+    name: version.name,
+    created_at: version.created_at,
+    entries: version.entries as FeatureCatalogEntry[],
+    source_filename: String(version.details.source_filename ?? version.name),
+  };
+}
+
+export function contextVersionForServer(version: CatalogVersion): Omit<SharedCatalogVersion, "created_at"> {
+  return {
+    id: version.id,
+    kind: "context",
+    name: version.name,
+    entries: version.entries,
+    details: {
+      prompt: version.prompt,
+      feature_catalog_version_id: version.feature_catalog_version_id,
+      confidence_threshold: version.confidence_threshold,
+      tag: version.tag,
+    },
+  };
+}
+
+export function featureVersionForServer(version: FeatureCatalogVersion): Omit<SharedCatalogVersion, "created_at"> {
+  return {
+    id: version.id,
+    kind: "feature",
+    name: version.name,
+    entries: version.entries,
+    details: { source_filename: version.source_filename },
+  };
+}
+
+export function clearLocalCatalogData() {
+  window.localStorage.removeItem(CONTEXT_VERSIONS_KEY);
+  window.localStorage.removeItem(FEATURE_VERSIONS_KEY);
+  window.localStorage.removeItem(LEGACY_KEY);
 }
 
 function rowFingerprint(row: FeatureCatalogEntry | undefined) {
