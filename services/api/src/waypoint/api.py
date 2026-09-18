@@ -45,7 +45,7 @@ from waypoint.models import (
 )
 from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
-from waypoint.staging_context import compile_staging_brief
+from waypoint.staging_context import compile_staging_brief, context_layer_org_uuid
 from waypoint.tables import (
     CandidateRow,
     ContextPromotionRow,
@@ -276,8 +276,9 @@ def create_app(
         if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
             raise HTTPException(status_code=503, detail="Context Layer is not configured")
         try:
+            org_uuid = context_layer_org_uuid(body.rows)
             context_layer = await ContextLayerClient().fetch(
-                body.organization_id,
+                org_uuid,
                 str(settings.CONTEXT_LAYER_BASE_URL),
                 settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
             )

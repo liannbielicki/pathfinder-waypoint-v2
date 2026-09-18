@@ -557,7 +557,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     await db_session.commit()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
-        assert organization_id == "889901"
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
 
     monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
@@ -566,6 +566,10 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         "organization_id": "889901",
         "promotion_id": promotion.id,
         "rows": [
+            {
+                "VARIABLE_NAME": "ORG_SNAPSHOT",
+                "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+            },
             {
                 "VARIABLE_NAME": "SAFE_SIGNAL",
                 "VALUE": 7,
@@ -595,6 +599,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         "v": {"industry": "HVAC", "safe_signal": 7, "segment": "1A"}
     }
     assert "SAFE_SIGNAL" not in str(stored)
+    assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in str(stored)
     assert "must-not-persist" not in str(stored)
 
 
@@ -644,6 +649,7 @@ async def test_staging_callback_never_resurrects_a_stopped_job(
     finish_fetch = asyncio.Event()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
         fetch_started.set()
         await finish_fetch.wait()
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
@@ -656,11 +662,17 @@ async def test_staging_callback_never_resurrects_a_stopped_job(
                 "request_id": job.id,
                 "organization_id": "889901",
                 "promotion_id": promotion.id,
-                "rows": [{
-                    "VARIABLE_NAME": "SAFE_SIGNAL",
-                    "VALUE": 7,
-                    "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
-                }],
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_SNAPSHOT",
+                        "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+                    },
+                    {
+                        "VARIABLE_NAME": "SAFE_SIGNAL",
+                        "VALUE": 7,
+                        "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+                    },
+                ],
             },
             headers={"authorization": "Bearer test"},
         )

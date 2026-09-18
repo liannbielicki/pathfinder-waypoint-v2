@@ -36,6 +36,7 @@ from waypoint.workbench import (
     context_layer_coverage,
     is_pii_variable_key,
     load_catalog,
+    org_uuid_from_n8n,
     parse_candidates,
     parse_feature_catalog_csv,
     prioritize_review_exceptions,
@@ -202,20 +203,6 @@ def _compact_feature_catalog(entries: list[dict[str, Any]]) -> list[dict[str, st
     return compact
 
 
-def _org_uuid_from_n8n(payload: Any) -> str | None:
-    rows = payload if isinstance(payload, list) else None
-    if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
-        rows = payload["rows"]
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        lowered = {str(key).casefold(): value for key, value in row.items()}
-        if str(lowered.get("variable_name", "")).casefold() == "org_uuid":
-            value = lowered.get("value")
-            return str(value) if value else None
-    return None
-
-
 async def execute_run(
     body: WorkbenchRunRequest,
     *,
@@ -313,8 +300,8 @@ async def execute_run(
     if not inventory_resume and body.source_mode in ("context_layer", "both"):
         started = time.perf_counter()
         context_identifier = body.identifier
-        if body.source_mode == "both" and body.identifier_type == "pro_uuid":
-            context_identifier = _org_uuid_from_n8n(sources.get("snowflake")) or ""
+        if body.source_mode == "both" and body.identifier_type != "org_uuid":
+            context_identifier = org_uuid_from_n8n(sources.get("snowflake")) or ""
         try:
             if not context_identifier:
                 raise ValueError("Context Layer requires an ORG_UUID; the n8n result did not provide one")

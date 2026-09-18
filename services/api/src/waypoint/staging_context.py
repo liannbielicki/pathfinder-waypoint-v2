@@ -14,6 +14,7 @@ from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgBrief, OrgCont
 from waypoint.workbench import (
     ContextLayerClient,
     context_layer_values,
+    org_uuid_from_n8n,
     unwrap_source_payload,
 )
 from waypoint.workbench import (
@@ -66,6 +67,14 @@ def _snowflake_rows(payload: Any) -> list[Mapping[str, Any]]:
     if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
         raise TypeError("response did not contain a row array")
     return rows
+
+
+def context_layer_org_uuid(snowflake_result: Any) -> str:
+    """Resolve the Context Layer identity from the Workbench organization snapshot."""
+    resolved = org_uuid_from_n8n(snowflake_result)
+    if resolved is None:
+        raise ContextUnavailable("staging snowflake context is missing a unique org_uuid")
+    return resolved
 
 
 def _authoritative_firmographics(payload: Mapping[str, Any]) -> dict[str, str]:

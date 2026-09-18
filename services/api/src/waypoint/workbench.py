@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -355,6 +356,30 @@ def _row_value(row: Mapping[str, Any], name: str) -> Any:
 
 def _row_has(row: Mapping[str, Any], name: str) -> bool:
     return any(str(key).casefold() == name.casefold() for key in row)
+
+
+def org_uuid_from_n8n(payload: Any) -> str | None:
+    """Resolve one UUID from either a direct identity row or the org snapshot."""
+    rows = unwrap_source_payload("snowflake", payload).get("rows") if isinstance(
+        payload, (dict, list)
+    ) else None
+    candidates: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        variable_name = str(_row_value(row, "variable_name") or "").casefold()
+        value = _row_value(row, "value")
+        possible = None
+        if variable_name == "org_snapshot" and isinstance(value, Mapping):
+            possible = _row_value(value, "org_uuid")
+        elif variable_name == "org_uuid":
+            possible = value
+        if isinstance(possible, str):
+            try:
+                candidates.add(str(UUID(possible.strip())))
+            except ValueError:
+                continue
+    return candidates.pop() if len(candidates) == 1 else None
 
 
 def _observed_type(value: Any) -> str:

@@ -937,14 +937,18 @@ def test_promotion_endpoint_preserves_source_table_for_each_duplicate_key_occurr
 
 
 @pytest.mark.asyncio
-async def test_both_sources_send_organization_id_directly_to_context_layer(monkeypatch):
+async def test_both_sources_resolve_organization_id_for_context_layer(monkeypatch):
     from waypoint.workbench_api import WorkbenchRunRequest, execute_run
 
     seen = {}
 
     async def fake_n8n(self, identifier, webhook_url, token):
         return [
-            {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "org-uuid-1"},
+            {
+                "QUERY_NAME": "part_1_org_snapshot",
+                "VARIABLE_NAME": "org_snapshot",
+                "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+            },
             {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
         ]
 
@@ -953,7 +957,7 @@ async def test_both_sources_send_organization_id_directly_to_context_layer(monke
         return {"features": [{"name": "jobs"}]}
 
     async def fake_model(prompt, **kwargs):
-        assert "org-uuid-1" not in prompt
+        assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in prompt
         assert "\"VALUE\": 12" not in prompt
         return ('[{"key":"JOBS_CREATED","canonical_key":"jobs","value_category":"activity","related_features":["jobs","invented"],"usefulness_rank":5,"disposition":"include","aggregate_prompt":"Calculate cohort percentiles for comparable Pros.","confidence":0.9,"uncertainty_reason":null}]', {"output_tokens": 100})
 
@@ -973,7 +977,7 @@ async def test_both_sources_send_organization_id_directly_to_context_layer(monke
         feature_catalog_version_id="features-v1",
     ))
 
-    assert seen["identifier"] == "889901"
+    assert seen["identifier"] == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
     # Internal IDs remain available to the audit, but observed values stay out of authoring prompts.
     assert result["outputs"]["audit"]["total_variables"] == 2
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
