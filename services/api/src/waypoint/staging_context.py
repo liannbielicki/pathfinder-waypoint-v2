@@ -22,6 +22,11 @@ from waypoint.workbench import (
 
 log = logging.getLogger("waypoint.staging_context")
 _MISSING = object()
+_AUTHORITATIVE_FIRMOGRAPHIC_SOURCES = {
+    "context_layer.firmographics.industry",
+    "context_layer.firmographics.segment",
+}
+_AUTHORITATIVE_FIRMOGRAPHIC_KEYS = {"industry", "segment"}
 _SAFE_SOURCE_ERROR = re.compile(
     r"(?:Snowflake/n8n|Context Layer) returned HTTP [1-5][0-9]{2}"
     r"|Snowflake/n8n (?:timed out after|could not connect within) "
@@ -61,6 +66,42 @@ def _snowflake_rows(payload: Any) -> list[Mapping[str, Any]]:
     if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
         raise TypeError("response did not contain a row array")
     return rows
+
+
+def _authoritative_firmographics(payload: Mapping[str, Any]) -> dict[str, str]:
+    firmographics = payload.get("firmographics")
+    if not isinstance(firmographics, Mapping):
+        raise ContextUnavailable("staging context_layer is missing firmographics.segment")
+
+    raw_segment = firmographics.get("segment")
+    if not isinstance(raw_segment, str):
+        raise ContextUnavailable("staging context_layer is missing firmographics.segment")
+    segment = raw_segment.strip().upper()
+    if re.fullmatch(r"[1-4][A-D]", segment) is None:
+        raise ContextUnavailable("staging context_layer returned invalid firmographics.segment")
+
+    raw_industry = firmographics.get("industry")
+    if not isinstance(raw_industry, str) or not raw_industry.strip():
+        raise ContextUnavailable("staging context_layer is missing firmographics.industry")
+    return {"segment": segment, "industry": raw_industry.strip()}
+
+
+def _without_authoritative_rules(bundle: Mapping[str, Any]) -> Mapping[str, Any]:
+    rules = bundle.get("rules")
+    if not isinstance(rules, list):
+        return bundle
+    filtered = [
+        rule
+        for rule in rules
+        if not isinstance(rule, Mapping)
+        or (
+            str(rule.get("source_key") or "").strip().casefold()
+            not in _AUTHORITATIVE_FIRMOGRAPHIC_SOURCES
+            and str(rule.get("canonical_key") or "").strip().casefold()
+            not in _AUTHORITATIVE_FIRMOGRAPHIC_KEYS
+        )
+    ]
+    return {**bundle, "rules": filtered}
 
 
 def _compile_values(
@@ -175,14 +216,10 @@ class WorkbenchStagingContextClient:
             audience_query_version=f"workbench:{promotion_id}",
         )
 
-    async def _fetch_one(
-        self, organization_id: str, bundle: Mapping[str, Any]
-    ) -> OrgBrief:
+    async def _fetch_one(self, organization_id: str, bundle: Mapping[str, Any]) -> OrgBrief:
         async with self._semaphore:
             results = await asyncio.gather(
-                self.snowflake.fetch(
-                    organization_id, self.workbench_url, self.n8n_token
-                ),
+                self.snowflake.fetch(organization_id, self.workbench_url, self.n8n_token),
                 self.context_layer.fetch(
                     organization_id, self.context_layer_url, self.context_layer_key
                 ),
@@ -205,11 +242,14 @@ class WorkbenchStagingContextClient:
         if not isinstance(context_layer_result, Mapping):
             raise ContextUnavailable("staging context_layer contract violation (TypeError)")
 
+        firmographics = _authoritative_firmographics(context_layer_result)
+        runtime_bundle = _without_authoritative_rules(bundle)
         values, matched_rules, counts = _compile_values(
-            rows, context_layer_values(context_layer_result), bundle
+            rows, context_layer_values(context_layer_result), runtime_bundle
         )
         if not values:
             raise ContextUnavailable("staging context matched zero approved variables")
+        values.update(firmographics)
 
         log.info(
             "staging context compiled promotion=%s received=%d matched=%d "
@@ -229,9 +269,14 @@ class WorkbenchStagingContextClient:
             and key not in {"org_uuid", "curated_context"}
             and isinstance(value, str)
         }
-        matched_bundle = {**bundle, "rules": matched_rules}
+        matched_bundle = {**runtime_bundle, "rules": matched_rules}
+        curated_context = compile_promoted_context(values, matched_bundle)
+        compiled_values = curated_context.get("v")
+        if not isinstance(compiled_values, dict):
+            compiled_values = {}
+        curated_context["v"] = dict(sorted({**compiled_values, **firmographics}.items()))
         return OrgBrief(
             org_uuid=organization_id,
             **typed,
-            curated_context=compile_promoted_context(values, matched_bundle),
+            curated_context=curated_context,
         )

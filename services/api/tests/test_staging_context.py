@@ -53,6 +53,12 @@ def promotion(*rules: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def context_payload(
+    segment: Any = "1A", industry: Any = "HVAC"
+) -> dict[str, Any]:
+    return {"firmographics": {"segment": segment, "industry": industry}}
+
+
 def make_client(
     *,
     bundle: dict[str, Any] | None,
@@ -91,6 +97,125 @@ def test_staging_applies_the_configured_n8n_timeout() -> None:
     assert client.snowflake._timeout_seconds == 900
 
 
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "1A", "1B", "1C", "1D",
+        "2A", "2B", "2C", "2D",
+        "3A", "3B", "3C", "3D",
+        "4A", "4B", "4C", "4D",
+    ],
+)
+async def test_staging_always_curates_authoritative_firmographics(
+    segment: str,
+) -> None:
+    brief = (
+        await make_client(
+            bundle=promotion({
+                "source_key": "SAFE",
+                "source_table": "UNKNOWN",
+                "canonical_key": "safe",
+                "related_features": [],
+            }),
+            snowflake=FakeSnowflake({
+                "889901": [{"VARIABLE_NAME": "SAFE", "VALUE": 1}]
+            }),
+            context_layer=FakeContextLayer({
+                "889901": context_payload(
+                    segment=f" {segment.lower()} ",
+                    industry=" Heating and Air Conditioning ",
+                )
+            }),
+        ).fetch(["889901"])
+    ).organizations[0]
+
+    assert brief.segment == segment
+    assert brief.curated_context == {
+        "v": {
+            "industry": "Heating and Air Conditioning",
+            "safe": 1,
+            "segment": segment,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "field"),
+    [
+        ({}, "segment"),
+        ({"firmographics": {"industry": "HVAC"}}, "segment"),
+        (context_payload(segment="   "), "segment"),
+        (context_payload(segment="5A"), "segment"),
+        (context_payload(segment=None), "segment"),
+        ({"firmographics": {"segment": "1A"}}, "industry"),
+        (context_payload(industry="   "), "industry"),
+        (context_payload(industry=None), "industry"),
+    ],
+)
+async def test_staging_rejects_missing_or_invalid_authoritative_firmographics(
+    payload: dict[str, Any], field: str
+) -> None:
+    with pytest.raises(ContextUnavailable, match=rf"firmographics\.{field}"):
+        await make_client(
+            bundle=promotion(),
+            snowflake=FakeSnowflake({"889901": []}),
+            context_layer=FakeContextLayer({"889901": payload}),
+        ).fetch(["889901"])
+
+
+async def test_staging_context_layer_firmographics_override_catalog_collisions() -> None:
+    snowflake = FakeSnowflake({
+        "889901": [
+            {"VARIABLE_NAME": "SEGMENT_ACTUAL", "VALUE": "4D"},
+            {"VARIABLE_NAME": "INDUSTRY_SEGMENT", "VALUE": "Plumbing"},
+            {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        ]
+    })
+    bundle = promotion(
+        {
+            "source_key": "SEGMENT_ACTUAL",
+            "source_table": "UNKNOWN",
+            "canonical_key": "segment",
+            "related_features": [],
+        },
+        {
+            "source_key": "INDUSTRY_SEGMENT",
+            "source_table": "UNKNOWN",
+            "canonical_key": "industry",
+            "related_features": [],
+        },
+        {
+            "source_key": "context_layer.firmographics.segment",
+            "source_table": "UNKNOWN",
+            "canonical_key": "segment_alias",
+            "related_features": [],
+        },
+        {
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": [],
+        },
+    )
+
+    brief = (
+        await make_client(
+            bundle=bundle,
+            snowflake=snowflake,
+            context_layer=FakeContextLayer({
+                "889901": context_payload(segment="2B", industry="HVAC")
+            }),
+        ).fetch(["889901"])
+    ).organizations[0]
+
+    assert brief.segment == "2B"
+    assert brief.curated_context == {
+        "v": {"industry": "HVAC", "safe": 1, "segment": "2B"}
+    }
+    assert "4D" not in str(brief.curated_context)
+    assert "Plumbing" not in str(brief.curated_context)
+
+
 async def test_staging_fetches_both_sources_then_compiles_only_approved_values() -> None:
     snowflake = FakeSnowflake({
         "889901": [
@@ -103,7 +228,13 @@ async def test_staging_fetches_both_sources_then_compiles_only_approved_values()
         ]
     })
     context_layer = FakeContextLayer({
-        "889901": {"firmographics": {"segment": "1A", "email": "drop@example.com"}}
+        "889901": {
+            "firmographics": {
+                "segment": "1A",
+                "industry": "HVAC",
+                "email": "drop@example.com",
+            }
+        }
     })
     bundle = promotion(
         {
@@ -111,12 +242,6 @@ async def test_staging_fetches_both_sources_then_compiles_only_approved_values()
             "source_table": "ANALYTICS.JOBS",
             "canonical_key": "jobs_created_t28",
             "related_features": ["jobs"],
-        },
-        {
-            "source_key": "context_layer.firmographics.segment",
-            "source_table": "UNKNOWN",
-            "canonical_key": "segment",
-            "related_features": [],
         },
         {
             "source_key": "MISSING_JOB_ALIAS",
@@ -139,7 +264,7 @@ async def test_staging_fetches_both_sources_then_compiles_only_approved_values()
     assert brief.pro_id == "889901"
     assert brief.segment == "1A"
     assert brief.curated_context == {
-        "v": {"jobs_created_t28": 12, "segment": "1A"},
+        "v": {"industry": "HVAC", "jobs_created_t28": 12, "segment": "1A"},
         "f": {"jobs_created_t28": ["jobs"]},
         "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
     }
@@ -155,7 +280,7 @@ async def test_staging_matches_exact_lineage_and_preserves_nulls() -> None:
             {"VARIABLE_NAME": "OPTIONAL", "VALUE": None},
         ]
     })
-    context_layer = FakeContextLayer({"889901": {}})
+    context_layer = FakeContextLayer({"889901": context_payload()})
     bundle = promotion(
         {
             "source_key": "COUNT",
@@ -182,7 +307,7 @@ async def test_staging_matches_exact_lineage_and_preserves_nulls() -> None:
     ).fetch(["889901"])).organizations[0]
 
     assert brief.curated_context == {
-        "v": {"recent_count": 2},
+        "v": {"industry": "HVAC", "recent_count": 2, "segment": "1A"},
         "n": ["optional_signal"],
     }
 
@@ -197,7 +322,7 @@ async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
             {"VARIABLE_NAME": "SAFE", "VALUE": 1},
         ]
     })
-    context_layer = FakeContextLayer({"889901": {}})
+    context_layer = FakeContextLayer({"889901": context_payload()})
     bundle = promotion(
         {
             "source_key": "COUNT",
@@ -229,12 +354,14 @@ async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
         bundle=bundle, snowflake=snowflake, context_layer=context_layer
     ).fetch(["889901"])).organizations[0]
 
-    assert brief.curated_context == {"v": {"safe": 1}}
+    assert brief.curated_context == {
+        "v": {"industry": "HVAC", "safe": 1, "segment": "1A"}
+    }
 
 
 async def test_staging_requires_numeric_ids_an_active_promotion_and_a_match() -> None:
     source = FakeSnowflake({"889901": [{"VARIABLE_NAME": "OTHER", "VALUE": 1}]})
-    context = FakeContextLayer({"889901": {}})
+    context = FakeContextLayer({"889901": context_payload()})
 
     with pytest.raises(ContextUnavailable, match="numeric organization ID"):
         await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
@@ -276,7 +403,8 @@ async def test_staging_source_failures_do_not_expose_values(failed_source: str) 
         ValueError(secret) if failed_source == "snowflake" else None,
     )
     context_layer = FakeContextLayer(
-        {"889901": {}}, ValueError(secret) if failed_source == "context_layer" else None
+        {"889901": context_payload()},
+        ValueError(secret) if failed_source == "context_layer" else None,
     )
 
     with pytest.raises(ContextUnavailable) as raised:
@@ -306,7 +434,7 @@ async def test_staging_preserves_safe_snowflake_failure_details(
     error: Exception, detail: str
 ) -> None:
     snowflake = FakeSnowflake(error=error)
-    context_layer = FakeContextLayer({"889901": {}})
+    context_layer = FakeContextLayer({"889901": context_payload()})
 
     with pytest.raises(ContextUnavailable, match=detail):
         await make_client(
@@ -353,7 +481,7 @@ async def test_staging_logs_only_promotion_and_counts(caplog: pytest.LogCaptureF
             {"VARIABLE_NAME": "EXTRA", "VALUE": raw_secret},
         ]
     })
-    context_layer = FakeContextLayer({"889901": {}})
+    context_layer = FakeContextLayer({"889901": context_payload()})
 
     await make_client(
         bundle=promotion({
@@ -367,7 +495,7 @@ async def test_staging_logs_only_promotion_and_counts(caplog: pytest.LogCaptureF
     ).fetch(["889901"])
 
     assert "promotion-approved" in caplog.text
-    assert "received=2" in caplog.text
+    assert "received=4" in caplog.text
     assert "matched=1" in caplog.text
     assert raw_secret not in caplog.text
 
@@ -392,7 +520,7 @@ async def test_staging_fetches_the_two_sources_concurrently() -> None:
     class ContextLayer(CoordinatedSource):
         async def fetch(self, organization_id: str, url: str, token: str) -> Any:
             await self._wait()
-            return {}
+            return context_payload()
 
     await make_client(
         bundle=promotion({
@@ -421,7 +549,7 @@ async def test_staging_bounds_multi_organization_concurrency() -> None:
 
     class EmptyContext:
         async def fetch(self, organization_id: str, url: str, token: str) -> Any:
-            return {}
+            return context_payload()
 
     client = make_client(
         bundle=promotion({
