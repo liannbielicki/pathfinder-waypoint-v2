@@ -1097,13 +1097,15 @@ async def test_both_sources_resolve_org_uuid_for_context_layer(monkeypatch):
     assert any("invented" in warning for warning in result["warnings"])
 
 
-def test_workbench_requires_a_six_digit_organization_id():
+def test_workbench_requires_a_five_or_six_digit_organization_id():
     from pydantic import ValidationError
 
     from waypoint.workbench_api import WorkbenchRunRequest
 
-    for invalid in ("org-123", "12345", "1234567"):
-        with pytest.raises(ValidationError, match="six-digit organization ID"):
+    assert WorkbenchRunRequest(identifier="31336").identifier == "31336"
+    assert WorkbenchRunRequest(identifier="889901").identifier == "889901"
+    for invalid in ("org-123", "1234", "1234567"):
+        with pytest.raises(ValidationError, match="five- or six-digit organization ID"):
             WorkbenchRunRequest(identifier=invalid)
 
 

@@ -49,23 +49,34 @@ describe("WorkbenchRunForm", () => {
     expect(screen.getByText(/snowflake.*configured/i)).toBeInTheDocument();
   });
 
-  it("requires a six-digit organization ID before starting a job", async () => {
+  it("requires a five- or six-digit organization ID before starting a job", async () => {
     render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
 
     fireEvent.change(screen.getByLabelText(/organization id/i), {
-      target: { value: "12345" },
+      target: { value: "1234" },
     });
     fireEvent.submit(
       screen.getByRole("button", { name: /collect and curate all variables/i }).closest("form")!,
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /six-digit organization id/i,
+      /five- or six-digit organization id/i,
     );
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringMatching(/\/jobs$/),
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("accepts a five-digit organization ID", async () => {
+    render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
+
+    const input = screen.getByLabelText(/organization id/i);
+    fireEvent.change(input, {
+      target: { value: "31336" },
+    });
+
+    expect(input).toBeValid();
   });
 
   it("locks collection while a Waypoint run is active", async () => {

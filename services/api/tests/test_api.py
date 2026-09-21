@@ -477,8 +477,8 @@ async def test_staging_readiness_ignores_deprecated_staging_url(
     assert response.json()["staging_context_available"] is True
 
 
-@pytest.mark.parametrize("invalid", ["pro_abc", "12345", "1234567"])
-async def test_staging_rejects_non_six_digit_ids_before_enqueue(
+@pytest.mark.parametrize("invalid", ["pro_abc", "1234", "1234567"])
+async def test_staging_rejects_ids_outside_five_or_six_digits_before_enqueue(
     auth_client: httpx.AsyncClient,
     invalid: str,
 ) -> None:
@@ -488,7 +488,7 @@ async def test_staging_rejects_non_six_digit_ids_before_enqueue(
     )
 
     assert response.status_code == 422
-    assert "six-digit organization id" in response.text.casefold()
+    assert "five- or six-digit organization id" in response.text.casefold()
 
 
 async def test_staging_preserves_numeric_organization_id_as_a_string(
@@ -501,7 +501,7 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
         "/api/runs",
         json={
             **RUN_REQUEST,
-            "pro_ids": ["889901"],
+            "pro_ids": ["31336"],
             "context_source": "staging",
             "context_promotion_id": "promotion-ready",
             "include_features_not_in_current_plan": True,
@@ -509,7 +509,7 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
     )
 
     assert response.status_code == 202
-    assert response.json()["pro_ids"] == ["889901"]
+    assert response.json()["pro_ids"] == ["31336"]
     assert response.json()["audience_query"] == "workbench:promotion-ready"
     assert response.json()["include_features_not_in_current_plan"] is True
     persisted = await db_session.get(RunRow, response.json()["id"])

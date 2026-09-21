@@ -119,8 +119,8 @@ class WorkbenchRunRequest(BaseModel):
     @classmethod
     def validate_organization_id(cls, value: str) -> str:
         normalized = value.strip()
-        if len(normalized) != 6 or not normalized.isdigit():
-            raise ValueError("identifier must be a six-digit organization ID")
+        if len(normalized) not in {5, 6} or not normalized.isdigit():
+            raise ValueError("identifier must be a five- or six-digit organization ID")
         return normalized
 
 

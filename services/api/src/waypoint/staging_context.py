@@ -314,8 +314,10 @@ class WorkbenchStagingContextClient:
     async def start(
         self, organization_id: str, request_id: str, promotion_id: str
     ) -> None:
-        if re.fullmatch(r"\d{6}", organization_id) is None:
-            raise ContextUnavailable("staging context requires a six-digit organization ID")
+        if re.fullmatch(r"\d{5,6}", organization_id) is None:
+            raise ContextUnavailable(
+                "staging context requires a five- or six-digit organization ID"
+            )
         if not promotion_id:
             raise ContextUnavailable("staging context promotion artifact has no id")
         try:
@@ -330,8 +332,13 @@ class WorkbenchStagingContextClient:
             raise _source_failure("snowflake", error) from error
 
     async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:
-        if any(re.fullmatch(r"\d{6}", identifier) is None for identifier in organization_ids):
-            raise ContextUnavailable("staging context requires a six-digit organization ID")
+        if any(
+            re.fullmatch(r"\d{5,6}", identifier) is None
+            for identifier in organization_ids
+        ):
+            raise ContextUnavailable(
+                "staging context requires a five- or six-digit organization ID"
+            )
         bundle = await self.promotion_loader()
         if bundle is None:
             raise ContextUnavailable("staging context promotion artifact is missing")

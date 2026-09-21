@@ -267,7 +267,7 @@ describe("RunStart", () => {
     );
     const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
     await userEvent.clear(organizationIds);
-    await userEvent.type(organizationIds, "889901");
+    await userEvent.type(organizationIds, "31336");
     expect(screen.getByText(/staging uses/i)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
     await waitFor(() => expect(createCalls).toHaveLength(1));
@@ -275,7 +275,7 @@ describe("RunStart", () => {
       context_source: "staging",
       context_promotion_id: "promotion-shared",
       include_features_not_in_current_plan: true,
-      pro_ids: ["889901"],
+      pro_ids: ["31336"],
     }));
   });
 
@@ -288,7 +288,7 @@ describe("RunStart", () => {
       .not.toBeInTheDocument();
   });
 
-  it("blocks anything other than a six-digit organization ID in Staging", async () => {
+  it("blocks organization IDs outside five or six digits in Staging", async () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
     await fillRequiredInputs();
@@ -296,11 +296,11 @@ describe("RunStart", () => {
     await userEvent.click(screen.getByLabelText(/staging context/i));
     const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
     await userEvent.clear(organizationIds);
-    await userEvent.type(organizationIds, "12345");
+    await userEvent.type(organizationIds, "1234");
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /six-digit organization ids/i,
+      /five- or six-digit organization ids/i,
     );
     expect(createCalls).toEqual([]);
   });

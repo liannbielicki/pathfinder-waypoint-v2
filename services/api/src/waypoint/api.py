@@ -360,11 +360,12 @@ def create_app(
     ) -> RunView:
         settings: Settings = request.app.state.settings
         if body.context_source == "staging" and any(
-            len(identifier) != 6 or not identifier.isdigit() for identifier in body.pro_ids
+            len(identifier) not in {5, 6} or not identifier.isdigit()
+            for identifier in body.pro_ids
         ):
             raise HTTPException(
                 status_code=422,
-                detail="Staging context requires six-digit organization IDs",
+                detail="Staging context requires five- or six-digit organization IDs",
             )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)
