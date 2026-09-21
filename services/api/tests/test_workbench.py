@@ -1149,11 +1149,8 @@ async def test_compile_mode_never_calls_model(monkeypatch):
 async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge(monkeypatch):
     from waypoint.workbench_api import WorkbenchRunRequest, execute_run
 
-    async def fake_n8n(self, identifier, webhook_url, token):
-        return [
-            {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
-            {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "secret"},
-        ]
+    async def fail_n8n(*args, **kwargs):
+        raise AssertionError("evaluation must resume from the scrubbed callback payload")
 
     calls = []
 
@@ -1182,17 +1179,15 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
             {"model": kwargs["model"], "input_tokens": 100, "output_tokens": 50, "duration_ms": 8},
         )
 
-    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fake_n8n)
+    monkeypatch.setattr("waypoint.workbench_api.N8NContextClient.fetch", fail_n8n)
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     monkeypatch.setenv("MODEL_FAST", "claude-haiku-4-5")
     monkeypatch.delenv("WORKBENCH_MODEL", raising=False)
 
     result = await execute_run(WorkbenchRunRequest(
         identifier="889901",
-        source_mode="snowflake",
+        source_mode="both",
         workbench_mode="evaluate",
-        n8n_webhook_url="https://n8n.test",
-        n8n_webhook_token="token",
         ai_api_key="ai-key",
         model="claude-sonnet-5",
         feature_catalog_entries=[{
@@ -1209,7 +1204,16 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
             "disposition": "include",
             "review_status": "reviewed",
         }],
-    ))
+    ), resume_state={
+        "phase": "sources_ready",
+        "scrubbed_sources": {
+            "snowflake": {"rows": [
+                {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
+                {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "secret"},
+            ]},
+            "context_layer": {"firmographics": {"segment": "1A", "industry": "HVAC"}},
+        },
+    })
 
     evaluation = result["outputs"]["evaluation"]
     assert len(calls) == 3

@@ -123,11 +123,18 @@ class HostedWorkbench:
                     if key not in {"catalog_approved_count", "catalog_pii_removed_count"}
                 }
                 body = WorkbenchRunRequest.model_validate(executable_request)
+                source_ready = (
+                    body.workbench_mode == "authoring"
+                    and isinstance(job.state.get("inventory"), list)
+                ) or (
+                    body.workbench_mode == "evaluate"
+                    and isinstance(job.state.get("scrubbed_sources"), Mapping)
+                )
                 if (
                     self.source_dispatcher is not None
-                    and body.workbench_mode == "authoring"
+                    and body.workbench_mode in {"authoring", "evaluate"}
                     and body.source_mode in {"snowflake", "both"}
-                    and not isinstance(job.state.get("inventory"), list)
+                    and not source_ready
                 ):
                     if job.state.get("phase") != "collecting_sources":
                         await self.store.checkpoint(
@@ -234,11 +241,18 @@ def install_hosted_workbench(
         if (
             body.promotion_id != _WORKBENCH_SOURCE_MARKER
             or job.request.get("identifier") != body.organization_id
-            or job.request.get("workbench_mode") != "authoring"
+            or job.request.get("workbench_mode") not in {"authoring", "evaluate"}
             or job.request.get("source_mode") not in {"snowflake", "both"}
         ):
             raise HTTPException(status_code=409, detail="Workbench source request does not match")
-        if isinstance(job.state.get("inventory"), list):
+        workbench_mode = job.request.get("workbench_mode")
+        resume_key = "inventory" if workbench_mode == "authoring" else "scrubbed_sources"
+        resume_value = job.state.get(resume_key)
+        if (
+            workbench_mode == "authoring" and isinstance(resume_value, list)
+        ) or (
+            workbench_mode == "evaluate" and isinstance(resume_value, Mapping)
+        ):
             return {"status": "already_completed", "request_id": body.request_id}
         if job.status != "running" or job.state.get("phase") != "collecting_sources":
             raise HTTPException(status_code=409, detail="Workbench source request is not waiting")
@@ -284,11 +298,15 @@ def install_hosted_workbench(
                 except Exception as error:  # noqa: BLE001 - retain the successful source
                     warnings.append(f"Context Layer failed: {type(error).__name__}")
 
-        inventory = build_audit_inventory(scrubbed_sources)
+        source_state = (
+            {"inventory": build_audit_inventory(scrubbed_sources)}
+            if workbench_mode == "authoring"
+            else {"scrubbed_sources": scrubbed_sources}
+        )
         await service.store.checkpoint(body.request_id, {
             **job.state,
-            "phase": "audited",
-            "inventory": inventory,
+            "phase": "audited" if workbench_mode == "authoring" else "sources_ready",
+            **source_state,
             "coverage_output": coverage_output,
             "warnings": warnings,
         })

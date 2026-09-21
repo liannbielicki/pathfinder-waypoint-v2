@@ -838,6 +838,103 @@ async def test_workbench_snowflake_callback_resumes_the_existing_job(
     assert "EMAIL" not in inventory_keys
 
 
+async def test_workbench_evaluation_uses_the_async_scrubbed_source_callback(
+    db_session_factory,
+    monkeypatch,
+) -> None:
+    dispatched: dict[str, object] = {}
+    resumed: dict[str, object] = {}
+
+    async def fake_start(
+        self, organization_id, webhook_url, token, *, request_id, promotion_id,
+        callback_mode="staging",
+    ):
+        dispatched.update({
+            "organization_id": organization_id,
+            "request_id": request_id,
+            "promotion_id": promotion_id,
+            "callback_mode": callback_mode,
+        })
+        return {"status": "accepted", "request_id": request_id}
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        resumed.update(dict(resume_state or {}))
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {"evaluation": {"judge": {"winner": "curated"}}},
+        }
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.hosted_workbench.N8NContextClient.start", fake_start)
+    monkeypatch.setattr(
+        "waypoint.hosted_workbench.ContextLayerClient.fetch", fake_context_layer
+    )
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post("/api/context-workbench/jobs", json={
+            "identifier": "889901",
+            "source_mode": "both",
+            "workbench_mode": "evaluate",
+        })
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["state"].get("phase") == "collecting_sources":
+                break
+            await asyncio.sleep(0.01)
+
+        assert dispatched == {
+            "organization_id": "889901",
+            "request_id": job_id,
+            "promotion_id": "workbench-authoring",
+            "callback_mode": "workbench",
+        }
+        callback = await client.post(
+            "/api/context-workbench/source-callback",
+            headers={"authorization": "Bearer test"},
+            json={
+                "request_id": job_id,
+                "organization_id": "889901",
+                "promotion_id": "workbench-authoring",
+                "callback_mode": "workbench",
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_UUID",
+                        "VALUE": "cc962bf1-13bb-4eea-bf66-f3adc9e22192",
+                    },
+                    {"VARIABLE_NAME": "SAFE_SIGNAL", "VALUE": 7},
+                    {"VARIABLE_NAME": "EMAIL", "VALUE": "hidden@example.test"},
+                ],
+            },
+        )
+        assert callback.status_code == 200
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert job["status"] == "completed"
+    sources = resumed["scrubbed_sources"]
+    assert isinstance(sources, dict)
+    snowflake_rows = sources["snowflake"]["rows"]
+    assert any(row["VARIABLE_NAME"] == "SAFE_SIGNAL" for row in snowflake_rows)
+    assert all(row["VARIABLE_NAME"] != "EMAIL" for row in snowflake_rows)
+    assert sources["context_layer"]["firmographics"]["segment"] == "1A"
+
+
 async def test_staging_rejects_a_promotion_that_changed_after_display(
     auth_client: httpx.AsyncClient,
     db_session: AsyncSession,

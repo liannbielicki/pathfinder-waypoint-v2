@@ -254,6 +254,17 @@ async def execute_run(
         and isinstance(resumed_inventory, list)
         and all(isinstance(item, dict) for item in resumed_inventory)
     )
+    resumed_sources = (
+        resume_state.get("scrubbed_sources")
+        if isinstance(resume_state, Mapping)
+        else None
+    )
+    source_resume = (
+        body.workbench_mode == "evaluate"
+        and isinstance(resumed_sources, Mapping)
+        and bool(resumed_sources)
+    )
+    resumed = inventory_resume or source_resume
     sanitized_request = sanitize_job_request(body.model_dump())
     safe_catalog_override = sanitized_request.get("catalog_override")
     stages.append(
@@ -302,14 +313,14 @@ async def execute_run(
 
     n8n_webhook_url = body.n8n_webhook_url or configured["n8n_webhook_url"]
     n8n_webhook_token = body.n8n_webhook_token or configured["n8n_webhook_token"]
-    if not inventory_resume and body.source_mode in ("context_layer", "both") and (not context_base_url or not context_api_key):
+    if not resumed and body.source_mode in ("context_layer", "both") and (not context_base_url or not context_api_key):
         raise HTTPException(status_code=422, detail="Context Layer mode requires CONTEXT_LAYER_BASE_URL and CONTEXT_LAYER_API_KEY in services/api/.env")
-    if not inventory_resume and body.source_mode in ("snowflake", "both") and (not n8n_webhook_url or not n8n_webhook_token):
+    if not resumed and body.source_mode in ("snowflake", "both") and (not n8n_webhook_url or not n8n_webhook_token):
         raise HTTPException(status_code=422, detail="Snowflake mode requires N8N_CONTEXT_URL_WORKBENCH and N8N_TOKEN in services/api/.env")
 
     sources: dict[str, Any] = {}
     source_errors: dict[str, str] = {}
-    if not inventory_resume and body.source_mode in ("snowflake", "both"):
+    if not resumed and body.source_mode in ("snowflake", "both"):
         started = time.perf_counter()
         try:
             result = await N8NContextClient().fetch(
@@ -321,7 +332,7 @@ async def execute_run(
         except Exception as error:  # noqa: BLE001 - source boundary reports safe failure state
             source_errors["snowflake"] = str(error)
             stages.append(_stage("snowflake_context", None, started, status="failed", error=str(error)))
-    if not inventory_resume and body.source_mode in ("context_layer", "both"):
+    if not resumed and body.source_mode in ("context_layer", "both"):
         started = time.perf_counter()
         context_identifier = body.identifier
         if body.source_mode == "both":
@@ -337,7 +348,7 @@ async def execute_run(
         except Exception as error:  # noqa: BLE001 - source boundary reports safe failure state
             source_errors["context_layer"] = str(error)
             stages.append(_stage("context_layer_context", None, started, status="failed", error=str(error)))
-    if not inventory_resume and not sources:
+    if not resumed and not sources:
         raise HTTPException(
             status_code=502,
             detail={"message": "All selected context sources failed", "sources": source_errors},
@@ -361,6 +372,33 @@ async def execute_run(
             name="source_checkpoint",
             data={"inventory_count": len(inventory)},
             summary="resumed from the durable scrubbed inventory without refetching sources",
+        ))
+    elif source_resume:
+        assert isinstance(resumed_sources, Mapping)
+        scrubbed, resumed_pii = scrub_pii({"sources": dict(resumed_sources)})
+        resumed_payload = scrubbed.get("sources")
+        if not isinstance(resumed_payload, dict) or not resumed_payload:
+            raise HTTPException(status_code=502, detail="Scrubbed source checkpoint is empty")
+        scrubbed_sources = resumed_payload
+        if resumed_pii:
+            warnings.append(
+                f"PII gate removed {len(resumed_pii)} checkpoint fields before evaluation"
+            )
+        inventory = build_audit_inventory(scrubbed_sources)
+        audit_output = {
+            "inventory": inventory,
+            "total_variables": len(inventory),
+            "basis": {"source_evidence": "checkpoint", "semantic_judgments": "inferred", "population_metrics": "unavailable"},
+        }
+        coverage_output = (
+            resume_state.get("coverage_output")
+            if isinstance(resume_state, Mapping)
+            else None
+        )
+        stages.append(WorkbenchStage(
+            name="source_checkpoint",
+            data={"sources": sorted(scrubbed_sources)},
+            summary="resumed from PII-scrubbed callback sources without refetching",
         ))
     else:
         started = time.perf_counter()
