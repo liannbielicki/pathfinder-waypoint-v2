@@ -16,6 +16,7 @@ def test_async_workbench_workflow_validates_before_acknowledging() -> None:
     assert "x-waypoint-organization-id" in normalize
     assert "x-waypoint-request-id" in normalize
     assert "x-waypoint-promotion-id" in normalize
+    assert "x-waypoint-callback-mode" in normalize
     assert workflow["connections"]["Variable audit request"]["main"][0][0]["node"] == (
         "Normalize staging request"
     )
@@ -24,6 +25,10 @@ def test_async_workbench_workflow_validates_before_acknowledging() -> None:
     )
     callback = nodes["Prepare Waypoint callback"]["parameters"]["jsCode"]
     assert "$('Normalize staging request')" in callback
+    assert "callback_mode" in callback
+    delivery_url = nodes["Deliver context to Waypoint"]["parameters"]["url"]
+    assert "/api/context-workbench/source-callback" in delivery_url
+    assert "/api/context/staging/callback" in delivery_url
 
     org_snapshot_query = nodes["Part 1 - Org snapshot and metadata"]["parameters"]["query"]
     assert "waypoint_contact_pro" in org_snapshot_query

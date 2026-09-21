@@ -36,6 +36,7 @@ from waypoint.workbench import (
     context_layer_coverage,
     is_pii_variable_key,
     load_catalog,
+    org_uuid_from_n8n,
     parse_candidates,
     parse_feature_catalog_csv,
     prioritize_review_exceptions,
@@ -306,9 +307,14 @@ async def execute_run(
             stages.append(_stage("snowflake_context", None, started, status="failed", error=str(error)))
     if not inventory_resume and body.source_mode in ("context_layer", "both"):
         started = time.perf_counter()
+        context_identifier = body.identifier
+        if body.source_mode == "both":
+            context_identifier = org_uuid_from_n8n(sources.get("snowflake")) or ""
         try:
+            if not context_identifier:
+                raise ValueError("Context Layer requires an ORG_UUID; the n8n result did not provide one")
             result = await ContextLayerClient().fetch(
-                body.identifier, context_base_url or "", context_api_key or ""
+                context_identifier, context_base_url or "", context_api_key or ""
             )
             sources["context_layer"] = result
             stages.append(_stage("context_layer_context", shape(result), started, summary="full organization feature payload captured; values withheld"))

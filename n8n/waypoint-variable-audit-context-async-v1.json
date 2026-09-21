@@ -27,7 +27,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const incoming = $input.first().json ?? {};\nconst body = incoming.body ?? {};\nconst headers = incoming.headers ?? {};\nconst requestId = String(body.request_id ?? headers['x-waypoint-request-id'] ?? '').trim();\nconst organizationId = String(body.organization_id ?? headers['x-waypoint-organization-id'] ?? '').trim();\nconst promotionId = String(body.promotion_id ?? headers['x-waypoint-promotion-id'] ?? '').trim();\nif (!requestId || !organizationId || !promotionId) {\n  const missing = [\n    !requestId && 'request_id',\n    !organizationId && 'organization_id',\n    !promotionId && 'promotion_id',\n  ].filter(Boolean).join(', ');\n  throw new Error(`Missing required Waypoint staging fields: ${missing}`);\n}\nreturn [{ json: {\n  ...incoming,\n  body: { ...body, request_id: requestId, organization_id: organizationId, promotion_id: promotionId },\n} }];"
+        "jsCode": "const incoming = $input.first().json ?? {};\nconst body = incoming.body ?? {};\nconst headers = incoming.headers ?? {};\nconst requestId = String(body.request_id ?? headers['x-waypoint-request-id'] ?? '').trim();\nconst organizationId = String(body.organization_id ?? headers['x-waypoint-organization-id'] ?? '').trim();\nconst promotionId = String(body.promotion_id ?? headers['x-waypoint-promotion-id'] ?? '').trim();\nconst callbackMode = String(body.callback_mode ?? headers['x-waypoint-callback-mode'] ?? 'staging').trim();\nif (!requestId || !organizationId || !promotionId || !['staging', 'workbench'].includes(callbackMode)) {\n  const missing = [\n    !requestId && 'request_id',\n    !organizationId && 'organization_id',\n    !promotionId && 'promotion_id',\n    !['staging', 'workbench'].includes(callbackMode) && 'valid callback_mode',\n  ].filter(Boolean).join(', ');\n  throw new Error(`Missing required Waypoint fields: ${missing}`);\n}\nreturn [{ json: {\n  ...incoming,\n  body: { ...body, request_id: requestId, organization_id: organizationId, promotion_id: promotionId, callback_mode: callbackMode },\n} }];"
       },
       "id": "ccc33333-3333-4333-8333-333333333333",
       "name": "Normalize staging request",
@@ -270,7 +270,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const request = $('Normalize staging request').first().json.body;\nreturn [{ json: {\n  request_id: request.request_id,\n  organization_id: request.organization_id,\n  promotion_id: request.promotion_id,\n  rows: $input.all().map(item => item.json),\n} }];"
+        "jsCode": "const request = $('Normalize staging request').first().json.body;\nreturn [{ json: {\n  request_id: request.request_id,\n  organization_id: request.organization_id,\n  promotion_id: request.promotion_id,\n  callback_mode: request.callback_mode,\n  rows: $input.all().map(item => item.json),\n} }];"
       },
       "id": "aaa11111-1111-4111-8111-111111111111",
       "name": "Prepare Waypoint callback",
@@ -284,7 +284,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://pathfinder-waypoint-v2-staging.up.railway.app/api/context/staging/callback",
+        "url": "={{ $json.callback_mode === 'workbench' ? 'https://pathfinder-waypoint-v2-staging.up.railway.app/api/context-workbench/source-callback' : 'https://pathfinder-waypoint-v2-staging.up.railway.app/api/context/staging/callback' }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,

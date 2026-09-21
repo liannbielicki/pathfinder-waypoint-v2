@@ -213,6 +213,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/context-workbench/source-callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete Workbench Source */
+        post: operations["complete_workbench_source_api_context_workbench_source_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/context-workbench/status": {
         parameters: {
             query?: never;
@@ -972,6 +989,24 @@ export interface components {
              */
             workbench_mode: "runtime" | "authoring" | "compile" | "evaluate";
         };
+        /** WorkbenchSourceCallback */
+        WorkbenchSourceCallback: {
+            /**
+             * Callback Mode
+             * @constant
+             */
+            callback_mode: "workbench";
+            /** Organization Id */
+            organization_id: string;
+            /** Promotion Id */
+            promotion_id: string;
+            /** Request Id */
+            request_id: string;
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+        };
     };
     responses: never;
     parameters: never;
@@ -1386,6 +1421,41 @@ export interface operations {
                 content: {
                     "application/json": {
                         [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    complete_workbench_source_api_context_workbench_source_callback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkbenchSourceCallback"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
                     };
                 };
             };

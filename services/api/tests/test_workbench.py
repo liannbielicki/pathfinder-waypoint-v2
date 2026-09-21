@@ -16,6 +16,7 @@ from waypoint.workbench import (
     compile_catalog_contract,
     compile_context,
     context_layer_coverage,
+    org_uuid_from_n8n,
     parse_feature_catalog_csv,
     prioritize_review_exceptions,
     redact,
@@ -165,6 +166,7 @@ async def test_n8n_context_client_starts_async_request_with_correlation_ids():
             "organization_id": request.headers["x-waypoint-organization-id"],
             "request_id": request.headers["x-waypoint-request-id"],
             "promotion_id": request.headers["x-waypoint-promotion-id"],
+            "callback_mode": request.headers["x-waypoint-callback-mode"],
         }
         return httpx.Response(
             202,
@@ -178,6 +180,7 @@ async def test_n8n_context_client_starts_async_request_with_correlation_ids():
         "test-token",
         request_id="job-123",
         promotion_id="promotion-456",
+        callback_mode="workbench",
     )
 
     assert result == {"status": "accepted", "request_id": "job-123"}
@@ -185,12 +188,75 @@ async def test_n8n_context_client_starts_async_request_with_correlation_ids():
         "organization_id": "889901",
         "request_id": "job-123",
         "promotion_id": "promotion-456",
+        "callback_mode": "workbench",
     }
     assert seen["headers"] == {
         "organization_id": "889901",
         "request_id": "job-123",
         "promotion_id": "promotion-456",
+        "callback_mode": "workbench",
     }
+
+
+@pytest.mark.asyncio
+async def test_n8n_context_client_defaults_waypoint_requests_to_staging_callback():
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        seen["callback_mode"] = request.headers["x-waypoint-callback-mode"]
+        return httpx.Response(
+            202,
+            json={"status": "accepted", "request_id": "job-123"},
+        )
+
+    client = N8NContextClient(transport=httpx.MockTransport(handler), timeout=1)
+    await client.start(
+        "889901",
+        "https://n8n.test/webhook/context",
+        "test-token",
+        request_id="job-123",
+        promotion_id="promotion-456",
+    )
+
+    assert seen == {
+        "body": {
+            "organization_id": "889901",
+            "request_id": "job-123",
+            "promotion_id": "promotion-456",
+            "callback_mode": "staging",
+        },
+        "callback_mode": "staging",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"VARIABLE_NAME": "ORG_UUID", "VALUE": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"}],
+        [{
+            "VARIABLE_NAME": "ORG_SNAPSHOT",
+            "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+        }],
+    ],
+)
+def test_context_layer_uuid_resolves_from_supported_n8n_rows(payload):
+    assert org_uuid_from_n8n(payload) == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"VARIABLE_NAME": "ORG_UUID", "VALUE": "not-a-uuid"}],
+        [
+            {"VARIABLE_NAME": "ORG_UUID", "VALUE": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+            {"VARIABLE_NAME": "ORG_UUID", "VALUE": "6ee00fbd-3f85-4f44-a1f0-9bf4d3ed4fd5"},
+        ],
+    ],
+)
+def test_context_layer_uuid_fails_closed_when_missing_invalid_or_conflicting(payload):
+    assert org_uuid_from_n8n(payload) is None
 
 
 @pytest.mark.asyncio
@@ -982,7 +1048,7 @@ def test_promotion_endpoint_preserves_source_table_for_each_duplicate_key_occurr
 
 
 @pytest.mark.asyncio
-async def test_both_sources_resolve_organization_id_for_context_layer(monkeypatch):
+async def test_both_sources_resolve_org_uuid_for_context_layer(monkeypatch):
     from waypoint.workbench_api import WorkbenchRunRequest, execute_run
 
     seen = {}
@@ -1022,7 +1088,7 @@ async def test_both_sources_resolve_organization_id_for_context_layer(monkeypatc
         feature_catalog_version_id="features-v1",
     ))
 
-    assert seen["identifier"] == "889901"
+    assert seen["identifier"] == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
     # Internal IDs remain available to the audit, but observed values stay out of authoring prompts.
     assert result["outputs"]["audit"]["total_variables"] == 2
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2

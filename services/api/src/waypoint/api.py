@@ -58,7 +58,7 @@ from waypoint.tables import (
     WinnerRow,
     WorkbenchCatalogVersionRow,
 )
-from waypoint.workbench import ContextLayerClient
+from waypoint.workbench import ContextLayerClient, org_uuid_from_n8n
 from waypoint.workbench_api import execute_run
 
 
@@ -278,8 +278,11 @@ def create_app(
         if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
             raise HTTPException(status_code=503, detail="Context Layer is not configured")
         try:
+            org_uuid = org_uuid_from_n8n(body.rows)
+            if org_uuid is None:
+                raise ValueError("Snowflake context is missing a unique org_uuid")
             context_layer = await ContextLayerClient().fetch(
-                body.organization_id,
+                org_uuid,
                 str(settings.CONTEXT_LAYER_BASE_URL),
                 settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
             )

@@ -570,7 +570,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     await db_session.commit()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
-        assert organization_id == "889901"
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
 
     monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
@@ -678,7 +678,7 @@ async def test_staging_callback_never_resurrects_a_stopped_job(
     finish_fetch = asyncio.Event()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
-        assert organization_id == "889901"
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
         fetch_started.set()
         await finish_fetch.wait()
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
@@ -734,6 +734,108 @@ async def test_staging_callback_requires_the_n8n_token(
         headers={"authorization": "Bearer wrong"},
     )
     assert response.status_code == 401
+
+
+async def test_workbench_snowflake_callback_resumes_the_existing_job(
+    db_session_factory,
+    monkeypatch,
+) -> None:
+    dispatched: dict[str, object] = {}
+    resumed: dict[str, object] = {}
+    context_layer_identifiers: list[str] = []
+
+    async def fake_start(
+        self, organization_id, webhook_url, token, *, request_id, promotion_id,
+        callback_mode="staging",
+    ):
+        dispatched.update({
+            "organization_id": organization_id,
+            "request_id": request_id,
+            "promotion_id": promotion_id,
+            "callback_mode": callback_mode,
+        })
+        return {"status": "accepted", "request_id": request_id}
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        resumed.update(dict(resume_state or {}))
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {"authoring": {"draft": [], "review_exception_count": 0}},
+        }
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        context_layer_identifiers.append(organization_id)
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.hosted_workbench.N8NContextClient.start", fake_start)
+    monkeypatch.setattr(
+        "waypoint.hosted_workbench.ContextLayerClient.fetch", fake_context_layer
+    )
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post("/api/context-workbench/jobs", json={
+            "identifier": "889901",
+            "source_mode": "both",
+            "workbench_mode": "authoring",
+        })
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["state"].get("phase") == "collecting_sources":
+                break
+            await asyncio.sleep(0.01)
+        assert dispatched == {
+            "organization_id": "889901",
+            "request_id": job_id,
+            "promotion_id": "workbench-authoring",
+            "callback_mode": "workbench",
+        }
+
+        callback = await client.post(
+            "/api/context-workbench/source-callback",
+            headers={"authorization": "Bearer test"},
+            json={
+                "request_id": job_id,
+                "organization_id": "889901",
+                "promotion_id": "workbench-authoring",
+                "callback_mode": "workbench",
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_SNAPSHOT",
+                        "VALUE": {
+                            "ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+                        },
+                    },
+                    {"VARIABLE_NAME": "SAFE_SIGNAL", "VALUE": 7},
+                    {"VARIABLE_NAME": "EMAIL", "VALUE": "hidden@example.test"},
+                ],
+            },
+        )
+        assert callback.status_code == 200
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert job["status"] == "completed"
+    assert context_layer_identifiers == ["cc962bf1-13bb-4eea-bf66-f3adc9e22192"]
+    inventory = resumed["inventory"]
+    assert isinstance(inventory, list)
+    inventory_keys = {item["key"] for item in inventory}
+    assert "SAFE_SIGNAL" in inventory_keys
+    assert "context_layer.firmographics.segment" in inventory_keys
+    assert "EMAIL" not in inventory_keys
 
 
 async def test_staging_rejects_a_promotion_that_changed_after_display(
@@ -1021,7 +1123,11 @@ async def test_hosted_workbench_runs_and_checkpoints_in_postgres(
         )).status_code == 200
         started = await client.post(
             "/api/context-workbench/jobs",
-            json={"identifier": "889901", "workbench_mode": "authoring"},
+            json={
+                "identifier": "889901",
+                "source_mode": "context_layer",
+                "workbench_mode": "authoring",
+            },
         )
         assert started.status_code == 202
         job_id = started.json()["id"]

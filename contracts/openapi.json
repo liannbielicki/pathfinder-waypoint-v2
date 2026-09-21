@@ -1263,6 +1263,44 @@
         ],
         "title": "WorkbenchRunRequest",
         "type": "object"
+      },
+      "WorkbenchSourceCallback": {
+        "properties": {
+          "callback_mode": {
+            "const": "workbench",
+            "title": "Callback Mode",
+            "type": "string"
+          },
+          "organization_id": {
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "promotion_id": {
+            "title": "Promotion Id",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "organization_id",
+          "promotion_id",
+          "callback_mode",
+          "rows"
+        ],
+        "title": "WorkbenchSourceCallback",
+        "type": "object"
       }
     }
   },
@@ -1780,6 +1818,48 @@
           }
         },
         "summary": "Preview Promotion"
+      }
+    },
+    "/api/context-workbench/source-callback": {
+      "post": {
+        "operationId": "complete_workbench_source_api_context_workbench_source_callback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbenchSourceCallback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Complete Workbench Source Api Context Workbench Source Callback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Workbench Source"
       }
     },
     "/api/context-workbench/status": {

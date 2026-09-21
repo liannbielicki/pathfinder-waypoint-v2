@@ -287,6 +287,7 @@ class N8NContextClient:
         *,
         request_id: str,
         promotion_id: str,
+        callback_mode: str = "staging",
     ) -> dict[str, Any]:
         """Start the long Workbench flow; its result arrives at the callback."""
         try:
@@ -302,11 +303,13 @@ class N8NContextClient:
                         "X-Waypoint-Organization-Id": organization_id,
                         "X-Waypoint-Request-Id": request_id,
                         "X-Waypoint-Promotion-Id": promotion_id,
+                        "X-Waypoint-Callback-Mode": callback_mode,
                     },
                     json={
                         "organization_id": organization_id,
                         "request_id": request_id,
                         "promotion_id": promotion_id,
+                        "callback_mode": callback_mode,
                     },
                 )
         except httpx.ConnectTimeout as error:
