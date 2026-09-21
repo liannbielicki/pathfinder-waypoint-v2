@@ -182,7 +182,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "select 'addendum_payments_churn_score' as query_name, f.key::string as variable_name, f.value as value, object_construct('source_table','production.payments_churn.payments_churn_score') as metadata from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'addendum_payments_churn_score_new', f.key::string, f.value, object_construct('source_table','production.payments_churn.payments_churn_score_new') from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score_new where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f;",
+        "query": "select 'addendum_payments_churn_score' as query_name, f.key::string as variable_name, f.value as value, object_construct('source_table','production.payments_churn.payments_churn_score') as metadata from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'addendum_payments_churn_score_new', f.key::string, f.value, object_construct('source_table','production.payments_churn.payments_churn_score_new') from (select object_construct_keep_null(*) as row_data from production.payments_churn.payments_churn_score_new where org_id = {{$json.body.organization_id}} qualify row_number() over (order by date desc) = 1) r, lateral flatten(input => r.row_data) f\nunion all select 'addendum_channel_recommendation', 'RECOMMENDED_ACTION', to_variant(r.recommended_action), object_construct('source_table','production.reco.channel_recommendations','scoring_date',r.scoring_date)\nfrom production.reco.channel_recommendations r\nwhere r.pro_uuid = (\n  select p.pro_uuid from analytics.main.dim_service_pro p\n  where p.organization_id = {{$json.body.organization_id}} and p.is_admin = true and p.archived = false\n  qualify row_number() over (order by iff(p.founding_pro = 1, 0, 1), p.created_dt asc) = 1)\nqualify row_number() over (order by r.scoring_date desc) = 1;",
         "options": {}
       },
       "id": "72b8da43-612d-4372-8096-cd17adb2037e",
@@ -199,7 +199,7 @@
           "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
         }
       },
-      "notes": "Returns standardized columns: query_name, variable_name, value, metadata."
+      "notes": "Returns standardized columns: query_name, variable_name, value, metadata. Also emits RECOMMENDED_ACTION from production.reco.channel_recommendations for the org's founding admin pro (suggested_channel in the promotion bundle)."
     },
     {
       "parameters": {

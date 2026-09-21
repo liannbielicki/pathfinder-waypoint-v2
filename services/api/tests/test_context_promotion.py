@@ -221,12 +221,12 @@ def test_packaged_staging_promotion_is_the_approved_baseline() -> None:
     )
     assert bundle["feature_catalog_version_id"] == "features-649a8d942fd62ed9"
     assert bundle["counts"] == {
-        "approved": 287,
+        "approved": 288,
         "pii_removed": 64,
         "duplicates_merged": 4,
-        "retained": 219,
+        "retained": 220,
     }
-    assert len(bundle["rules"]) == 219
+    assert len(bundle["rules"]) == 220
     assert len(bundle["feature_catalog"]) == 181
     serialized = json.dumps(bundle).lower()
     assert "organization_id" not in serialized

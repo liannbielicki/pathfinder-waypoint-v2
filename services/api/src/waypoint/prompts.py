@@ -49,7 +49,10 @@ def channel_directive(channels: list[str]) -> str:
             "Pick the channel most likely to bring THIS Pro back, per idea: weigh the "
             "observed-outcome evidence by channel above and the Pro's engagement signals "
             "(email_engagement_state, outreach_count_28d_band, consent states). Text for "
-            "short, time-sensitive asks; email when the idea needs room to explain."
+            "short, time-sensitive asks; email when the idea needs room to explain. If the "
+            "org context has suggested_channel, that is our channel model's best guess for "
+            "this Pro: start there, and pick a different channel only when the idea needs "
+            "it, saying why in manager_rationale."
         )
     if "call" in allowed:
         lines.append(

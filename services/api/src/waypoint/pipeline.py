@@ -1433,6 +1433,8 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 "item resolution failed for run %s pro %s; winner stays audit-only",
                 run_id, state.pro_id, exc_info=True,
             )
+        curated = (state.brief.curated_context or {}) if state.brief else {}
+        suggested_channel = (curated.get("v") or {}).get("suggested_channel")
         deps.store.session.add(
             WinnerRow(
                 run_id=run_id,
@@ -1450,6 +1452,9 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     # The resolved contact pro: what LCM sends to and what
                     # Iterable/Amplitude report on, whatever id keyed the run.
                     **({"pro_uuid": state.brief.pro_uuid} if state.brief and state.brief.pro_uuid else {}),
+                    # RECO's channel suggestion next to the chosen channel, so
+                    # agreement with the model is measurable before we trust it more.
+                    **({"suggested_channel": suggested_channel} if suggested_channel else {}),
                     **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
                 # Sanitized bands only, and never eligible here: eligibility is
