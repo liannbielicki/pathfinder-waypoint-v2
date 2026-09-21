@@ -1193,12 +1193,8 @@
             "type": "string"
           },
           "identifier_type": {
+            "const": "organization_id",
             "default": "organization_id",
-            "enum": [
-              "organization_id",
-              "org_uuid",
-              "pro_uuid"
-            ],
             "title": "Identifier Type",
             "type": "string"
           },

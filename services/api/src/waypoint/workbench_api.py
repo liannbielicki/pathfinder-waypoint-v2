@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from waypoint.context_promotion import (
     DEFAULT_PROMOTION_ROOT,
@@ -36,7 +36,6 @@ from waypoint.workbench import (
     context_layer_coverage,
     is_pii_variable_key,
     load_catalog,
-    org_uuid_from_n8n,
     parse_candidates,
     parse_feature_catalog_csv,
     prioritize_review_exceptions,
@@ -76,7 +75,7 @@ class WorkbenchRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     identifier: str = Field(min_length=1)
-    identifier_type: Literal["organization_id", "org_uuid", "pro_uuid"] = "organization_id"
+    identifier_type: Literal["organization_id"] = "organization_id"
     source_mode: Literal["snowflake", "context_layer", "both"] = "snowflake"
     context_base_url: str | None = None
     context_api_key: str | None = None
@@ -98,6 +97,14 @@ class WorkbenchRunRequest(BaseModel):
     catalog_version_id: str | None = None
     catalog_version_name: str | None = None
     catalog_version_saved_at: str | None = None
+
+    @field_validator("identifier")
+    @classmethod
+    def validate_organization_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) != 6 or not normalized.isdigit():
+            raise ValueError("identifier must be a six-digit organization ID")
+        return normalized
 
 
 class CatalogValidateRequest(BaseModel):
@@ -299,14 +306,9 @@ async def execute_run(
             stages.append(_stage("snowflake_context", None, started, status="failed", error=str(error)))
     if not inventory_resume and body.source_mode in ("context_layer", "both"):
         started = time.perf_counter()
-        context_identifier = body.identifier
-        if body.source_mode == "both" and body.identifier_type != "org_uuid":
-            context_identifier = org_uuid_from_n8n(sources.get("snowflake")) or ""
         try:
-            if not context_identifier:
-                raise ValueError("Context Layer requires an ORG_UUID; the n8n result did not provide one")
             result = await ContextLayerClient().fetch(
-                context_identifier, context_base_url or "", context_api_key or ""
+                body.identifier, context_base_url or "", context_api_key or ""
             )
             sources["context_layer"] = result
             stages.append(_stage("context_layer_context", shape(result), started, summary="full organization feature payload captured; values withheld"))

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 from pytest_httpx import HTTPXMock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -476,16 +477,18 @@ async def test_staging_readiness_ignores_deprecated_staging_url(
     assert response.json()["staging_context_available"] is True
 
 
-async def test_staging_rejects_non_numeric_ids_before_enqueue(
+@pytest.mark.parametrize("invalid", ["pro_abc", "12345", "1234567"])
+async def test_staging_rejects_non_six_digit_ids_before_enqueue(
     auth_client: httpx.AsyncClient,
+    invalid: str,
 ) -> None:
     response = await auth_client.post(
         "/api/runs",
-        json={**RUN_REQUEST, "pro_ids": ["pro_abc"], "context_source": "staging"},
+        json={**RUN_REQUEST, "pro_ids": [invalid], "context_source": "staging"},
     )
 
     assert response.status_code == 422
-    assert "numeric organization id" in response.text.casefold()
+    assert "six-digit organization id" in response.text.casefold()
 
 
 async def test_staging_preserves_numeric_organization_id_as_a_string(
@@ -567,7 +570,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     await db_session.commit()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
-        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+        assert organization_id == "889901"
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
 
     monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
@@ -675,7 +678,7 @@ async def test_staging_callback_never_resurrects_a_stopped_job(
     finish_fetch = asyncio.Event()
 
     async def fake_context_layer(self, organization_id, base_url, api_key):
-        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+        assert organization_id == "889901"
         fetch_started.set()
         await finish_fetch.wait()
         return {"firmographics": {"segment": "1A", "industry": "HVAC"}}

@@ -14,7 +14,6 @@ from waypoint.n8n import CONTRACT_VERSION, ContextUnavailable, OrgBrief, OrgCont
 from waypoint.workbench import (
     ContextLayerClient,
     context_layer_values,
-    org_uuid_from_n8n,
     unwrap_source_payload,
 )
 from waypoint.workbench import (
@@ -74,14 +73,6 @@ def _snowflake_rows(payload: Any) -> list[Mapping[str, Any]]:
     if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
         raise TypeError("response did not contain a row array")
     return rows
-
-
-def context_layer_org_uuid(snowflake_result: Any) -> str:
-    """Resolve the Context Layer identity from the Workbench organization snapshot."""
-    resolved = org_uuid_from_n8n(snowflake_result)
-    if resolved is None:
-        raise ContextUnavailable("staging snowflake context is missing a unique org_uuid")
-    return resolved
 
 
 def _authoritative_firmographics(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -323,8 +314,8 @@ class WorkbenchStagingContextClient:
     async def start(
         self, organization_id: str, request_id: str, promotion_id: str
     ) -> None:
-        if not organization_id.isdigit():
-            raise ContextUnavailable("staging context requires a numeric organization ID")
+        if re.fullmatch(r"\d{6}", organization_id) is None:
+            raise ContextUnavailable("staging context requires a six-digit organization ID")
         if not promotion_id:
             raise ContextUnavailable("staging context promotion artifact has no id")
         try:
@@ -339,8 +330,8 @@ class WorkbenchStagingContextClient:
             raise _source_failure("snowflake", error) from error
 
     async def fetch(self, organization_ids: list[str]) -> OrgContextBatch:
-        if any(not identifier.isdigit() for identifier in organization_ids):
-            raise ContextUnavailable("staging context requires a numeric organization ID")
+        if any(re.fullmatch(r"\d{6}", identifier) is None for identifier in organization_ids):
+            raise ContextUnavailable("staging context requires a six-digit organization ID")
         bundle = await self.promotion_loader()
         if bundle is None:
             raise ContextUnavailable("staging context promotion artifact is missing")

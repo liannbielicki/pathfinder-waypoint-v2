@@ -23,12 +23,26 @@
           "name": "Header Auth account 3"
         }
       },
-      "notes": "POST { organization_id: 889901 }. Raw standardized Snowflake results pass through; the app owns PII exclusion."
+      "notes": "Waypoint Staging POSTs organization_id, request_id, and promotion_id. Raw standardized Snowflake results pass through; the app owns PII exclusion."
+    },
+    {
+      "parameters": {
+        "jsCode": "const incoming = $input.first().json ?? {};\nconst body = incoming.body ?? {};\nconst headers = incoming.headers ?? {};\nconst requestId = String(body.request_id ?? headers['x-waypoint-request-id'] ?? '').trim();\nconst organizationId = String(body.organization_id ?? headers['x-waypoint-organization-id'] ?? '').trim();\nconst promotionId = String(body.promotion_id ?? headers['x-waypoint-promotion-id'] ?? '').trim();\nif (!requestId || !organizationId || !promotionId) {\n  const missing = [\n    !requestId && 'request_id',\n    !organizationId && 'organization_id',\n    !promotionId && 'promotion_id',\n  ].filter(Boolean).join(', ');\n  throw new Error(`Missing required Waypoint staging fields: ${missing}`);\n}\nreturn [{ json: {\n  ...incoming,\n  body: { ...body, request_id: requestId, organization_id: organizationId, promotion_id: promotionId },\n} }];"
+      },
+      "id": "ccc33333-3333-4333-8333-333333333333",
+      "name": "Normalize staging request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4864,
+        7808
+      ],
+      "notes": "Validates the async correlation contract before acknowledging the request. Accepts the values from both the JSON body and Waypoint's redundant transport headers."
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "select 'part_1_org_snapshot' as query_name,\n       'org_snapshot' as variable_name,\n       object_construct_keep_null(*) as value,\n       object_construct('source_table','marts.customer_base.agg_current_customer') as metadata\nfrom marts.customer_base.agg_current_customer\nwhere organization_id = {{$json.body.organization_id}}\nunion all\nselect 'part_1_snapshot_columns', column_name,\n       object_construct('data_type', data_type, 'ordinal_position', ordinal_position, 'comment', comment),\n       object_construct('source_table','marts.customer_base.agg_current_customer')\nfrom marts.information_schema.columns\nwhere table_schema = 'CUSTOMER_BASE' and table_name = 'AGG_CURRENT_CUSTOMER'\nunion all\nselect 'part_1_snapshot_table_inventory', table_name,\n       object_construct('table_schema', table_schema),\n       object_construct('source_database','MARTS')\nfrom marts.information_schema.tables\nwhere table_schema = 'CUSTOMER_BASE' and table_name ilike '%CURRENT_CUSTOMER%';",
+        "query": "select 'part_1_org_snapshot' as query_name,\n       'org_snapshot' as variable_name,\n       object_construct_keep_null(*)::variant as value,\n       object_construct('source_table','marts.customer_base.agg_current_customer') as metadata\nfrom marts.customer_base.agg_current_customer\nwhere organization_id = {{$json.body.organization_id}}\nunion all\nselect 'part_1_snapshot_columns', column_name,\n       object_construct('data_type', data_type, 'ordinal_position', ordinal_position, 'comment', comment),\n       object_construct('source_table','marts.customer_base.agg_current_customer')\nfrom marts.information_schema.columns\nwhere table_schema = 'CUSTOMER_BASE' and table_name = 'AGG_CURRENT_CUSTOMER'\nunion all\nselect 'part_1_snapshot_table_inventory', table_name,\n       object_construct('table_schema', table_schema),\n       object_construct('source_database','MARTS')\nfrom marts.information_schema.tables\nwhere table_schema = 'CUSTOMER_BASE' and table_name ilike '%CURRENT_CUSTOMER%'\nunion all\nselect 'waypoint_contact_pro', 'pro_uuid',\n       to_variant(pro_uuid),\n       object_construct('source_table','analytics.main.dim_service_pro',\n                        'rule', iff(founding_pro = 1, 'founding_pro', 'earliest_admin'))\nfrom analytics.main.dim_service_pro\nwhere organization_id = {{$json.body.organization_id}}\n  and is_admin\n  and not coalesce(archived, false)\nqualify row_number() over (order by coalesce(founding_pro, 0) desc, created_dt, pro_uuid) = 1;\n",
         "options": {}
       },
       "id": "8fd38736-b212-47a1-b8ef-d892a14b9164",
@@ -256,7 +270,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const request = $('Variable audit request').first().json.body ?? {};\nconst requestId = String(request.request_id ?? '').trim();\nconst organizationId = String(request.organization_id ?? '').trim();\nconst promotionId = String(request.promotion_id ?? '').trim();\nif (!requestId || !organizationId || !promotionId) {\n  throw new Error('Missing request_id, organization_id, or promotion_id');\n}\nreturn [{ json: {\n  request_id: requestId,\n  organization_id: organizationId,\n  promotion_id: promotionId,\n  rows: $input.all().map(item => item.json),\n} }];"
+        "jsCode": "const request = $('Normalize staging request').first().json.body;\nreturn [{ json: {\n  request_id: request.request_id,\n  organization_id: request.organization_id,\n  promotion_id: request.promotion_id,\n  rows: $input.all().map(item => item.json),\n} }];"
       },
       "id": "aaa11111-1111-4111-8111-111111111111",
       "name": "Prepare Waypoint callback",
@@ -299,6 +313,17 @@
   ],
   "connections": {
     "Variable audit request": {
+      "main": [
+        [
+          {
+            "node": "Normalize staging request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize staging request": {
       "main": [
         [
           {

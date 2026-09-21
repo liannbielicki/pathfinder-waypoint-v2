@@ -349,7 +349,7 @@ async def test_two_hosted_processes_execute_one_workbench_job_once(
         }
 
     store = PostgresWorkbenchStore(db_session_factory)
-    job = await store.create({"identifier": "org-1", "workbench_mode": "authoring"})
+    job = await store.create({"identifier": "889901", "workbench_mode": "authoring"})
     first = HostedWorkbench(db_session_factory, fake_execute)
     second = HostedWorkbench(db_session_factory, fake_execute)
 
@@ -394,7 +394,7 @@ def test_job_api_starts_reads_and_resumes_durable_jobs(tmp_path):
     app = create_workbench_app(job_db_path=path, job_executor=fake_execute)
     with TestClient(app) as client:
         started = client.post("/api/context-workbench/jobs", json={
-            "identifier": "org-123",
+            "identifier": "889901",
             "source_mode": "snowflake",
             "workbench_mode": "authoring",
             "ai_api_key": "request-secret",
@@ -407,7 +407,7 @@ def test_job_api_starts_reads_and_resumes_durable_jobs(tmp_path):
         assert client.get("/api/context-workbench/jobs/latest").json()["id"] == job_id
 
     store = WorkbenchJobStore(path)
-    resumable = store.create({"identifier": "org-456", "workbench_mode": "authoring"})
+    resumable = store.create({"identifier": "889902", "workbench_mode": "authoring"})
     store.checkpoint(resumable.id, {"entries": [_complete_entry("SAVED")]})
     app = create_workbench_app(job_db_path=path, job_executor=fake_execute)
     with TestClient(app) as client:

@@ -288,16 +288,19 @@ describe("RunStart", () => {
       .not.toBeInTheDocument();
   });
 
-  it("blocks a non-numeric organization ID in Staging", async () => {
+  it("blocks anything other than a six-digit organization ID in Staging", async () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
     await fillRequiredInputs();
     await screen.findByLabelText(/max rounds per pro/i);
     await userEvent.click(screen.getByLabelText(/staging context/i));
+    const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
+    await userEvent.clear(organizationIds);
+    await userEvent.type(organizationIds, "12345");
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /numeric organization ids/i,
+      /six-digit organization ids/i,
     );
     expect(createCalls).toEqual([]);
   });

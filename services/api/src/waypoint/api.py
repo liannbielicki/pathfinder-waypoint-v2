@@ -45,7 +45,7 @@ from waypoint.models import (
 )
 from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
-from waypoint.staging_context import compile_staging_brief, context_layer_org_uuid
+from waypoint.staging_context import compile_staging_brief
 from waypoint.tables import (
     CandidateRow,
     ContextPromotionRow,
@@ -278,9 +278,8 @@ def create_app(
         if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
             raise HTTPException(status_code=503, detail="Context Layer is not configured")
         try:
-            org_uuid = context_layer_org_uuid(body.rows)
             context_layer = await ContextLayerClient().fetch(
-                org_uuid,
+                body.organization_id,
                 str(settings.CONTEXT_LAYER_BASE_URL),
                 settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
             )
@@ -358,11 +357,11 @@ def create_app(
     ) -> RunView:
         settings: Settings = request.app.state.settings
         if body.context_source == "staging" and any(
-            not identifier.isdigit() for identifier in body.pro_ids
+            len(identifier) != 6 or not identifier.isdigit() for identifier in body.pro_ids
         ):
             raise HTTPException(
                 status_code=422,
-                detail="Staging context requires numeric organization IDs",
+                detail="Staging context requires six-digit organization IDs",
             )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)

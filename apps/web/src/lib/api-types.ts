@@ -945,9 +945,9 @@ export interface components {
             /**
              * Identifier Type
              * @default organization_id
-             * @enum {string}
+             * @constant
              */
-            identifier_type: "organization_id" | "org_uuid" | "pro_uuid";
+            identifier_type: "organization_id";
             /**
              * Journey Window
              * @default churn_risk_open

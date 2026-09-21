@@ -605,13 +605,17 @@ async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
     }
 
 
-async def test_staging_requires_numeric_ids_an_active_promotion_and_a_match() -> None:
+async def test_staging_requires_six_digit_ids_an_active_promotion_and_a_match() -> None:
     source = FakeSnowflake({"889901": [{"VARIABLE_NAME": "OTHER", "VALUE": 1}]})
     context = FakeContextLayer({"889901": context_payload()})
 
-    with pytest.raises(ContextUnavailable, match="numeric organization ID"):
+    with pytest.raises(ContextUnavailable, match="six-digit organization ID"):
         await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
             ["pro_abc"]
+        )
+    with pytest.raises(ContextUnavailable, match="six-digit organization ID"):
+        await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
+            ["12345"]
         )
     with pytest.raises(ContextUnavailable, match="promotion"):
         await make_client(bundle=None, snowflake=source, context_layer=context).fetch(
@@ -809,7 +813,7 @@ async def test_staging_bounds_multi_organization_concurrency() -> None:
         max_concurrent=2,
     )
 
-    batch = await client.fetch(["1", "2", "3", "4"])
+    batch = await client.fetch(["100001", "100002", "100003", "100004"])
 
     assert len(batch.organizations) == 4
     assert maximum == 2

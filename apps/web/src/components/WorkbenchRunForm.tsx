@@ -258,10 +258,14 @@ export function WorkbenchRunForm({
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
+    if (!/^\d{6}$/.test(identifier.trim())) {
+      setError("Workbench requires a six-digit organization ID.");
+      return;
+    }
     onBusy?.(true);
     try {
       const job = await startWorkbenchJob({
-        identifier,
+        identifier: identifier.trim(),
         identifier_type: "organization_id",
         source_mode: addContextLayer ? "both" : "snowflake",
         workbench_mode: "authoring",
@@ -319,7 +323,7 @@ export function WorkbenchRunForm({
     {status?.activity === "waypoint" && <p className="error" role="alert">A Waypoint run is active. Context Workbench will unlock when it finishes.</p>}
 
     <div className="form-grid">
-      <div><label htmlFor="identifier">Organization ID</label><input id="identifier" value={identifier} onChange={(event) => setIdentifier(event.target.value)} required /></div>
+      <div><label htmlFor="identifier">Organization ID</label><input id="identifier" inputMode="numeric" pattern="\d{6}" value={identifier} onChange={(event) => setIdentifier(event.target.value)} required /></div>
       <div><label htmlFor="feature-version">Feature catalog version</label><select id="feature-version" value={featureVersionId} onChange={(event) => { setFeatureVersionId(event.target.value); selectFeatureCatalogVersion(event.target.value); }}><option value="">Built-in catalog</option>{featureVersions.map((version) => <option key={version.id} value={version.id}>{version.name} · {version.entries.length} features</option>)}</select></div>
     </div>
 

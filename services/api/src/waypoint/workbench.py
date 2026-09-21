@@ -297,7 +297,12 @@ class N8NContextClient:
             ) as client:
                 response = await client.post(
                     webhook_url,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "X-Waypoint-Organization-Id": organization_id,
+                        "X-Waypoint-Request-Id": request_id,
+                        "X-Waypoint-Promotion-Id": promotion_id,
+                    },
                     json={
                         "organization_id": organization_id,
                         "request_id": request_id,

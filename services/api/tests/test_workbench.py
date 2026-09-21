@@ -161,6 +161,11 @@ async def test_n8n_context_client_starts_async_request_with_correlation_ids():
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen["body"] = json.loads(request.content)
+        seen["headers"] = {
+            "organization_id": request.headers["x-waypoint-organization-id"],
+            "request_id": request.headers["x-waypoint-request-id"],
+            "promotion_id": request.headers["x-waypoint-promotion-id"],
+        }
         return httpx.Response(
             202,
             json={"status": "accepted", "request_id": "job-123"},
@@ -177,6 +182,11 @@ async def test_n8n_context_client_starts_async_request_with_correlation_ids():
 
     assert result == {"status": "accepted", "request_id": "job-123"}
     assert seen["body"] == {
+        "organization_id": "889901",
+        "request_id": "job-123",
+        "promotion_id": "promotion-456",
+    }
+    assert seen["headers"] == {
         "organization_id": "889901",
         "request_id": "job-123",
         "promotion_id": "promotion-456",
@@ -1012,13 +1022,23 @@ async def test_both_sources_resolve_organization_id_for_context_layer(monkeypatc
         feature_catalog_version_id="features-v1",
     ))
 
-    assert seen["identifier"] == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+    assert seen["identifier"] == "889901"
     # Internal IDs remain available to the audit, but observed values stay out of authoring prompts.
     assert result["outputs"]["audit"]["total_variables"] == 2
     assert result["outputs"]["context_layer_coverage"]["total_catalog_features"] == 2
     assert result["outputs"]["context_layer_coverage"]["present_features"] == ["jobs"]
     assert result["outputs"]["authoring"]["draft"][0]["related_features"] == ["jobs"]
     assert any("invented" in warning for warning in result["warnings"])
+
+
+def test_workbench_requires_a_six_digit_organization_id():
+    from pydantic import ValidationError
+
+    from waypoint.workbench_api import WorkbenchRunRequest
+
+    for invalid in ("org-123", "12345", "1234567"):
+        with pytest.raises(ValidationError, match="six-digit organization ID"):
+            WorkbenchRunRequest(identifier=invalid)
 
 
 @pytest.mark.asyncio
@@ -1187,7 +1207,7 @@ async def test_workbench_never_places_fixture_pii_in_prompt(monkeypatch):
 
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     result = await execute_run(WorkbenchRunRequest(
-        identifier="org-123", source_mode="context_layer", ai_api_key="test-key",
+        identifier="889901", source_mode="context_layer", ai_api_key="test-key",
         context_base_url="https://context.example", context_api_key="test-context-key",
     ))
     pii_stage = next(stage for stage in result["stages"] if stage["name"] == "pii_gate")
@@ -1212,7 +1232,7 @@ async def test_workbench_uses_env_credentials_when_request_does_not_contain_keys
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     monkeypatch.setenv("CONTEXT_LAYER_BASE_URL", "https://context.test")
     monkeypatch.setenv("CONTEXT_LAYER_API_KEY", "context-test")
-    result = await execute_run(WorkbenchRunRequest(identifier="org-123", source_mode="context_layer"))
+    result = await execute_run(WorkbenchRunRequest(identifier="889901", source_mode="context_layer"))
     assert result["outputs"]["baseline"]["candidates"] == []
 
 
@@ -1240,7 +1260,7 @@ async def test_authoring_mode_returns_review_only_catalog_draft(monkeypatch):
         return {"rows": [{"VARIABLE_NAME": "industry", "VALUE": "HVAC"}, {"VARIABLE_NAME": "email", "VALUE": "hidden@example.com"}]}
 
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
-    result = await execute_run(WorkbenchRunRequest(identifier="org-123", source_mode="context_layer", context_base_url="https://context.test", context_api_key="context-key", workbench_mode="authoring", ai_api_key="test-key"))
+    result = await execute_run(WorkbenchRunRequest(identifier="889901", source_mode="context_layer", context_base_url="https://context.test", context_api_key="context-key", workbench_mode="authoring", ai_api_key="test-key"))
     assert result["outputs"]["authoring"]["status"] == "draft_only"
     assert result["outputs"]["authoring"]["total_keys"] == 1
     assert result["outputs"]["authoring"]["completed_keys"] == 1
@@ -1302,7 +1322,7 @@ async def test_authoring_requeues_variables_missing_required_metadata(monkeypatc
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(WorkbenchRunRequest(
-        identifier="org-123",
+        identifier="889901",
         source_mode="context_layer",
         context_base_url="https://context.test",
         context_api_key="context-key",
@@ -1355,7 +1375,7 @@ async def test_authoring_revises_low_confidence_once_and_checkpoints(monkeypatch
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(
         WorkbenchRunRequest(
-            identifier="org-123",
+            identifier="889901",
             source_mode="context_layer",
             context_base_url="https://context.test",
             context_api_key="context-key",
@@ -1402,7 +1422,7 @@ async def test_authoring_model_cannot_claim_human_approval(monkeypatch):
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(WorkbenchRunRequest(
-        identifier="org-123",
+        identifier="889901",
         source_mode="context_layer",
         context_base_url="https://context.test",
         context_api_key="context-key",
@@ -1444,7 +1464,7 @@ async def test_authoring_keeps_review_exception_when_revision_is_not_a_list(monk
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
 
     result = await execute_run(WorkbenchRunRequest(
-        identifier="org-123",
+        identifier="889901",
         source_mode="context_layer",
         context_base_url="https://context.test",
         context_api_key="context-key",
@@ -1488,7 +1508,7 @@ async def test_authoring_resume_does_not_redraft_checkpointed_keys(monkeypatch):
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(
         WorkbenchRunRequest(
-            identifier="org-123",
+            identifier="889901",
             source_mode="context_layer",
             context_base_url="https://context.test",
             context_api_key="context-key",
@@ -1553,7 +1573,7 @@ async def test_authoring_resume_uses_checkpoint_inventory_and_cumulative_budget(
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(
         WorkbenchRunRequest(
-            identifier="org-123",
+            identifier="889901",
             source_mode="context_layer",
             workbench_mode="authoring",
             ai_api_key="test-key",
@@ -1613,7 +1633,7 @@ async def test_authoring_splits_and_retries_a_batch_that_hits_max_tokens(monkeyp
     checkpoints: list[dict[str, object]] = []
     result = await execute_run(
         WorkbenchRunRequest(
-            identifier="org-123",
+            identifier="889901",
             source_mode="context_layer",
             context_base_url="https://context.test",
             context_api_key="context-key",
@@ -1662,7 +1682,7 @@ async def test_authoring_requeues_single_variable_after_max_tokens(monkeypatch):
     monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
     monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
     result = await execute_run(WorkbenchRunRequest(
-        identifier="org-123",
+        identifier="889901",
         source_mode="context_layer",
         context_base_url="https://context.test",
         context_api_key="context-key",
