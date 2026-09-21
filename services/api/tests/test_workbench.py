@@ -1337,6 +1337,70 @@ async def test_authoring_mode_returns_review_only_catalog_draft(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_authoring_selection_policy_survives_generation_retry_and_revision(
+    monkeypatch,
+):
+    from waypoint.workbench_api import WorkbenchRunRequest, execute_run
+
+    async def fake_context(self, identifier, base_url, api_key):
+        return {"firmographics": {"metric_t28": 1}}
+
+    prompts: dict[str, str] = {}
+
+    async def fake_model(prompt, *, stage, **kwargs):
+        prompts[stage] = prompt
+        if stage.startswith("authoring_generation_"):
+            return "{", {"output_tokens": 10, "stop_reason": "end_turn"}
+        if stage.startswith("authoring_repair_"):
+            return "{", {"output_tokens": 10, "stop_reason": "end_turn"}
+        confidence = 0.9 if stage.startswith("authoring_confidence_revision_") else 0.6
+        return (
+            json.dumps({
+                "key": "context_layer.firmographics.metric_t28",
+                "canonical_key": "metric_t28",
+                "value_category": "activity",
+                "related_features": [],
+                "usefulness_rank": 4,
+                "disposition": "include",
+                "aggregate_prompt": "Calculate matched cohort percentiles.",
+                "confidence": confidence,
+                "uncertainty_reason": (
+                    None if confidence >= 0.8 else "The metric family needs comparison."
+                ),
+            }),
+            {"output_tokens": 10, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr("waypoint.workbench_api.ContextLayerClient.fetch", fake_context)
+    monkeypatch.setattr("waypoint.workbench_api.run_model", fake_model)
+    await execute_run(WorkbenchRunRequest(
+        identifier="889901",
+        source_mode="context_layer",
+        context_base_url="https://context.test",
+        context_api_key="context-key",
+        workbench_mode="authoring",
+        ai_api_key="test-key",
+        feature_catalog_entries=[],
+    ))
+
+    policy_prompts = [
+        prompt
+        for stage, prompt in prompts.items()
+        if stage.startswith((
+            "authoring_generation_",
+            "authoring_single_",
+            "authoring_confidence_revision_",
+        ))
+    ]
+    assert len(policy_prompts) == 3
+    for prompt in policy_prompts:
+        assert "Prefer T28" in prompt
+        assert "T1 and T7" in prompt
+        assert "T90" in prompt
+        assert "count and amount" in prompt
+
+
+@pytest.mark.asyncio
 async def test_authoring_requeues_variables_missing_required_metadata(monkeypatch):
     from waypoint.workbench_api import WorkbenchRunRequest, execute_run
 

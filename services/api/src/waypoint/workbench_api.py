@@ -60,6 +60,22 @@ _AUTHORING_TOKEN_BUDGET = 150_000
 _AUTHORING_MAX_TOKENS = 20_000
 _AUTHORING_BATCH_SIZE = 15
 _AUTHORING_MAX_ATTEMPTS = 3
+_AUTHORING_SELECTION_POLICY = """VARIABLE SELECTION POLICY:
+- Compare variables within the same metric family before assigning ranks or dispositions.
+- Prefer T28 as the standard recent-behavior window. T30 is acceptable when T28
+  is unavailable or measures something materially different.
+- Set T1 and T7 variants to `exclude`; they are too short and usually duplicate
+  the durable signal available from T28.
+- Set T90 variants to `deprioritize` by default. Include T90 only when it adds a
+  materially different long-term trend, baseline, or rare high-value signal that
+  T28 cannot provide.
+- Include count and amount variants together only when frequency and financial
+  magnitude would independently change the diagnosis or recommendation. Otherwise,
+  include the single most decision-useful representative and exclude redundant variants.
+- When the variable name and observed type do not establish which family member is
+  more useful, use `deprioritize` and state the uncertainty; do not invent a distinction.
+- Keep every source key as its own metadata object. Use disposition to narrow the
+  runtime context instead of deleting or merging source variables."""
 _REQUIRED_AUTHORING_FIELDS = {
     "key", "canonical_key", "value_category", "related_features",
     "usefulness_rank", "disposition", "aggregate_prompt", "confidence",
@@ -521,6 +537,7 @@ claim about the individual Pro.
 `disposition` must be `include`, `deprioritize`, or `exclude`. Prefer inclusion
 only when the variable can materially help identify a core issue or useful
 solution. This is an inferred draft for human review, never an observed fact.
+{_AUTHORING_SELECTION_POLICY}
 `aggregate_prompt` must be null unless usefulness_rank is 4 or 5. For rank 4 or 5,
 write exactly one sentence addressed to Claude requesting a cohort-level
 statistic computed across comparable Pros, not a per-Pro calculation. The
@@ -596,6 +613,7 @@ MALFORMED_RESPONSE:
 Return exactly one valid JSON object for this variable using only these fields:
 key, canonical_key, value_category, related_features, usefulness_rank, disposition,
 aggregate_prompt, confidence, uncertainty_reason. Do not return markdown or commentary.
+{_AUTHORING_SELECTION_POLICY}
 VARIABLE: {item}"""
                             single_text, single_metrics = await run_model(single_prompt, api_key=ai_api_key, model=model, stage=f"authoring_single_{batch_number}", system="Return exactly one valid JSON object and nothing else.", max_tokens=min(1200, max(1, _AUTHORING_TOKEN_BUDGET - authoring_tokens)), effort="low")
                             authoring_tokens += int(single_metrics.get("output_tokens", 0))
@@ -674,6 +692,7 @@ usefulness_rank, disposition, aggregate_prompt, confidence, uncertainty_reason.
 Use only exact feature keys from the verified catalog. Do not invent values or
 product behavior. Confidence is 0.00 through 1.00; uncertainty_reason is required
 below 0.80 and null otherwise. Return JSON only.
+{_AUTHORING_SELECTION_POLICY}
 
 CURRENT METADATA:
 {json.dumps(revision_batch, separators=(",", ":"))}
