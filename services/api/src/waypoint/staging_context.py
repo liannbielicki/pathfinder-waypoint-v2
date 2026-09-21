@@ -279,9 +279,22 @@ def compile_staging_brief(
     curated_context["v"] = dict(sorted({**compiled_values, **authoritative}.items()))
     return OrgBrief(
         org_uuid=organization_id,
+        org_id=organization_id,
+        pro_uuid=_contact_pro(rows),
         **typed,
         curated_context=curated_context,
     )
+
+
+def _contact_pro(rows: list[Mapping[str, Any]]) -> str | None:
+    """The org's founding admin, emitted by the flow's `waypoint_contact_pro`
+    node. An identifier for the LCM handoff, never context: it bypasses the
+    promotion allowlist and is not placed in the prompt packet."""
+    for row in rows:
+        if str(_row_value(row, "query_name") or "") == "waypoint_contact_pro":
+            value = _row_value(row, "value")
+            return str(value) if value else None
+    return None
 
 
 class WorkbenchStagingContextClient:

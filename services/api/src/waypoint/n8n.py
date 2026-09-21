@@ -122,6 +122,11 @@ class OrgBrief(BaseModel):
     mrr_band: str | None = None
     platform_usage_band: str | None = None
     curated_context: dict[str, Any] | None = Field(default=None, exclude=True)
+    # Identifiers, not context: the numeric org id the run was keyed by and the
+    # contact pro the context flow resolved for it (founding admin). The LCM
+    # handoff sends pro_uuid; Iterable/Amplitude report on it.
+    pro_uuid: str | None = None
+    org_id: str | None = None
 
     @property
     def pro_id(self) -> str:

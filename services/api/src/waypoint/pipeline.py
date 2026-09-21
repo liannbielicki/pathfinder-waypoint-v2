@@ -1446,7 +1446,10 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 evidence={
                     "final": final,
                     "screen": screen_score,
-                    "org_id": state.brief.org_uuid if state.brief else "",
+                    "org_id": (state.brief.org_id or state.brief.org_uuid) if state.brief else "",
+                    # The resolved contact pro: what LCM sends to and what
+                    # Iterable/Amplitude report on, whatever id keyed the run.
+                    **({"pro_uuid": state.brief.pro_uuid} if state.brief and state.brief.pro_uuid else {}),
                     **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
                 # Sanitized bands only, and never eligible here: eligibility is

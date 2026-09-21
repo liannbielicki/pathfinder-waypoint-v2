@@ -354,3 +354,41 @@ async def test_ready_rows_carry_the_winner_channel(
     await db_session.commit()
     rows = await ready_rows(db_session, "run-1")
     assert [r["channel"] for r in rows] == ["email"]
+
+
+async def _make_ready(db_session: AsyncSession, evidence: dict) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={"title": "Invoice nudge", "mechanism": "invoice_delivery",
+                        "pro_facing_concept": "get paid", "manager_rationale": "r",
+                        "actions": ["a"], "channel": "sms"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    winner.pro_id = "920618"  # an org_id-keyed run
+    winner.evidence = evidence
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+
+
+async def test_ready_rows_use_the_resolved_contact_pro(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    await _make_ready(db_session, {"org_id": "920618", "pro_uuid": ROW["pro_uuid"]})
+    rows = await ready_rows(db_session, "run-1")
+    assert [(r["pro_uuid"], r["org_id"]) for r in rows] == [(ROW["pro_uuid"], "920618")]
+
+
+async def test_ready_rows_hold_back_an_unresolved_contact(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    # No pro_uuid resolved and the run key is an org_id: LCM could not send
+    # to it, so the row waits rather than shipping an org_id as a pro_uuid.
+    await _make_ready(db_session, {"org_id": "920618"})
+    assert await ready_rows(db_session, "run-1") == []

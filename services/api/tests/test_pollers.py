@@ -18,6 +18,7 @@ from sqlalchemy import select
 from tests.conftest import TEST_SETTINGS
 from waypoint import amplitude_source, iterable_source
 from waypoint.cursors import load_cursor, save_cursor
+from waypoint.outcomes import winners_by_run_pro
 from waypoint.tables import ExposureRow, FleetControlRow, RunRow, TouchOutcomeRow, WinnerRow
 from waypoint.worker import poller_specs
 
@@ -631,3 +632,14 @@ async def test_end_to_end_send_plus_return_validates_the_winner(
     outcome = (await db_session.execute(select(TouchOutcomeRow))).scalars().one()
     assert outcome.evidence_limitation is None
     assert outcome.routing == "route-to-pro"
+
+
+async def test_send_attributes_to_an_org_id_keyed_winner_via_resolved_pro(db_session) -> None:
+    # The LCM sends to the resolved pro_uuid; Iterable echoes it as userId.
+    # The winner of an org_id run must still be found by that pro_uuid.
+    await seed_winner(db_session, run_id="run-org", pro_id="920618")
+    winner = await db_session.get(WinnerRow, "win-run-org")
+    winner.evidence = {**winner.evidence, "pro_uuid": "pro-resolved"}
+    await db_session.commit()
+    found = await winners_by_run_pro(db_session, {("run-org", "pro-resolved")})
+    assert found == {("run-org", "pro-resolved"): "win-run-org"}

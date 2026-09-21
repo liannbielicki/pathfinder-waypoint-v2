@@ -99,3 +99,20 @@ async def test_unknown_recommendation_is_reported_not_stored(db_session) -> None
     )])
     assert result == {"stored": 0, "unknown_recommendation": 1}
     assert await db_session.get(ExposureRow, "exp-miss") is None
+
+
+async def test_winner_linked_exposure_uses_the_resolved_contact_pro(db_session) -> None:
+    # An org_id-keyed run: the Iterable recipient (and Amplitude user) is the
+    # resolved pro_uuid, not the run key.
+    db_session.add(RunRow(id="run-e2", pro_ids=["920618"], audience_query="q",
+                          audience_run="r", channels=["sms"]))
+    await db_session.flush()
+    db_session.add(WinnerRow(
+        id="win-e2", run_id="run-e2", pro_id="920618", kind="winner",
+        evidence={"org_id": "920618", "pro_uuid": "pro_abc"},
+    ))
+    await db_session.commit()
+    await register(db_session, [ExposureIn(exposure_id="exp-w2", recommendation_id="win-e2",
+                                           arm="A", channel="sms")])
+    row = await db_session.get(ExposureRow, "exp-w2")
+    assert (row.pro_id, row.org_id) == ("pro_abc", "920618")

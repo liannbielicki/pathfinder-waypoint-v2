@@ -13,6 +13,7 @@ side is also idempotent per (batch, row_id), so retrying the whole batch is
 always safe.
 """
 
+import logging
 import typing
 from typing import Any, Literal, cast
 
@@ -23,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import PENDING_AUDIENCE_QUERY, HandoffReceipt
 from waypoint.tables import CandidateRow, HandoffRow, MeasurementRow, RunRow, WinnerRow
+
+log = logging.getLogger("waypoint.handoff")
 
 if typing.TYPE_CHECKING:
     from waypoint.settings import Settings
@@ -246,8 +249,16 @@ async def ready_rows(
         if candidate is not None and candidate.recommendation.get("channel") == "call":
             continue  # worked by Pathfinder operators from /api/calls, never sent to LCM
         if winner.id in measured_winner_ids and candidate is not None:
+            # The contact pro the context flow resolved for the org; a run keyed
+            # by pro_uuid resolves to itself. An org_id with no resolution is
+            # held back: LCM cannot reach an org_id, and must not be sent one.
+            pro_uuid = str(winner.evidence.get("pro_uuid") or winner.pro_id)
+            if not pro_uuid.startswith("pro_"):
+                log.warning("winner %s: no contact pro resolved for %s; held back",
+                            winner.id, winner.pro_id)
+                continue
             row: dict[str, Any] = {
-                "pro_uuid": winner.pro_id,
+                "pro_uuid": pro_uuid,
                 # Title AND the full customer-moment text: Allison's SMS
                 # copywriter sees ONLY this field (her journeyStage). The
                 # concept alone often omits the feature name (it is written

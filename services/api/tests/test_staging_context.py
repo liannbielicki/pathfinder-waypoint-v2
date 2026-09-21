@@ -813,3 +813,27 @@ async def test_staging_bounds_multi_organization_concurrency() -> None:
 
     assert len(batch.organizations) == 4
     assert maximum == 2
+
+
+def test_staging_brief_carries_the_contact_pro_as_an_identifier() -> None:
+    # The flow's `waypoint_contact_pro` node emits the founding admin. It is an
+    # identifier for the LCM handoff: kept on the brief, never in the prompt
+    # packet, and not subject to the promotion allowlist.
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    snowflake = [
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        {"QUERY_NAME": "waypoint_contact_pro", "VARIABLE_NAME": "pro_uuid",
+         "VALUE": "pro_f05fd57012f343f59f3bc3f6c575e7ec"},
+    ]
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+    assert brief.pro_id == "889901"
+    assert brief.org_id == "889901"
+    assert brief.pro_uuid == "pro_f05fd57012f343f59f3bc3f6c575e7ec"
+    assert "pro_uuid" not in str(brief.curated_context)
+
+
+def test_staging_brief_without_a_contact_pro_row_has_none() -> None:
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    brief = compile_staging_brief("889901", [{"VARIABLE_NAME": "SAFE", "VALUE": 1}],
+                                  context_payload(), bundle)
+    assert brief.pro_uuid is None

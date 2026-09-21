@@ -45,7 +45,7 @@ def test_n8n_fixture_obeys_ai_egress_contract() -> None:
     assert batch.contract_version == CONTRACT_VERSION
     # Every field that crosses is on the allowlist (consent *state* bands like
     # email_consent_state are allowlisted; raw contact data is not).
-    permitted = set(ALLOWED_FIELDS) | {"org_uuid"}
+    permitted = set(ALLOWED_FIELDS) | {"org_uuid", "pro_uuid", "org_id"}
     for org in batch.organizations:
         assert set(org.model_dump()) <= permitted
     # No raw email/phone values leak: an address would carry an "@".

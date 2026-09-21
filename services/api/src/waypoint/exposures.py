@@ -26,7 +26,7 @@ def _identity_from(item: ExposureIn, winner: WinnerRow | None) -> dict[str, str 
         return {
             "run_id": winner.run_id,
             "winner_id": winner.id,
-            "pro_id": winner.pro_id,
+            "pro_id": winner.evidence.get("pro_uuid") or winner.pro_id,
             "org_id": winner.evidence.get("org_id", ""),
             "item_id": winner.item_id,
             "item_version": winner.item_version,
