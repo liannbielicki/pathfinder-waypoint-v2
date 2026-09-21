@@ -287,10 +287,10 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
               Include features not in the current plan
             </label>
             <p className="helper">
-              Off keeps recommendations to features available on the organization&apos;s
-              current Core SaaS plan. On includes them labeled as not included in the
-              current plan.
-              Add-ons and unknown plan coverage are never guessed.
+              Off excludes only features proven unavailable on the organization&apos;s
+              current Core SaaS plan. On includes those features labeled as not included
+              in the current plan. Add-ons and unknown plan coverage stay included and
+              are labeled unknown.
             </p>
           </>
         )}

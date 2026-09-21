@@ -126,9 +126,7 @@ def _plan_options(value: object) -> list[str]:
         return []
     # Plan cells are comma-separated; notes, when present, follow a blank line.
     first_section = raw.split("\n\n", 1)[0]
-    options = [item.strip() for item in first_section.split(",") if item.strip()]
-    known = [plan for plan in _CORE_SAAS_PLANS if plan in options]
-    return known or [raw]
+    return [item.strip() for item in first_section.split(",") if item.strip()]
 
 
 def _plan_status(options: list[str], current_plan: str) -> str:
@@ -136,10 +134,9 @@ def _plan_status(options: list[str], current_plan: str) -> str:
         return "unknown"
     if options == ["Universal (all orgs)"]:
         return "available"
-    known = [plan for plan in options if plan in _CORE_SAAS_PLANS]
-    if not known:
+    if not options or any(plan not in _CORE_SAAS_PLANS for plan in options):
         return "unknown"
-    return "available" if current_plan in known else "unavailable"
+    return "available" if current_plan in options else "unavailable"
 
 
 def _feature_cards(feature_catalog: object) -> dict[str, dict[str, Any]]:
@@ -171,6 +168,7 @@ def compile_promoted_context(
     bundle: Mapping[str, Any],
     *,
     include_features_not_in_current_plan: bool = False,
+    apply_plan_availability: bool = False,
 ) -> dict[str, Any]:
     compiled: dict[str, Any] = {}
     nulls: list[str] = []
@@ -195,8 +193,9 @@ def compile_promoted_context(
                 features[canonical] = sorted({*features.get(canonical, []), *exact})
                 referenced_features.update(exact)
     all_cards = _feature_cards(bundle.get("feature_catalog"))
-    current_plan = values.get("core_saas_plan")
-    if isinstance(current_plan, str) and current_plan:
+    raw_current_plan = values.get("core_saas_plan")
+    current_plan = raw_current_plan if isinstance(raw_current_plan, str) else ""
+    if apply_plan_availability:
         retained: set[str] = set()
         for feature in referenced_features:
             card = all_cards.get(feature)
@@ -224,7 +223,7 @@ def compile_promoted_context(
         if key not in referenced_features:
             continue
         card = dict(original)
-        if isinstance(current_plan, str) and current_plan:
+        if apply_plan_availability:
             options = card.get("p")
             status = _plan_status(options if isinstance(options, list) else [], current_plan)
             card["e"] = "not_in_current_plan" if status == "unavailable" else status

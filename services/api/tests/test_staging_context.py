@@ -223,6 +223,122 @@ def test_staging_keeps_non_core_features_without_guessing_plan_availability() ->
     }
 
 
+def test_staging_keeps_mixed_plan_metadata_as_unknown() -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["campaigns"],
+        }],
+        "feature_catalog": [{
+            "feature": "campaigns",
+            "Plans": "Core SaaS Basic, Campaigns add-on",
+            "Value Statement": "Run customer campaigns.",
+        }],
+    }
+    snowflake = [
+        {
+            "VARIABLE_NAME": "org_snapshot",
+            "VALUE": {"CORE_SAAS_PLAN_LEVEL": "Essentials"},
+        },
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+    ]
+
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+
+    assert brief.curated_context["f"] == {"safe": ["campaigns"]}
+    assert brief.curated_context["pc"]["campaigns"] == {
+        "e": "unknown",
+        "p": ["Core SaaS Basic", "Campaigns add-on"],
+        "v": "Run customer campaigns.",
+    }
+
+
+def test_staging_recognizes_universal_plan_metadata_with_notes() -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["business_setup"],
+        }],
+        "feature_catalog": [{
+            "feature": "business_setup",
+            "Plans": "Universal (all orgs)\n\nAvailable without a paid Core SaaS plan.",
+        }],
+    }
+    snowflake = [
+        {
+            "VARIABLE_NAME": "org_snapshot",
+            "VALUE": {"CORE_SAAS_PLAN_LEVEL": "Basic"},
+        },
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+    ]
+
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+
+    assert brief.curated_context["pc"]["business_setup"] == {
+        "e": "available",
+        "p": ["Universal (all orgs)"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("plan_rows", "expected_plan"),
+    [
+        ([], None),
+        ([{"VARIABLE_NAME": "org_snapshot", "VALUE": {
+            "CORE_SAAS_PLAN_LEVEL": "Basic",
+        }}, {
+            "VARIABLE_NAME": "CORE_SAAS_PLAN_LEVEL",
+            "VALUE": "Essentials",
+        }], None),
+        ([{"VARIABLE_NAME": "org_snapshot", "VALUE": {
+            "CORE_SAAS_PLAN_LEVEL": "MAX++",
+        }}], "Core SaaS MAX++ [LEGACY]"),
+        ([{"VARIABLE_NAME": "org_snapshot", "VALUE": {
+            "CORE_SAAS_PLAN_LEVEL": "Future",
+        }}], "UNMAPPED"),
+    ],
+)
+def test_staging_marks_uncertain_current_plan_coverage_unknown(
+    plan_rows: list[dict[str, Any]], expected_plan: str | None,
+) -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["checklists"],
+        }],
+        "feature_catalog": [{
+            "feature": "checklists",
+            "Plans": "Core SaaS Basic",
+        }],
+    }
+
+    brief = compile_staging_brief(
+        "889901",
+        [*plan_rows, {"VARIABLE_NAME": "SAFE", "VALUE": 1}],
+        context_payload(),
+        bundle,
+    )
+
+    assert brief.curated_context["f"] == {"safe": ["checklists"]}
+    assert brief.curated_context["pc"]["checklists"] == {
+        "e": "unknown",
+        "p": ["Core SaaS Basic"],
+    }
+    if expected_plan is None:
+        assert "core_saas_plan" not in brief.curated_context["v"]
+    else:
+        assert brief.curated_context["v"]["core_saas_plan"] == expected_plan
+
+
 @pytest.mark.parametrize(
     "segment",
     [
@@ -392,7 +508,11 @@ async def test_staging_fetches_both_sources_then_compiles_only_approved_values()
     assert brief.curated_context == {
         "v": {"industry": "HVAC", "jobs_created_t28": 12, "segment": "1A"},
         "f": {"jobs_created_t28": ["jobs"]},
-        "pc": {"jobs": {"a": "Jobs", "v": "Manage job workflows."}},
+        "pc": {"jobs": {
+            "a": "Jobs",
+            "e": "unknown",
+            "v": "Manage job workflows.",
+        }},
     }
     assert "UNAPPROVED" not in str(brief.curated_context)
     assert "drop@example.com" not in str(brief.curated_context)

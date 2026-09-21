@@ -268,6 +268,7 @@ def compile_staging_brief(
         values,
         matched_bundle,
         include_features_not_in_current_plan=include_features_not_in_current_plan,
+        apply_plan_availability=True,
     )
     compiled_values = curated_context.get("v")
     if not isinstance(compiled_values, dict):

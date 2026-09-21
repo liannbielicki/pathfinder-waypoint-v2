@@ -122,6 +122,22 @@ def test_runtime_compilation_preserves_complete_feature_value_statement():
     assert context["pc"]["jobs"]["v"] == statement.strip()
 
 
+def test_standard_compilation_does_not_apply_staging_plan_filtering():
+    bundle = _bundle()
+    bundle["feature_catalog"][0]["Plans"] = "Core SaaS Essentials"
+
+    context = compile_promoted_context(
+        {"jobs_created_t28": 12, "core_saas_plan": "Core SaaS Basic"},
+        bundle,
+    )
+
+    assert context["f"]["jobs_created_t28"] == ["jobs"]
+    assert context["pc"]["jobs"] == {
+        "a": "Jobs",
+        "v": "Manage job workflows.",
+    }
+
+
 def test_runtime_compilation_unions_feature_mappings_for_one_canonical_value():
     bundle = _bundle()
     bundle["rules"].append({
