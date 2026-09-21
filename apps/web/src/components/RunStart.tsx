@@ -52,6 +52,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [channels, setChannels] = useState<Channel[]>([...CHANNELS]);
   const [journeyWindow, setJourneyWindow] = useState("churn_risk");
   const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
+  const [includeFeaturesNotInCurrentPlan, setIncludeFeaturesNotInCurrentPlan] = useState(false);
   const [stagingAvailable, setStagingAvailable] = useState(false);
   const [stagingContext, setStagingContext] = useState<Awaited<ReturnType<typeof getFleetSettings>>["staging_context"]>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,8 +159,12 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         channels,
         journey_window: journeyWindow as RunCreateInput["journey_window"],
         context_source: contextSource,
+        include_features_not_in_current_plan:
+          contextSource === "staging" && includeFeaturesNotInCurrentPlan,
         ...(contextSource === "staging" && stagingContext
-          ? { context_promotion_id: stagingContext.promotion_id }
+          ? {
+              context_promotion_id: stagingContext.promotion_id,
+            }
           : {}),
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
@@ -270,6 +275,25 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
               : "Staging is not ready because no active approved Workbench catalog is available."
             : "Standard uses today&apos;s production workflow."}
         </p>
+        {contextSource === "staging" && (
+          <>
+            <label htmlFor="include-features-not-in-current-plan">
+              <input
+                id="include-features-not-in-current-plan"
+                type="checkbox"
+                checked={includeFeaturesNotInCurrentPlan}
+                onChange={(event) => setIncludeFeaturesNotInCurrentPlan(event.target.checked)}
+              />
+              Include features not in the current plan
+            </label>
+            <p className="helper">
+              Off keeps recommendations to features available on the organization&apos;s
+              current Core SaaS plan. On includes them labeled as not included in the
+              current plan.
+              Add-ons and unknown plan coverage are never guessed.
+            </p>
+          </>
+        )}
       </fieldset>
 
       <fieldset disabled={defaults === null}>

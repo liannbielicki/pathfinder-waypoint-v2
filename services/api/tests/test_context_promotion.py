@@ -111,6 +111,17 @@ def test_runtime_compilation_keeps_promoted_values_and_referenced_feature_cards(
     assert "secret-org-id" not in str(context)
 
 
+def test_runtime_compilation_preserves_complete_feature_value_statement():
+    statement = "Complete feature context. " * 18
+    bundle = _bundle()
+    bundle["feature_catalog"][0]["Value Statement"] = statement
+
+    context = compile_promoted_context({"jobs_created_t28": 12}, bundle)
+
+    assert len(statement) > 240
+    assert context["pc"]["jobs"]["v"] == statement.strip()
+
+
 def test_runtime_compilation_unions_feature_mappings_for_one_canonical_value():
     bundle = _bundle()
     bundle["rules"].append({
@@ -170,6 +181,7 @@ def test_feature_catalog_removes_pii_values_without_removing_product_language():
         feature_catalog_entries=[{
             "feature": "email_marketing",
             "Product Area": "AI",
+            "Plans": "Core SaaS MAX, Core SaaS MAX+",
             "Value Statement": "Send campaigns; owner jane@example.com",
         }],
         promotion_id="promotion-features",
@@ -181,6 +193,7 @@ def test_feature_catalog_removes_pii_values_without_removing_product_language():
     assert bundle["feature_catalog"] == [{
         "feature": "email_marketing",
         "Product Area": "AI",
+        "Plans": "Core SaaS MAX, Core SaaS MAX+",
     }]
 
 

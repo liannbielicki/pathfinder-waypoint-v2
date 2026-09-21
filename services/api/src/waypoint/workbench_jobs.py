@@ -32,7 +32,7 @@ _SAFE_REQUEST_FIELDS = {
 }
 _FEATURE_FIELDS = {
     "feature", "Product Area", "product_area", "category", "Value Statement",
-    "description",
+    "description", "Plans", "plans",
 }
 _CATALOG_FIELDS = {
     "key", "canonical_key", "value_category", "related_features", "usefulness_rank",

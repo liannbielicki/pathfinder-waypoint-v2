@@ -57,6 +57,7 @@ export function RetryPanel({ run }: { run: RunDetail }) {
         // RunDetail types the window as plain string; the server validates it.
         journey_window: run.journey_window as RunCreateInput["journey_window"],
         context_source: run.context_source as RunCreateInput["context_source"],
+        include_features_not_in_current_plan: run.include_features_not_in_current_plan,
         ...(contextPromotionId ? { context_promotion_id: contextPromotionId } : {}),
       });
       setRetryRun(view.id);

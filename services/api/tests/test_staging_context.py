@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from waypoint.n8n import ContextUnavailable
-from waypoint.staging_context import WorkbenchStagingContextClient
+from waypoint.staging_context import WorkbenchStagingContextClient, compile_staging_brief
 
 
 class FakeSnowflake:
@@ -95,6 +95,132 @@ def test_staging_applies_the_configured_n8n_timeout() -> None:
     )
 
     assert client.snowflake._timeout_seconds == 900
+
+
+def test_staging_filters_features_unavailable_on_the_current_core_plan() -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["checklists"],
+        }],
+        "feature_catalog": [{
+            "feature": "checklists",
+            "Product Area": "Operations",
+            "Plans": "Core SaaS Essentials, Core SaaS MAX, Core SaaS MAX+",
+            "Value Statement": "Create reusable job checklists.",
+        }],
+    }
+    snowflake = [
+        {
+            "VARIABLE_NAME": "org_snapshot",
+            "VALUE": {"CORE_SAAS_PLAN_LEVEL": "Basic"},
+        },
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+    ]
+
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+
+    assert brief.curated_context == {
+        "v": {
+            "core_saas_plan": "Core SaaS Basic",
+            "industry": "HVAC",
+            "safe": 1,
+            "segment": "1A",
+        }
+    }
+
+
+def test_staging_toggle_keeps_features_not_in_the_current_plan() -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["checklists"],
+        }],
+        "feature_catalog": [{
+            "feature": "checklists",
+            "Product Area": "Operations",
+            "Plans": "Core SaaS Essentials, Core SaaS MAX, Core SaaS MAX+",
+            "Value Statement": "Create reusable job checklists.",
+        }],
+    }
+    snowflake = [
+        {
+            "VARIABLE_NAME": "org_snapshot",
+            "VALUE": {"CORE_SAAS_PLAN_LEVEL": "Basic"},
+        },
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+    ]
+
+    brief = compile_staging_brief(
+        "889901",
+        snowflake,
+        context_payload(),
+        bundle,
+        include_features_not_in_current_plan=True,
+    )
+
+    assert brief.curated_context == {
+        "v": {
+            "core_saas_plan": "Core SaaS Basic",
+            "industry": "HVAC",
+            "safe": 1,
+            "segment": "1A",
+        },
+        "f": {"safe": ["checklists"]},
+        "pc": {
+            "checklists": {
+                "a": "Operations",
+                "e": "not_in_current_plan",
+                "p": [
+                    "Core SaaS Essentials",
+                    "Core SaaS MAX",
+                    "Core SaaS MAX+",
+                ],
+                "v": "Create reusable job checklists.",
+            }
+        },
+    }
+
+
+def test_staging_keeps_non_core_features_without_guessing_plan_availability() -> None:
+    bundle = {
+        "id": "promotion-approved",
+        "rules": [{
+            "source_key": "SAFE",
+            "source_table": "UNKNOWN",
+            "canonical_key": "safe",
+            "related_features": ["hcp_assist"],
+        }],
+        "feature_catalog": [{
+            "feature": "hcp_assist",
+            "Plans": "Non Core SaaS",
+            "Value Statement": "AI assistance for office workflows.",
+        }],
+    }
+    snowflake = [
+        {
+            "VARIABLE_NAME": "org_snapshot",
+            "VALUE": {"CORE_SAAS_PLAN_LEVEL": "Basic"},
+        },
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+    ]
+
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+
+    assert brief.curated_context["f"] == {"safe": ["hcp_assist"]}
+    assert brief.curated_context["pc"] == {
+        "hcp_assist": {
+            "e": "unknown",
+            "p": ["Non Core SaaS"],
+            "v": "AI assistance for office workflows.",
+        }
+    }
 
 
 @pytest.mark.parametrize(

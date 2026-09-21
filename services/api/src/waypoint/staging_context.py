@@ -28,6 +28,13 @@ _AUTHORITATIVE_FIRMOGRAPHIC_SOURCES = {
     "context_layer.firmographics.segment",
 }
 _AUTHORITATIVE_FIRMOGRAPHIC_KEYS = {"industry", "segment"}
+_CORE_PLAN_NAMES = {
+    "Basic": "Core SaaS Basic",
+    "Essentials": "Core SaaS Essentials",
+    "MAX": "Core SaaS MAX",
+    "MAX+": "Core SaaS MAX+",
+    "MAX++": "Core SaaS MAX++ [LEGACY]",
+}
 _SAFE_SOURCE_ERROR = re.compile(
     r"(?:Snowflake/n8n|Context Layer) returned HTTP [1-5][0-9]{2}"
     r"|Snowflake/n8n (?:timed out after|could not connect within) "
@@ -93,6 +100,27 @@ def _authoritative_firmographics(payload: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(raw_industry, str) or not raw_industry.strip():
         raise ContextUnavailable("staging context_layer is missing firmographics.industry")
     return {"segment": segment, "industry": raw_industry.strip()}
+
+
+def _authoritative_core_plan(rows: list[Mapping[str, Any]]) -> str | None:
+    found: set[str] = set()
+    for row in rows:
+        variable = _row_value(row, "variable_name")
+        value = _row_value(row, "value", _MISSING)
+        raw: object = _MISSING
+        if isinstance(variable, str) and variable.casefold() == "core_saas_plan_level":
+            raw = value
+        elif (
+            isinstance(variable, str)
+            and variable.casefold() == "org_snapshot"
+            and isinstance(value, Mapping)
+        ):
+            raw = _row_value(value, "core_saas_plan_level", _MISSING)
+        if isinstance(raw, str) and raw.strip():
+            found.add(raw.strip())
+    if len(found) != 1:
+        return None
+    return _CORE_PLAN_NAMES.get(found.pop(), "UNMAPPED")
 
 
 def _without_authoritative_rules(bundle: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -194,6 +222,8 @@ def compile_staging_brief(
     snowflake_result: Any,
     context_layer_result: Mapping[str, Any],
     bundle: Mapping[str, Any],
+    *,
+    include_features_not_in_current_plan: bool = False,
 ) -> OrgBrief:
     """Deterministically reduce raw sources to the promoted runtime contract."""
     try:
@@ -211,6 +241,9 @@ def compile_staging_brief(
     if not values:
         raise ContextUnavailable("staging context matched zero approved variables")
     values.update(firmographics)
+    core_plan = _authoritative_core_plan(rows)
+    if core_plan is not None:
+        values["core_saas_plan"] = core_plan
 
     log.info(
         "staging context compiled promotion=%s received=%d matched=%d "
@@ -231,11 +264,18 @@ def compile_staging_brief(
         and isinstance(value, str)
     }
     matched_bundle = {**runtime_bundle, "rules": matched_rules}
-    curated_context = compile_promoted_context(values, matched_bundle)
+    curated_context = compile_promoted_context(
+        values,
+        matched_bundle,
+        include_features_not_in_current_plan=include_features_not_in_current_plan,
+    )
     compiled_values = curated_context.get("v")
     if not isinstance(compiled_values, dict):
         compiled_values = {}
-    curated_context["v"] = dict(sorted({**compiled_values, **firmographics}.items()))
+    authoritative = dict(firmographics)
+    if core_plan is not None:
+        authoritative["core_saas_plan"] = core_plan
+    curated_context["v"] = dict(sorted({**compiled_values, **authoritative}.items()))
     return OrgBrief(
         org_uuid=organization_id,
         **typed,

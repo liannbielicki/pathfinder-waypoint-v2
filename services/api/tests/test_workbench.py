@@ -467,6 +467,41 @@ def test_feature_catalog_csv_accepts_display_name_and_preserves_duplicate_column
     ]
 
 
+def test_feature_catalog_csv_rejects_oversized_value_statement():
+    statement = "x" * 1001
+
+    with pytest.raises(
+        ValueError,
+        match="Value Statement for sms_number exceeds 1000 characters on line 2",
+    ):
+        parse_feature_catalog_csv(
+            f"Feature Key,Value Statement\nsms_number,{statement}\n"
+        )
+
+
+def test_feature_context_preserves_complete_value_statement():
+    from waypoint.workbench_api import _compact_feature_catalog
+
+    statement = "Complete feature context. " * 18
+    entry = {
+        "feature": "sms_number",
+        "Product Area": "Revenue",
+        "Value Statement": statement,
+    }
+
+    assert len(statement) > 240
+    assert _compact_feature_catalog([entry])[0]["description"] == statement.strip()
+
+    compiled = compile_context(
+        {"snowflake": {"rows": []}},
+        [],
+        feature_catalog_entries=[entry],
+        feature_catalog_version_id="features-v1",
+        context_catalog_version_id="context-v1",
+    )
+    assert compiled["context"]["pc"]["sms_number"]["v"] == statement.strip()
+
+
 def test_audit_inventory_preserves_exact_source_table_lineage():
     inventory = build_audit_inventory({
         "snowflake": {

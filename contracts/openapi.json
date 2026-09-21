@@ -476,6 +476,11 @@
             "title": "Context Source",
             "type": "string"
           },
+          "include_features_not_in_current_plan": {
+            "default": false,
+            "title": "Include Features Not In Current Plan",
+            "type": "boolean"
+          },
           "journey_window": {
             "default": "churn_risk",
             "enum": [
@@ -592,6 +597,11 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "include_features_not_in_current_plan": {
+            "default": false,
+            "title": "Include Features Not In Current Plan",
+            "type": "boolean"
           },
           "journey_window": {
             "title": "Journey Window",
@@ -740,6 +750,11 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "include_features_not_in_current_plan": {
+            "default": false,
+            "title": "Include Features Not In Current Plan",
+            "type": "boolean"
           },
           "journey_window": {
             "title": "Journey Window",

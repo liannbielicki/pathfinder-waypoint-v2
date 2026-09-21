@@ -151,6 +151,7 @@ def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
         created_at=run.created_at,
         journey_window=run.journey_window,
         context_source=cast(ContextSource, run.context_source),
+        include_features_not_in_current_plan=run.include_features_not_in_current_plan,
     )
 
 
@@ -269,6 +270,7 @@ def create_app(
         if promotion is None:
             raise HTTPException(status_code=409, detail="Staging context promotion is missing")
         promotion_bundle = dict(promotion.bundle or {})
+        include_features_not_in_current_plan = run.include_features_not_in_current_plan
         # Do not hold a database transaction or connection open while calling
         # the external Context Layer service.
         await session.rollback()
@@ -287,6 +289,7 @@ def create_app(
                 body.rows,
                 context_layer,
                 promotion_bundle,
+                include_features_not_in_current_plan=include_features_not_in_current_plan,
             )
         except Exception as error:
             raise HTTPException(
@@ -399,6 +402,7 @@ def create_app(
             channels=body.channels,
             journey_window=body.journey_window,
             context_source=body.context_source,
+            include_features_not_in_current_plan=body.include_features_not_in_current_plan,
             loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )

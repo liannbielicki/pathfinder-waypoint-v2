@@ -198,7 +198,7 @@ def _compact_feature_catalog(entries: list[dict[str, Any]]) -> list[dict[str, st
         if product_area:
             item["product_area"] = str(product_area).strip()
         if description:
-            item["description"] = str(description).strip()[:240]
+            item["description"] = str(description).strip()
         compact.append(item)
     return compact
 

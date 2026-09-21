@@ -501,12 +501,17 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
             "pro_ids": ["889901"],
             "context_source": "staging",
             "context_promotion_id": "promotion-ready",
+            "include_features_not_in_current_plan": True,
         },
     )
 
     assert response.status_code == 202
     assert response.json()["pro_ids"] == ["889901"]
     assert response.json()["audience_query"] == "workbench:promotion-ready"
+    assert response.json()["include_features_not_in_current_plan"] is True
+    persisted = await db_session.get(RunRow, response.json()["id"])
+    assert persisted is not None
+    assert persisted.include_features_not_in_current_plan is True
 
 
 async def test_staging_callback_compiles_compact_context_and_requeues_once(
@@ -523,14 +528,18 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
                 "source_key": "SAFE_SIGNAL",
                 "source_table": "ANALYTICS.SIGNALS",
                 "canonical_key": "safe_signal",
-                "related_features": [],
+                "related_features": ["checklists"],
             }, {
                 "source_key": "RAW_PROFILE",
                 "source_table": "ANALYTICS.SIGNALS",
                 "canonical_key": "raw_profile",
                 "related_features": [],
             }],
-            "feature_catalog": [],
+            "feature_catalog": [{
+                "feature": "checklists",
+                "Plans": "Core SaaS Essentials, Core SaaS MAX, Core SaaS MAX+",
+                "Value Statement": "Create reusable job checklists.",
+            }],
         },
     )
     run = RunRow(
@@ -540,6 +549,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         audience_run="2026-09-18T18:00:00Z",
         channels=["sms"],
         context_source="staging",
+        include_features_not_in_current_plan=True,
         cost_limit=Decimal("25.00"),
         status="waiting",
     )
@@ -568,7 +578,10 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
         "rows": [
             {
                 "VARIABLE_NAME": "ORG_SNAPSHOT",
-                "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+                "VALUE": {
+                    "ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192",
+                    "CORE_SAAS_PLAN_LEVEL": "Basic",
+                },
             },
             {
                 "VARIABLE_NAME": "SAFE_SIGNAL",
@@ -596,7 +609,20 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     stored = job.checkpoint["staging_context"]
     assert stored["promotion_id"] == promotion.id
     assert stored["brief"]["curated_context"] == {
-        "v": {"industry": "HVAC", "safe_signal": 7, "segment": "1A"}
+        "v": {
+            "core_saas_plan": "Core SaaS Basic",
+            "industry": "HVAC",
+            "safe_signal": 7,
+            "segment": "1A",
+        },
+        "f": {"safe_signal": ["checklists"]},
+        "pc": {
+            "checklists": {
+                "e": "not_in_current_plan",
+                "p": ["Core SaaS Essentials", "Core SaaS MAX", "Core SaaS MAX+"],
+                "v": "Create reusable job checklists.",
+            }
+        },
     }
     assert "SAFE_SIGNAL" not in str(stored)
     assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in str(stored)

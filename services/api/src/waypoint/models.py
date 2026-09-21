@@ -55,6 +55,7 @@ class RunCreate(BaseModel):
     journey_window: JourneyWindow = "churn_risk"
     context_source: ContextSource = "standard"
     context_promotion_id: str | None = None
+    include_features_not_in_current_plan: bool = False
 
 
 class RunView(BaseModel):
@@ -73,6 +74,7 @@ class RunView(BaseModel):
     created_at: datetime
     journey_window: str
     context_source: ContextSource = "standard"
+    include_features_not_in_current_plan: bool = False
 
 
 class Recommendation(BaseModel):

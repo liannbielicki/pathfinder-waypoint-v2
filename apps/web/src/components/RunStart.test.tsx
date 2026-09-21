@@ -260,6 +260,11 @@ describe("RunStart", () => {
     expect(screen.getByLabelText(/standard context/i)).toBeChecked();
     expect(screen.getByLabelText(/pro ids \(one per line\)/i)).toHaveValue("pro_1");
     await userEvent.click(screen.getByLabelText(/staging context/i));
+    expect(screen.getByLabelText(/include features not in the current plan/i))
+      .not.toBeChecked();
+    await userEvent.click(
+      screen.getByLabelText(/include features not in the current plan/i),
+    );
     const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
     await userEvent.clear(organizationIds);
     await userEvent.type(organizationIds, "889901");
@@ -269,8 +274,18 @@ describe("RunStart", () => {
     expect(createCalls[0]).toEqual(expect.objectContaining({
       context_source: "staging",
       context_promotion_id: "promotion-shared",
+      include_features_not_in_current_plan: true,
       pro_ids: ["889901"],
     }));
+  });
+
+  it("hides the plan-availability toggle for Standard context", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+
+    expect(screen.queryByLabelText(/include features not in the current plan/i))
+      .not.toBeInTheDocument();
   });
 
   it("blocks a non-numeric organization ID in Staging", async () => {

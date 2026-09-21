@@ -46,6 +46,7 @@ _PHONE = re.compile(
 )
 _DATE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T ]\S+)?$")
 _ADDRESS = re.compile(r"\b\d{1,6}\s+[A-Za-z0-9 .'-]+\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|court|ct|way|highway|hwy)\b", re.IGNORECASE)
+_MAX_FEATURE_VALUE_STATEMENT_CHARS = 1000
 _EFFORT_REJECTED: set[str] = set()
 _FIXTURE_PATH = Path(__file__).parents[2] / "tests" / "fixtures" / "context_layer_workbench.json"
 
@@ -519,6 +520,15 @@ def parse_feature_catalog_csv(csv_text: str) -> list[dict[str, str]]:
             continue
         if feature in seen:
             raise ValueError(f"duplicate feature key {feature} on line {line_number}")
+        for index, normalized_header in enumerate(normalized_headers):
+            if (
+                normalized_header in {"value_statement", "description"}
+                and len(values[index].strip()) > _MAX_FEATURE_VALUE_STATEMENT_CHARS
+            ):
+                raise ValueError(
+                    f"{supplied_headers[index]} for {feature} exceeds "
+                    f"{_MAX_FEATURE_VALUE_STATEMENT_CHARS} characters on line {line_number}"
+                )
         seen.add(feature)
         entries.append({"feature": feature, **row})
     if not entries:
@@ -656,7 +666,7 @@ def _compact_product_context(
         if product_area:
             card["a"] = str(product_area).strip()
         if value_statement:
-            card["v"] = str(value_statement).strip()[:240]
+            card["v"] = str(value_statement).strip()
         product_context[feature] = card
     return dict(sorted(product_context.items()))
 

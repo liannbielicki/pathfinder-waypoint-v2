@@ -23,7 +23,16 @@ _SAFE_FEATURE_FIELDS = {
     "category",
     "Value Statement",
     "description",
+    "Plans",
+    "plans",
 }
+
+_CORE_SAAS_PLANS = (
+    "Core SaaS Basic",
+    "Core SaaS Essentials",
+    "Core SaaS MAX",
+    "Core SaaS MAX+",
+)
 
 
 def _approved_include(entry: Mapping[str, Any]) -> bool:
@@ -111,8 +120,30 @@ def promotion_csv(bundle: Mapping[str, Any]) -> str:
     return output.getvalue()
 
 
-def _feature_cards(feature_catalog: object) -> dict[str, dict[str, str]]:
-    cards: dict[str, dict[str, str]] = {}
+def _plan_options(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    # Plan cells are comma-separated; notes, when present, follow a blank line.
+    first_section = raw.split("\n\n", 1)[0]
+    options = [item.strip() for item in first_section.split(",") if item.strip()]
+    known = [plan for plan in _CORE_SAAS_PLANS if plan in options]
+    return known or [raw]
+
+
+def _plan_status(options: list[str], current_plan: str) -> str:
+    if current_plan not in _CORE_SAAS_PLANS:
+        return "unknown"
+    if options == ["Universal (all orgs)"]:
+        return "available"
+    known = [plan for plan in options if plan in _CORE_SAAS_PLANS]
+    if not known:
+        return "unknown"
+    return "available" if current_plan in known else "unavailable"
+
+
+def _feature_cards(feature_catalog: object) -> dict[str, dict[str, Any]]:
+    cards: dict[str, dict[str, Any]] = {}
     if not isinstance(feature_catalog, list):
         return cards
     for entry in feature_catalog:
@@ -121,19 +152,25 @@ def _feature_cards(feature_catalog: object) -> dict[str, dict[str, str]]:
         key = str(entry.get("feature") or "")
         if not key:
             continue
-        card: dict[str, str] = {}
+        card: dict[str, Any] = {}
         area = entry.get("Product Area") or entry.get("product_area")
         value = entry.get("Value Statement") or entry.get("description")
+        plans = entry.get("Plans") or entry.get("plans")
         if area:
             card["a"] = str(area).strip()
         if value:
-            card["v"] = str(value).strip()[:240]
+            card["v"] = str(value).strip()
+        if plans:
+            card["p"] = _plan_options(plans)
         cards[key] = card
     return dict(sorted(cards.items()))
 
 
 def compile_promoted_context(
-    values: Mapping[str, Any], bundle: Mapping[str, Any]
+    values: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+    *,
+    include_features_not_in_current_plan: bool = False,
 ) -> dict[str, Any]:
     compiled: dict[str, Any] = {}
     nulls: list[str] = []
@@ -157,16 +194,44 @@ def compile_promoted_context(
                 exact = [str(item) for item in related]
                 features[canonical] = sorted({*features.get(canonical, []), *exact})
                 referenced_features.update(exact)
+    all_cards = _feature_cards(bundle.get("feature_catalog"))
+    current_plan = values.get("core_saas_plan")
+    if isinstance(current_plan, str) and current_plan:
+        retained: set[str] = set()
+        for feature in referenced_features:
+            card = all_cards.get(feature)
+            if card is None:
+                retained.add(feature)
+                continue
+            options = card.get("p")
+            status = _plan_status(options if isinstance(options, list) else [], current_plan)
+            if status != "unavailable" or include_features_not_in_current_plan:
+                retained.add(feature)
+        features = {
+            canonical: [feature for feature in related if feature in retained]
+            for canonical, related in features.items()
+        }
+        features = {canonical: related for canonical, related in features.items() if related}
+        referenced_features = retained
+
     context: dict[str, Any] = {"v": dict(sorted(compiled.items()))}
     if nulls:
         context["n"] = sorted(nulls)
     if features:
         context["f"] = dict(sorted(features.items()))
-    cards = {
-        key: card
-        for key, card in _feature_cards(bundle.get("feature_catalog")).items()
-        if key in referenced_features
-    }
+    cards: dict[str, dict[str, Any]] = {}
+    for key, original in all_cards.items():
+        if key not in referenced_features:
+            continue
+        card = dict(original)
+        if isinstance(current_plan, str) and current_plan:
+            options = card.get("p")
+            status = _plan_status(options if isinstance(options, list) else [], current_plan)
+            card["e"] = "not_in_current_plan" if status == "unavailable" else status
+        else:
+            # Preserve the old runtime shape when no authoritative plan exists.
+            card.pop("p", None)
+        cards[key] = card
     if cards:
         context["pc"] = cards
     return context

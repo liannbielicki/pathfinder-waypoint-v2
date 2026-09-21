@@ -641,6 +641,11 @@ export interface components {
              */
             context_source: "standard" | "staging";
             /**
+             * Include Features Not In Current Plan
+             * @default false
+             */
+            include_features_not_in_current_plan: boolean;
+            /**
              * Journey Window
              * @default churn_risk
              * @enum {string}
@@ -692,6 +697,11 @@ export interface components {
             }[];
             /** Id */
             id: string;
+            /**
+             * Include Features Not In Current Plan
+             * @default false
+             */
+            include_features_not_in_current_plan: boolean;
             /** Journey Window */
             journey_window: string;
             /** Killed */
@@ -752,6 +762,11 @@ export interface components {
             created_at: string;
             /** Id */
             id: string;
+            /**
+             * Include Features Not In Current Plan
+             * @default false
+             */
+            include_features_not_in_current_plan: boolean;
             /** Journey Window */
             journey_window: string;
             /** Loop Config */

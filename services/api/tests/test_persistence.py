@@ -18,6 +18,7 @@ def test_run_requires_clean_audience_lineage() -> None:
     assert run.pro_ids == ["pro_1", "pro_2"]
     assert run.audience_query == "audience_v7"
     assert run.context_source == "standard"
+    assert run.include_features_not_in_current_plan is False
 
 
 def test_run_accepts_only_known_context_sources() -> None:
@@ -29,6 +30,12 @@ def test_run_accepts_only_known_context_sources() -> None:
         context_source="staging",
     )
     assert staging.context_source == "staging"
+    assert staging.include_features_not_in_current_plan is False
+
+    with_other_features = staging.model_copy(
+        update={"include_features_not_in_current_plan": True}
+    )
+    assert with_other_features.include_features_not_in_current_plan is True
     with pytest.raises(ValidationError):
         RunCreate(
             pro_ids=["pro_1"],
@@ -238,7 +245,9 @@ async def test_run_context_source_round_trips(db_session) -> None:
         audience_run="r",
         channels=["sms"],
         context_source="staging",
+        include_features_not_in_current_plan=True,
     )
     db_session.add(run)
     await db_session.commit()
     assert (await db_session.get(RunRow, run.id)).context_source == "staging"
+    assert (await db_session.get(RunRow, run.id)).include_features_not_in_current_plan is True

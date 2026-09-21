@@ -54,6 +54,9 @@ class RunRow(Base):
     channels: Mapped[list[str]]
     journey_window: Mapped[str] = mapped_column(default="churn_risk")
     context_source: Mapped[str] = mapped_column(default="standard", server_default="standard")
+    include_features_not_in_current_plan: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))
