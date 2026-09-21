@@ -1208,7 +1208,12 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
         "phase": "sources_ready",
         "scrubbed_sources": {
             "snowflake": {"rows": [
-                {"QUERY_NAME": "usage", "VARIABLE_NAME": "JOBS_CREATED", "VALUE": 12},
+                {
+                    "QUERY_NAME": "usage",
+                    "VARIABLE_NAME": "JOBS_CREATED",
+                    "VALUE": 12,
+                    "METADATA": {"unused": "do-not-send"},
+                },
                 {"QUERY_NAME": "identity", "VARIABLE_NAME": "ORG_UUID", "VALUE": "secret"},
             ]},
             "context_layer": {"firmographics": {"segment": "1A", "industry": "HVAC"}},
@@ -1220,7 +1225,16 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
     assert all("You are running one round of an evolutionary search" in calls[index]["prompt"] for index in (0, 1))
     assert calls[0]["model"] == calls[1]["model"] == "claude-sonnet-5"
     assert calls[0]["prompt"] != calls[1]["prompt"]
-    assert '"VALUE": "secret"' in calls[0]["prompt"]
+    assert '"ORG_UUID": "secret"' in calls[0]["prompt"]
+    assert "do-not-send" not in calls[0]["prompt"]
+    assert evaluation["baseline"]["context"] == {
+        "v": {
+            "JOBS_CREATED": 12,
+            "ORG_UUID": "secret",
+            "context_layer.firmographics.industry": "HVAC",
+            "context_layer.firmographics.segment": "1A",
+        }
+    }
     assert evaluation["baseline"]["candidates"][0]["title"] == "baseline"
     assert evaluation["curated"]["candidates"][0]["title"] == "curated"
     assert evaluation["curated"]["context"]["v"] == {"jobs_created": 12}
@@ -1228,6 +1242,8 @@ async def test_evaluate_mode_compares_exact_waypoint_prompts_and_uses_fast_judge
     assert evaluation["judge"]["winner"] == "curated"
     assert calls[2]["model"] == "claude-haiku-4-5"
     assert "effort" not in calls[2]
+    assert calls[2]["prompt"].count("secret") == 1
+    assert '"context":' not in calls[2]["prompt"]
 
 
 @pytest.mark.asyncio

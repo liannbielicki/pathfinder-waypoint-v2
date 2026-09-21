@@ -845,8 +845,24 @@ VARIABLE EVIDENCE (no organization values):
             context_catalog_version_id=body.catalog_version_id,
             feature_catalog_entries=feature_catalog_entries,
         )
+        baseline_entries = [
+            {
+                "key": item["key"],
+                "canonical_key": item["key"],
+                "disposition": "include",
+                "review_status": "reviewed",
+            }
+            for item in inventory
+            if item.get("observed_state") != "removed_pii"
+        ]
+        baseline = compile_context(
+            scrubbed_sources,
+            baseline_entries,
+            feature_catalog_version_id=None,
+            context_catalog_version_id=None,
+        )
         contexts = {
-            "baseline": {"organization": scrubbed},
+            "baseline": baseline["context"],
             "curated": curated["context"],
         }
         evaluation: dict[str, Any] = {}
@@ -882,18 +898,26 @@ VARIABLE EVIDENCE (no organization values):
                 summary="Waypoint evolve prompt generated ideas without sending outreach",
             ))
 
+        judge_inputs = {
+            arm: {
+                "prompt": result["prompt"],
+                "candidates": result["candidates"],
+                "metrics": result["metrics"],
+            }
+            for arm, result in evaluation.items()
+        }
         judge_prompt = f"""Compare two Waypoint context tests for the same organization.
-Read each scrubbed input context, exact generation prompt, generated ideas, and measured metrics.
+Read each exact generation prompt, generated ideas, and measured metrics. Each prompt already contains its scrubbed input context.
 Choose the arm with more grounded, useful, actionable ideas for helping the Pro return to and use the app.
 Do not reward verbosity. Suggest no more than three small changes to the curated context contract.
 Return one JSON object only:
 {{"winner":"baseline|curated|tie","reason":"short reason","suggested_changes":["change"]}}
 
 BASELINE:
-{json.dumps(evaluation["baseline"], separators=(",", ":"))}
+{json.dumps(judge_inputs["baseline"], separators=(",", ":"))}
 
 CURATED:
-{json.dumps(evaluation["curated"], separators=(",", ":"))}
+{json.dumps(judge_inputs["curated"], separators=(",", ":"))}
 """
         judge_text, judge_metrics = await run_model(
             judge_prompt,
