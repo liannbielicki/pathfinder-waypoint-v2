@@ -409,3 +409,18 @@ async def test_the_winner_owns_the_identity_not_the_submitter(
         row = (await session.execute(select(TouchOutcomeRow))).scalar_one()
     assert row.pro_id == "pro_1"
     assert row.pro_id != "SOMEONE_ELSE"
+
+
+async def test_unknown_exposure_id_is_stored_unattributed_not_fk_error(
+    db_session_factory,
+) -> None:
+    # A stamped Iterable click can land before its send registered (deferred
+    # or malformed send). The row must be kept, unattributed, not 500 on the
+    # exposures FK and stall the poller on that window.
+    body = [TouchOutcomeIn(exposure_id="msg-not-registered", source="iterable_n8n", pro_id="pro_1")]
+    result = await _ingest_with_new_session(db_session_factory, body)
+    assert result == {"stored": 1, "unattributed": 1}
+    async with db_session_factory() as session:
+        row = (await session.execute(select(TouchOutcomeRow))).scalar_one()
+    assert row.recommendation_id == "msg-not-registered"
+    assert row.exposure_id is None  # no ExposureRow to point at yet

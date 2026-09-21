@@ -499,7 +499,10 @@ def _apply_item(
             "routing": routing,
             "evidence_limitation": evidence_limitation(winner, exposure, routing, item.delivered),
             "pro_id": item.pro_id,
-            "exposure_id": item.exposure_id,
+            # Only a REGISTERED exposure may be pointed at (exposures FK); an
+            # unknown id stays in recommendation_id and attributes on re-ingest
+            # or the checkpoint sweep once the send lands.
+            "exposure_id": exposure.id if exposure is not None else None,
             "send_status": item.send_status,
             "send_confirmed_at": item.send_confirmed_at,
             **{k: getattr(item, k) for k in _OUTCOME_FLAGS},
