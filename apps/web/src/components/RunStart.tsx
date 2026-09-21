@@ -50,7 +50,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
     () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   );
   const [channels, setChannels] = useState<Channel[]>([...CHANNELS]);
-  const [journeyWindow, setJourneyWindow] = useState("churn_risk");
+  const [journeyWindow, setJourneyWindow] = useState("churn_risk_open");
   const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
   const [includeFeaturesNotInCurrentPlan, setIncludeFeaturesNotInCurrentPlan] = useState(false);
   const [stagingAvailable, setStagingAvailable] = useState(false);
@@ -212,7 +212,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         <div>
           <span>Channels (Waypoint picks per idea)</span>
           {CHANNELS.map((c) => (
-            <label key={c} htmlFor={`channel-${c}`}>
+            <label key={c} className="check-row" htmlFor={`channel-${c}`}>
               <input
                 id={`channel-${c}`}
                 type="checkbox"
