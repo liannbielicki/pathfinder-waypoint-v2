@@ -261,7 +261,12 @@ async def _worker_loop(
     log.info("worker %s started", worker_id)
     while True:
         async with factory() as session:
-            job = await claim_job(session, worker_id, lease_seconds=LEASE_SECONDS)
+            job = await claim_job(
+                session,
+                worker_id,
+                lease_seconds=LEASE_SECONDS,
+                max_staging_pending=settings.STAGING_MAX_PENDING,
+            )
             await session.commit()
             if job is None:
                 if maintenance:

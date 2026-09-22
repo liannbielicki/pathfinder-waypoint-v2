@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api";
 import type { SharedCatalogVersion } from "@/lib/catalogVersions";
 
 export type WorkbenchStage = {
@@ -57,15 +58,20 @@ async function responsePayload(response: Response) {
     throw new Error(`Workbench backend returned HTTP ${status} without a valid JSON error`);
   }
   if (response.ok) return payload;
+  // ApiError (not Error) so pollers can see the status and stop on 401 —
+  // it extends Error, so every existing `instanceof Error` reader is unchanged.
   const detail = payload.detail;
-  if (typeof detail === "string") throw new Error(detail);
+  if (typeof detail === "string") throw new ApiError(response.status, detail);
   if (detail && typeof detail === "object") {
     const sources = detail.sources && typeof detail.sources === "object"
       ? Object.entries(detail.sources).map(([source, reason]) => `${source}: ${String(reason)}`).join(" · ")
       : "";
-    throw new Error([detail.message, sources].filter(Boolean).join(" — ") || "Workbench request failed");
+    throw new ApiError(
+      response.status,
+      [detail.message, sources].filter(Boolean).join(" — ") || "Workbench request failed",
+    );
   }
-  throw new Error("Workbench request failed");
+  throw new ApiError(response.status, "Workbench request failed");
 }
 
 async function request(path: string, init?: RequestInit) {

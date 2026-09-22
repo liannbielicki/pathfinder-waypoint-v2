@@ -50,7 +50,7 @@ describe("LoopProgress", () => {
     );
     // pro_2 is decided; pro_1 still looping; pro_3 has not started.
     expect(screen.getByText(/1 of 3 pros looping/i)).toBeInTheDocument();
-    expect(screen.getByText(/best so far 2\.4 pp/i)).toBeInTheDocument();
+    expect(screen.getByText(/best screen estimate so far 2\.4 pp/i)).toBeInTheDocument();
   });
 
   it("shows one row per pro with loop count and current best from win rounds only", () => {
@@ -69,7 +69,7 @@ describe("LoopProgress", () => {
     const row = screen.getByRole("group", { name: /pro_1/ });
     expect(within(row).getByText(/loop 3 of 10/i)).toBeInTheDocument();
     // A losing round's score never becomes "best" — only kept wins count.
-    expect(within(row).getByText(/best 1\.2 pp/i)).toBeInTheDocument();
+    expect(within(row).getByText(/best screen estimate 1\.2 pp/i)).toBeInTheDocument();
   });
 
   it("lists each round's score inside the pro row", () => {
@@ -86,9 +86,31 @@ describe("LoopProgress", () => {
     );
     const row = screen.getByRole("group", { name: /pro_1/ });
     expect(within(row).getByText(/discount/)).toBeInTheDocument();
-    expect(within(row).getByText(/1\.0 pp · win/)).toBeInTheDocument();
+    expect(within(row).getByText(/1\.0 pp · screen win/)).toBeInTheDocument();
     expect(within(row).getByText(/reminder/)).toBeInTheDocument();
     expect(within(row).getByText(/suppressed/)).toBeInTheDocument();
+  });
+
+  it("says a no-action was rejected at the held-out final, with its estimate and CI", () => {
+    render(
+      <LoopProgress
+        run={{
+          ...RUN_FIXTURE,
+          rounds: [round({ outcome: "win", score_pp: 3.3 })],
+          candidates: [
+            {
+              id: "c1", pro_id: "pro_1", recommendation: {}, critics: {},
+              persona_evidence: {}, status: "champion", round: 1,
+              score: { final: { reduction_pp: 0.4, ci_lower_pp: -1.2, ci_upper_pp: 2.0 } },
+            },
+          ],
+          winners: [{ ...WINNER, kind: "no_action", rationale: "no_candidate_cleared_floor" }],
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/Rejected at held-out final: 0\.4 pp \(CI -1\.2–2\.0 pp\)/),
+    ).toBeInTheDocument();
   });
 
   it("sorts looping pros above decided ones and marks the decision", () => {

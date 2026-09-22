@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, isUnauthorized } from "./api";
 import { getWorkbenchJob, getWorkbenchStatus, resumeWorkbenchJob, startWorkbenchJob } from "./workbench";
 
 describe("Workbench API errors", () => {
@@ -23,6 +24,21 @@ describe("Workbench API errors", () => {
     await expect(getWorkbenchStatus()).rejects.toThrow(
       "Workbench backend returned HTTP 500 Internal Server Error",
     );
+  });
+
+  it("carries the HTTP status so a 5s poller can stop on 401", async () => {
+    // Without the status, every poller retried an expired session forever and
+    // buried the API log in 401s.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      json: vi.fn().mockResolvedValue({ detail: "Not authenticated" }),
+    }));
+
+    const cause = await getWorkbenchStatus().catch((error: unknown) => error);
+    expect(isUnauthorized(cause)).toBe(true);
+    expect((cause as ApiError).message).toBe("Not authenticated");
   });
 });
 

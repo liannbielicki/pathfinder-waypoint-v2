@@ -8,7 +8,7 @@ import { RetryPanel } from "@/components/RetryPanel";
 import { RunStatus } from "@/components/RunStatus";
 import { WinnerReview } from "@/components/WinnerReview";
 import {
-  ApiError,
+  isUnauthorized,
   TERMINAL_STATES,
   createHandoff,
   getRun,
@@ -24,6 +24,8 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [handingOff, setHandingOff] = useState(false);
+  // Same stop-gate shape as `done`: polling a 401 forever answers nobody.
+  const [signedOut, setSignedOut] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -32,8 +34,10 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     } catch (e) {
       // Truth before polish: a fetch failure is a visible reconnecting state,
       // never a silently stale screen.
+      const expired = isUnauthorized(e);
+      setSignedOut(expired);
       setConnectionError(
-        e instanceof ApiError && e.status === 401
+        expired
           ? "Session expired. Return to the start page and sign in again."
           : "Cannot reach the API. Retrying…",
       );
@@ -47,14 +51,14 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     run !== null && TERMINAL_STATES.has(run.status) && run.handoffs.length > 0;
 
   useEffect(() => {
-    if (done) return;
+    if (done || signedOut) return;
     const kickoff = window.setTimeout(() => void refresh(), 0);
     const timer = window.setInterval(() => void refresh(), POLL_MS);
     return () => {
       window.clearTimeout(kickoff);
       window.clearInterval(timer);
     };
-  }, [done, refresh]);
+  }, [done, signedOut, refresh]);
 
   async function onKill() {
     setActionError(null);

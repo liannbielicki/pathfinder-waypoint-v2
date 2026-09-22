@@ -1868,11 +1868,42 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
                 )
                 if not promotion_id:
                     raise ContextUnavailable("staging context promotion artifact has no id")
-                await deps.staging_context.start(state.pro_id, job_id, promotion_id)
+                # Reserve the fleet-wide Staging slot durably before making the
+                # external request. A crash or ambiguous HTTP failure must
+                # leave the slot occupied until callback/timeout, never launch
+                # the same job again and exceed the configured agent count.
+                already_dispatched = isinstance(
+                    job.checkpoint.get("staging_request"), Mapping
+                )
                 await store.wait_for_staging_context(
                     job_id, promotion_id, deps.lease_seconds
                 )
                 await store.set_run_status(run_id, "waiting", "staging_context_pending")
+                if already_dispatched:
+                    return
+                try:
+                    await deps.staging_context.start(state.pro_id, job_id, promotion_id)
+                except Exception as error:  # noqa: BLE001 - delivery is ambiguous
+                    # The slot stays reserved (the webhook may have landed
+                    # anyway), but label why now: the reaper's generic
+                    # "callback timed out" would otherwise be the only trace.
+                    detail = (
+                        str(error)
+                        if isinstance(error, ContextUnavailable)
+                        else type(error).__name__
+                    )
+                    await queue.checkpoint_job(
+                        store.session,
+                        job_id,
+                        "failure",
+                        {"reason": f"context_unavailable: staging: {detail}"},
+                    )
+                    await store.session.commit()
+                    log.warning(
+                        "staging dispatch outcome unknown for job %s; "
+                        "holding admission until callback or timeout",
+                        job_id,
+                    )
                 return
         else:
             batch = await deps.context.fetch([state.pro_id])

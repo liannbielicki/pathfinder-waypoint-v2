@@ -107,11 +107,21 @@ class HostedWorkbench:
         self.tasks: dict[str, asyncio.Task[None]] = {}
 
     async def run_job(self, job_id: str) -> None:
+        # This session stays checked out for the whole job — minutes of LLM
+        # work, or a 900s n8n round trip — because the advisory lock lives on
+        # its connection. That is one of the API pool's connections, so the
+        # pool is sized with this pin accounted for (api.py make_engine).
+        # It MUST be pg_TRY_advisory_lock: the blocking form waits forever, so
+        # a lock left behind by a SIGKILLed deploy (Postgres only reaps it when
+        # the old backend's TCP connection dies, which can take hours) pinned a
+        # second connection on every boot, for a job that would never start.
         async with self.store.factory() as claim_session:
-            await claim_session.execute(
-                text("SELECT pg_advisory_lock(hashtext(:job_id))"),
+            claimed = await claim_session.scalar(
+                text("SELECT pg_try_advisory_lock(hashtext(:job_id))"),
                 {"job_id": job_id},
             )
+            if not claimed:
+                return
             try:
                 job = await self.store.get(job_id)
                 if job is None or job.status not in {"queued", "running"}:

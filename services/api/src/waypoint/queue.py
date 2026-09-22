@@ -14,22 +14,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.tables import FleetControlRow, JobRow
 
+# Blocking, not try-: the lock is held only for the single CLAIM_SQL statement
+# and released at commit. A try-lock would make "lost the race" look identical
+# to "queue empty" and cost the loser a whole POLL_SECONDS of idling.
+# ponytail: one global claim lock; shard the key per context_source if claim
+# throughput ever matters.
+STAGING_ADMISSION_LOCK_SQL = text("SELECT pg_advisory_xact_lock(924731, 1)")
+
 CLAIM_SQL = text("""
-WITH next_job AS (
-  SELECT id FROM jobs
-  WHERE (status = 'queued' OR (status = 'running' AND lease_until < now()))
-    AND attempts < max_attempts
+WITH pending_staging AS (
+  SELECT count(*) AS count
+  FROM jobs active_job
+  JOIN runs active_run ON active_run.id = active_job.run_id
+  WHERE active_run.context_source = 'staging'
+    AND active_job.stage = 'pro'
+    AND NOT (active_job.checkpoint ? 'staging_context')
+    AND (
+      (active_job.status = 'running' AND active_job.lease_until >= now())
+      OR active_job.status = 'waiting'
+    )
+), next_job AS (
+  SELECT job.id
+  FROM jobs job
+  JOIN runs run ON run.id = job.run_id
+  WHERE (job.status = 'queued' OR (job.status = 'running' AND job.lease_until < now()))
+    AND job.attempts < job.max_attempts
     AND NOT EXISTS (SELECT 1 FROM fleet_control WHERE id = 1 AND killed)
-  ORDER BY created_at
-  FOR UPDATE SKIP LOCKED
+    AND (
+      run.context_source <> 'staging'
+      OR (job.checkpoint ? 'staging_context')
+      OR (SELECT count FROM pending_staging) < :max_staging_pending
+    )
+  ORDER BY job.created_at
+  FOR UPDATE OF job SKIP LOCKED
   LIMIT 1
 )
-UPDATE jobs
+UPDATE jobs job
 SET status = 'running', worker_id = :worker_id,
     lease_until = now() + make_interval(secs => :lease_seconds),
     attempts = attempts + 1
-WHERE id IN (SELECT id FROM next_job)
-RETURNING id
+WHERE job.id IN (SELECT id FROM next_job)
+RETURNING job.id
 """)
 
 RESERVE_RUN_SQL = text("""
@@ -66,7 +91,8 @@ FAIL_STALE_SQL = text("""
 UPDATE jobs
 SET status = 'failed',
     checkpoint = CASE
-      WHEN status = 'waiting' THEN checkpoint || jsonb_build_object(
+      WHEN status = 'waiting' AND NOT (checkpoint ? 'failure')
+      THEN checkpoint || jsonb_build_object(
         'failure', jsonb_build_object(
           'reason', 'context_unavailable: staging: callback timed out'
         )
@@ -117,10 +143,24 @@ async def enqueue(session: AsyncSession, run_id: str, stage: str, pro_id: str | 
 
 
 async def claim_job(
-    session: AsyncSession, worker_id: str, lease_seconds: int = 120
+    session: AsyncSession,
+    worker_id: str,
+    lease_seconds: int = 120,
+    max_staging_pending: int = 1,
 ) -> JobRow | None:
+    # A fast 202 only acknowledges the async Staging workflow; it does not
+    # complete it. Serialize admission so concurrent workers cannot all see
+    # the same free slot and flood n8n before callbacks arrive.
+    await session.execute(STAGING_ADMISSION_LOCK_SQL)
     claimed = (
-        await session.execute(CLAIM_SQL, {"worker_id": worker_id, "lease_seconds": lease_seconds})
+        await session.execute(
+            CLAIM_SQL,
+            {
+                "worker_id": worker_id,
+                "lease_seconds": lease_seconds,
+                "max_staging_pending": max_staging_pending,
+            },
+        )
     ).first()
     if claimed is None:
         return None

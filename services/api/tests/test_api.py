@@ -283,6 +283,27 @@ async def test_health_has_no_secret_or_dependency_payload(client: httpx.AsyncCli
     assert (await client.get("/health")).json() == {"status": "ok"}
 
 
+async def test_health_goes_red_when_the_database_is_unreachable(db_session_factory) -> None:
+    """A static 200 let Railway report green through an outage in which every
+    request died on pool checkout. /health must fail with the database."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from tests.conftest import TEST_SETTINGS
+    from waypoint.api import create_app
+
+    app = create_app(settings=TEST_SETTINGS, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as c:
+        assert (await c.get("/health")).status_code == 200
+        # Same app, now pointed at a port nothing listens on.
+        dead = create_async_engine("postgresql+asyncpg://nobody@127.0.0.1:1/none")
+        app.state.session_factory = async_sessionmaker(dead, expire_on_commit=False)
+        response = await c.get("/health")
+        await dead.dispose()
+    assert response.status_code == 503
+    assert "database unavailable" in response.json()["detail"]
+
+
 async def test_kill_switch_env_applies_to_the_existing_fleet_row(
     db_session_factory,
     db_session: AsyncSession,

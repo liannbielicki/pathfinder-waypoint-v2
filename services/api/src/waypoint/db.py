@@ -11,14 +11,21 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def make_engine(database_url: str, pool_size: int | None = None) -> AsyncEngine:
-    # Worker sizes the pool for its concurrent loops (each holds a permanent
-    # fleet-slot connection plus, while busy, two sessions); the API leaves it
-    # at the SQLAlchemy default.
-    if pool_size is None:
-        return create_async_engine(database_url, pool_pre_ping=True)
+def make_engine(
+    database_url: str, pool_size: int = 10, *, pool_timeout: float = 30.0
+) -> AsyncEngine:
+    """Every caller sizes its own pool. There is no "default" size: the
+    SQLAlchemy default (5 + 10 overflow) is a number nobody chose, and it is
+    what starved the API in the QueuePool-timeout outage."""
     return create_async_engine(
-        database_url, pool_pre_ping=True, pool_size=pool_size, max_overflow=pool_size
+        database_url,
+        pool_pre_ping=True,
+        pool_size=pool_size,
+        max_overflow=pool_size,
+        pool_timeout=pool_timeout,
+        # Railway closes long-idle backends; recycle before the server does so
+        # pre_ping does not pay a round trip on every checkout of a stale one.
+        pool_recycle=1800,
     )
 
 

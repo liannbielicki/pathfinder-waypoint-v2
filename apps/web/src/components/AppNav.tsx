@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { isUnauthorized } from "@/lib/api";
 import { getWorkbenchStatus } from "@/lib/workbench";
 
 export function AppNav() {
@@ -11,16 +12,22 @@ export function AppNav() {
   const [workbenchLocked, setWorkbenchLocked] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    let timer = 0;
     const refresh = async () => {
       try {
         const status = await getWorkbenchStatus();
         if (!cancelled) setWorkbenchLocked(status.activity === "waypoint");
-      } catch {
+      } catch (cause) {
         // Signed-out navigation remains available; the destination owns login.
+        // Signing back in remounts this nav, so stopping here costs nothing.
+        if (isUnauthorized(cause)) {
+          cancelled = true;
+          window.clearInterval(timer);
+        }
       }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
+    timer = window.setInterval(() => void refresh(), 5000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { isUnauthorized } from "@/lib/api";
 import {
   compareFeatureCatalogVersions,
   clearLocalCatalogData,
@@ -63,6 +64,7 @@ export function WorkbenchRunForm({
 
   useEffect(() => {
     let cancelled = false;
+    let statusTimer = 0;
     const refreshStatus = async () => {
       try {
         const nextStatus = await getWorkbenchStatus();
@@ -72,10 +74,13 @@ export function WorkbenchRunForm({
         }
       } catch (cause) {
         if (!cancelled) setStatusError(cause instanceof Error ? cause.message : "Backend is unavailable");
+        // A 401 will not fix itself; polling it every 5s forever is the
+        // request storm that buried the real errors in the API log.
+        if (isUnauthorized(cause)) window.clearInterval(statusTimer);
       }
     };
     void refreshStatus();
-    const statusTimer = window.setInterval(() => void refreshStatus(), 5000);
+    statusTimer = window.setInterval(() => void refreshStatus(), 5000);
     const refresh = async () => {
       try {
         let [sharedContexts, sharedFeatures] = await Promise.all([

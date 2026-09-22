@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     RUN_COST_USD: Decimal = Field(gt=0)
     DAY_COST_USD: Decimal = Field(gt=0)
     WORKER_COUNT: int = Field(ge=1)
+    # Fleet-wide cap on LIVE Staging n8n executions (dispatched but not yet
+    # called back). Independent of WORKER_COUNT: n8n returns 202 in
+    # milliseconds, so worker concurrency caps outstanding HTTP requests, not
+    # outstanding workflows — and each live workflow runs 9 sequential
+    # Snowflake queries. Raise only as fast as Snowflake tolerates.
+    STAGING_MAX_PENDING: int = Field(default=1, ge=1)
     # Fleet-wide cap on concurrent provider calls (the real throttle on how hard
     # we hit Anthropic). Set from the model tier's rate limit, NOT the agent
     # count. Default 4 preserves prior behavior; raise it in Railway and watch

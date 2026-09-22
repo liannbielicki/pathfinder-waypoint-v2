@@ -3,11 +3,20 @@
 import { useState } from "react";
 import type { Candidate, EvolveRound, RunDetail, Winner } from "@/lib/api";
 
+// The one place a calibrated estimate is formatted. null when the panel
+// produced no usable numbers (abstained, or never ran) — callers that only
+// want the confirmed case can gate on that.
+export function formatEstimate(score: Record<string, unknown> | undefined): string | null {
+  const reduction = score?.reduction_pp as number | null | undefined;
+  const lo = score?.ci_lower_pp as number | null | undefined;
+  const hi = score?.ci_upper_pp as number | null | undefined;
+  if (reduction == null || lo == null || hi == null) return null;
+  return `${reduction.toFixed(1)} pp (CI ${lo.toFixed(1)}–${hi.toFixed(1)} pp)`;
+}
+
 function ScoreBlock({ score }: { score: Record<string, unknown> }) {
-  const reduction = score.reduction_pp as number | null;
-  const lo = score.ci_lower_pp as number | null;
-  const hi = score.ci_upper_pp as number | null;
-  if (reduction == null || lo == null || hi == null) {
+  const estimate = formatEstimate(score);
+  if (estimate === null) {
     return (
       <p>
         No calibrated estimate — the panel abstained
@@ -17,8 +26,7 @@ function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   }
   return (
     <p>
-      Estimated churn reduction: <strong>{reduction?.toFixed(1)} pp</strong>{" "}
-      (CI {lo?.toFixed(1)}–{hi?.toFixed(1)} pp)
+      Estimated churn reduction: <strong>{estimate}</strong>
       {!score.in_calibrated_range &&
         " — calibrated extrapolation, outside the fitted reaction range"}
       <br />

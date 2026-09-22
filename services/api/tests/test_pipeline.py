@@ -168,6 +168,83 @@ async def test_staging_run_starts_async_context_and_waits_without_retrying(
     assert job.checkpoint["staging_request"] == {"promotion_id": "promotion-ready"}
 
 
+async def test_staging_run_reserves_waiting_slot_before_dispatch(
+    deps: FakeDeps,
+    seeded_job,
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    assert run is not None
+    run.context_source = "staging"
+    run.audience_query = "workbench:promotion-ready"
+
+    class ReservedContext(FakeContext):
+        async def start(
+            self, organization_id: str, request_id: str, promotion_id: str
+        ) -> None:
+            job = await deps.db.get(JobRow, request_id)
+            assert job is not None
+            await deps.db.refresh(job)
+            assert job.status == "waiting"
+            assert job.checkpoint["staging_request"] == {
+                "promotion_id": "promotion-ready"
+            }
+            await super().start(organization_id, request_id, promotion_id)
+
+    deps.staging_context = ReservedContext()
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    assert deps.staging_context.starts == [
+        ("pro_1", seeded_job.id, "promotion-ready")
+    ]
+
+
+async def test_staging_dispatch_failure_keeps_admission_reserved(
+    deps: FakeDeps,
+    seeded_job,
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    assert run is not None
+    run.context_source = "staging"
+    run.audience_query = "workbench:promotion-ready"
+    staging = FakeContext()
+    staging.unavailable = True
+    deps.staging_context = staging
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert job is not None
+    await deps.db.refresh(job)
+    assert job.status == "waiting"
+    assert job.checkpoint["staging_request"] == {
+        "promotion_id": "promotion-ready"
+    }
+
+
+async def test_staging_request_marker_is_never_dispatched_twice(
+    deps: FakeDeps,
+    seeded_job,
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert run is not None and job is not None
+    run.context_source = "staging"
+    run.audience_query = "workbench:promotion-ready"
+    job.checkpoint = {"staging_request": {"promotion_id": "promotion-ready"}}
+    staging = FakeContext()
+    deps.staging_context = staging
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    assert staging.starts == []
+    await deps.db.refresh(job)
+    assert job.status == "waiting"
+
+
 async def test_staging_run_resumes_from_compact_callback_checkpoint(
     deps: FakeDeps,
     seeded_job,

@@ -42,12 +42,39 @@ async def seed_queued_job(factory: async_sessionmaker[AsyncSession]) -> str:
 
 
 async def claim_with_new_session(
-    factory: async_sessionmaker[AsyncSession], worker_id: str
+    factory: async_sessionmaker[AsyncSession], worker_id: str, max_staging_pending: int = 1
 ) -> JobRow | None:
     async with factory() as session:
-        job = await claim_job(session, worker_id)
+        job = await claim_job(
+            session, worker_id, max_staging_pending=max_staging_pending
+        )
         await session.commit()
         return job
+
+
+async def seed_staging_jobs(
+    session: AsyncSession, count: int, run_id: str = "staging-run"
+) -> list[str]:
+    pro_ids = [f"pro-{index}" for index in range(count)]
+    session.add(
+        RunRow(
+            id=run_id,
+            pro_ids=pro_ids,
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            context_source="staging",
+            cost_limit=Decimal("100.00"),
+        )
+    )
+    session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))
+    await session.flush()
+    job_ids = [
+        await enqueue(session, run_id, stage="pro", pro_id=pro_id)
+        for pro_id in pro_ids
+    ]
+    await session.commit()
+    return job_ids
 
 
 async def test_two_workers_never_claim_the_same_job(db_session_factory) -> None:
@@ -58,6 +85,74 @@ async def test_two_workers_never_claim_the_same_job(db_session_factory) -> None:
     )
     claimed = [job.id for job in (first, second) if job is not None]
     assert claimed == [job_id]
+
+
+async def test_staging_claims_never_exceed_pending_cap(db_session_factory) -> None:
+    job_ids: list[str]
+    async with db_session_factory() as session:
+        job_ids = await seed_staging_jobs(session, count=6)
+
+    claims = await asyncio.gather(
+        *(
+            claim_with_new_session(
+                db_session_factory, f"worker-{index}", max_staging_pending=3
+            )
+            for index in range(6)
+        )
+    )
+
+    claimed = [job.id for job in claims if job is not None]
+    assert len(claimed) == 3
+    assert set(claimed).issubset(job_ids)
+
+
+async def test_callback_resumed_staging_job_bypasses_pending_cap(db_session) -> None:
+    job_ids = await seed_staging_jobs(db_session, count=2)
+    pending = await db_session.get(JobRow, job_ids[0])
+    resumed = await db_session.get(JobRow, job_ids[1])
+    assert pending is not None and resumed is not None
+    pending.status = "waiting"
+    pending.lease_until = datetime.now(UTC) + timedelta(minutes=30)
+    resumed.checkpoint = {"staging_context": {"brief": {"org_id": "12345"}}}
+    await db_session.commit()
+
+    claimed = await claim_job(db_session, "worker-a", max_staging_pending=1)
+
+    assert claimed is not None
+    assert claimed.id == resumed.id
+
+
+async def test_expired_waiter_still_holds_staging_slot_until_reaped(db_session) -> None:
+    job_ids = await seed_staging_jobs(db_session, count=2)
+    waiting = await db_session.get(JobRow, job_ids[0])
+    assert waiting is not None
+    waiting.status = "waiting"
+    waiting.lease_until = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    assert await claim_job(db_session, "worker-a", max_staging_pending=1) is None
+
+
+async def test_oldest_eligible_job_wins_across_context_sources(db_session) -> None:
+    staging_ids = await seed_staging_jobs(db_session, count=1)
+    db_session.add(
+        RunRow(
+            id="standard-run",
+            pro_ids=["standard-pro"],
+            audience_query="q",
+            audience_run="r",
+            channels=["email"],
+            cost_limit=Decimal("100.00"),
+        )
+    )
+    await db_session.flush()
+    await enqueue(db_session, "standard-run", stage="pro", pro_id="standard-pro")
+    await db_session.commit()
+
+    claimed = await claim_job(db_session, "worker-a", max_staging_pending=1)
+
+    assert claimed is not None
+    assert claimed.id == staging_ids[0]
 
 
 async def test_expired_lease_is_reclaimable(db_session_factory) -> None:

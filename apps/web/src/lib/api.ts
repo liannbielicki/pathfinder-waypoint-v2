@@ -124,6 +124,11 @@ export class ApiError extends Error {
   }
 }
 
+/** A poll must stop on 401: the cookie will not come back on its own, and
+ *  every 5s retry is a request the API answers and nobody reads. */
+export const isUnauthorized = (cause: unknown) =>
+  cause instanceof ApiError && cause.status === 401;
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,

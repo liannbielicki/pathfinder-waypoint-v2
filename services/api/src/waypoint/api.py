@@ -1,9 +1,10 @@
 """FastAPI composition: authenticated run, status, kill, evidence, and handoff routes.
 
 Starting a run returns 202 immediately; workers do the paid work. The UI polls
-durable state. Health exposes nothing but liveness.
+durable state. Health proves the database is reachable and nothing more.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
@@ -11,7 +12,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
@@ -174,7 +175,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.settings is None:
         app.state.settings = Settings.load()
     if app.state.session_factory is None:
-        engine = make_engine(app.state.settings.DATABASE_URL.get_secret_value())
+        engine = make_engine(
+            app.state.settings.DATABASE_URL.get_secret_value(),
+            # Budget (Railway Postgres, ~100 max_connections): the worker
+            # service already reserves WORKER_COUNT*9+2 doubled by its mirrored
+            # overflow (58 at WORKER_COUNT=3), plus the alembic pre-deploy
+            # connection. 10+10 keeps the API inside what is left.
+            # Demand here is one uvicorn process / one event loop: at most one
+            # connection pinned for the lifetime of an in-flight hosted
+            # Workbench job (capped at one by uq_workbench_jobs_one_active),
+            # up to two per in-flight request for the /api/context-workbench
+            # endpoints that hold a SessionDep and also call the job store,
+            # and one each for the 5s pollers.
+            pool_size=10,
+            # Fail fast. A 30s checkout wait turned a starved pool into a pile
+            # of 30s stalls that outlived the proxy timeout, which is why the
+            # outage looked like "every request hangs" rather than "the pool
+            # is full". /health (below) surfaces it instead.
+            pool_timeout=10.0,
+        )
         app.state.session_factory = make_session_factory(engine)
     workbench = get_hosted_workbench(app)
     await workbench.resume()
@@ -237,7 +256,23 @@ def create_app(
     install_hosted_workbench(app, executor=workbench_executor or execute_run)
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
+    async def health(request: Request) -> dict[str, str]:
+        # A static "ok" reported green right through an outage in which every
+        # real request failed on pool checkout. Touch the database so that
+        # class of failure turns the healthcheck red. (Comment, not a
+        # docstring: FastAPI would publish a docstring into the OpenAPI
+        # contract that contracts/openapi.json pins.)
+        factory = request.app.state.session_factory
+        if factory is None:
+            raise HTTPException(status_code=503, detail="database is not configured")
+        try:
+            async with asyncio.timeout(5):
+                async with factory() as session:
+                    await session.execute(text("SELECT 1"))
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail=f"database unavailable ({type(error).__name__})"
+            ) from error
         return {"status": "ok"}
 
     @app.post("/api/context/staging/callback")
