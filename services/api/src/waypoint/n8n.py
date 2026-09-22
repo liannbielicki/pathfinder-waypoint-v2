@@ -49,6 +49,7 @@ ALLOWED_FIELDS = (
     "marketing_campaigns_28d_band", "leads_created_28d_band",
     "jobs_reviewed_28d_band", "last_job_activity_band", "wisetack_state",
     "mrr_band", "platform_usage_band",
+    "suggested_channel",
 )
 
 # v2 band field -> the permitted persona-match feature key it maps onto
@@ -69,6 +70,10 @@ _MATCH_FEATURE_MAP = {
 
 class ContextUnavailable(Exception):
     """The context flow could not produce a valid batch. Explicit, never empty."""
+
+
+class ContextConfigurationError(ContextUnavailable):
+    """The configured context endpoint cannot satisfy the runtime contract."""
 
 
 class OrgBrief(BaseModel):
@@ -121,6 +126,7 @@ class OrgBrief(BaseModel):
     wisetack_state: str | None = None
     mrr_band: str | None = None
     platform_usage_band: str | None = None
+    suggested_channel: str | None = None
     curated_context: dict[str, Any] | None = Field(default=None, exclude=True)
     # Identifiers, not context: the numeric org id the run was keyed by and the
     # contact pro the context flow resolved for it (founding admin). The LCM
@@ -135,13 +141,31 @@ class OrgBrief(BaseModel):
         # `brief.pro_id` working unchanged.
         return self.org_uuid
 
-    def match_feature_map(self) -> dict[str, str]:
-        out: dict[str, str] = {}
+    def match_feature_map(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
         for source, key in _MATCH_FEATURE_MAP.items():
             value = getattr(self, source)
             if value is not None:
                 out[key] = value
+        for field_name in type(self).model_fields:
+            if not field_name.startswith("feature_") or not field_name.endswith("_state"):
+                continue
+            state = getattr(self, field_name)
+            if state is None:
+                continue
+            key = field_name.removeprefix("feature_").removesuffix("_state")
+            key = {"online_booking": "booking"}.get(key, key)
+            if state == "not_attached":
+                out[f"{key}_attached"] = False
+            elif state in {"attached_active", "attached_unused", "attached_usage_unknown"}:
+                out[f"{key}_attached"] = True
         return out
+
+    def suggested_outreach_channel(self) -> str | None:
+        curated = (self.curated_context or {}).get("v") or {}
+        value = curated.get("suggested_channel", self.suggested_channel)
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in {"sms", "email", "call"} else None
 
     def calibration_cell(self) -> str | None:
         # ponytail: calibration cards are keyed `segment|plan|tenure` in v1
@@ -182,11 +206,15 @@ def _brief_from_row(
         raise ValueError("context row missing org_uuid")
     # Restores the v1 "unexpected column" tripwire as a signal (not a hard
     # fail): the projection below still drops anything off the allowlist.
-    dropped = set(row) - set(ALLOWED_FIELDS) - {"org_uuid", "contract_version"}
+    aliases = {"RECOMMENDED_ACTION", "recommended_action"}
+    dropped = set(row) - set(ALLOWED_FIELDS) - aliases - {"org_uuid", "contract_version"}
     if dropped:
         log.debug("dropped non-allowlisted context fields: %s", sorted(dropped))
     projected: dict[str, Any] = {"org_uuid": row["org_uuid"]}
     projected.update({k: row[k] for k in ALLOWED_FIELDS if k in row})
+    for alias in ("RECOMMENDED_ACTION", "recommended_action"):
+        if alias in row and "suggested_channel" not in projected:
+            projected["suggested_channel"] = row[alias]
     bundle = promotion
     if promotion_required and bundle is None:
         raise ValueError("staging context promotion artifact is missing")
@@ -309,6 +337,11 @@ class N8NContextClient:
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
             response = await self._post_chunk(chunk)
+            if response.status_code == 202:
+                raise ContextConfigurationError(
+                    "N8N_CONTEXT_URL returned asynchronous 202 Accepted; "
+                    "it must target the synchronous Standard workflow that returns rows"
+                )
             if response.status_code != 200:
                 raise ContextUnavailable(
                     f"n8n context flow returned {response.status_code} for {len(chunk)} ids"

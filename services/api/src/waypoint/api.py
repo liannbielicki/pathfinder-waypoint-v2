@@ -152,6 +152,7 @@ def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
         journey_window=run.journey_window,
         context_source=cast(ContextSource, run.context_source),
         include_features_not_in_current_plan=run.include_features_not_in_current_plan,
+        model_tier=cast(Any, run.model_tier),
     )
 
 
@@ -406,6 +407,7 @@ def create_app(
             journey_window=body.journey_window,
             context_source=body.context_source,
             include_features_not_in_current_plan=body.include_features_not_in_current_plan,
+            model_tier=body.model_tier,
             loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )
@@ -428,6 +430,7 @@ def create_app(
         return {
             "loop_defaults": effective.to_dict(),
             "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
+            "models": {"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP},
             "staging_context_available": staging_context is not None,
             "staging_context": staging_context,
         }
@@ -507,6 +510,7 @@ def create_app(
                     "mechanism": r.mechanism,
                     "outcome": r.outcome,
                     "score_pp": r.score_pp,
+                    "ranking": r.ranking,
                 }
                 for r in rounds
             ],

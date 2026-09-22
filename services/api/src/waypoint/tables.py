@@ -44,6 +44,10 @@ class RunRow(Base):
             "context_source IN ('standard', 'staging')",
             name="ck_runs_context_source",
         ),
+        CheckConstraint(
+            "model_tier IN ('fast', 'deep')",
+            name="ck_runs_model_tier",
+        ),
     )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_id)
@@ -57,6 +61,7 @@ class RunRow(Base):
     include_features_not_in_current_plan: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false")
     )
+    model_tier: Mapped[str] = mapped_column(default="deep", server_default="deep")
     config_version: Mapped[str] = mapped_column(default="waypoint_v1")
     loop_config: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cost_limit: Mapped[Decimal] = mapped_column(default=Decimal(0))

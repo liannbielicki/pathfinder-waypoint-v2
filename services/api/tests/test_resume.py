@@ -82,10 +82,10 @@ async def test_mid_loop_crash_replays_the_ledger_without_re_paying(
     """Crash inside round 2 at the screen call. Resume must not re-pay round 1,
     must reuse round 2's committed generate/critic responses, and must land on
     the same loop state."""
-    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1, MAX_ROUNDS=2)
     deps.gateway.responses["evolve"] = [
         idea_json("invoice_delivery", 1),
-        idea_json("feature_adoption", 2),
+        idea_json("invoice_delivery", 2),
     ]
     deps.gateway.responses["screen"] = [
         reactions_json(FIRST_WIN),

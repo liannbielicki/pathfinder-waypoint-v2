@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # Feature-catalog CTA feasibility hints in idea context. Default OFF: today's
     # world is SMS-only and we do not yet trust channel<->works_on filtering.
     # Flip ON once multi-channel is live so ideas avoid web-only/broken links.
-    CTA_FEASIBILITY_HINTS: bool = False
+    CTA_FEASIBILITY_HINTS: bool = True
     MODEL_FAST: str
     MODEL_DEEP: str
     # The candidate ranker's model. Empty means "use MODEL_FAST". Every model

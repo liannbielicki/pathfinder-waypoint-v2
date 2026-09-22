@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from waypoint.models import Recommendation
 from waypoint.prompts import (
     PROMPT_VERSION,
@@ -46,6 +49,7 @@ def test_channel_directive_gates_sms_only_with_brevity() -> None:
 
     sms = channel_directive(["sms"])
     assert '"sms"' in sms and '"email"' not in sms
+    assert '"none"' not in sms
     assert "160" in sms  # SMS brevity constraint is stated
     # Both-channels case gates to the set but adds no SMS brevity rule.
     both = channel_directive(["sms", "email"])
@@ -79,16 +83,21 @@ def test_recommendation_is_structured_not_preformatted_prose() -> None:
     assert value.actions == ["send_open_invoices"]
 
 
+def test_generated_recommendation_cannot_use_none_channel() -> None:
+    with pytest.raises(ValidationError):
+        Recommendation.model_validate({**RECOMMENDATION_FIXTURE, "channel": "none"})
+
+
 HISTORY = '[{"round": 1, "mechanism": "invoice_delivery", "score_pp": 2.0, "outcome": "win"}]'
 BEST = '{"title": "Send open invoices reminder", "mechanism": "invoice_delivery"}'
 
 
-def test_evolve_prompt_stay_refines_the_best_mechanism() -> None:
+def test_evolve_prompt_refines_the_current_mechanism() -> None:
     from waypoint.prompts import evolve_prompt
 
     prompt = evolve_prompt(
         '{"open_due_usd": "430.25"}',
-        mode="stay",
+        mode="refine",
         best_json=BEST,
         history_json=HISTORY,
         tried_mechanisms=["invoice_delivery"],
@@ -136,7 +145,7 @@ def test_evolve_prompt_carries_window_and_evidence() -> None:
 
     prompt = evolve_prompt(
         "{}",
-        mode="stay",
+        mode="cold",
         best_json=None,
         history_json="[]",
         tried_mechanisms=[],
@@ -172,12 +181,12 @@ def test_evolve_prompt_batch_demands_distinct_mechanisms() -> None:
     assert "manager_rationale" in prompt
 
 
-def test_evolve_prompt_stay_batch_refines_first_and_diversifies_rest() -> None:
+def test_evolve_prompt_refine_batch_keeps_one_mechanism_and_varies_execution() -> None:
     from waypoint.prompts import evolve_prompt
 
     prompt = evolve_prompt(
         "{}",
-        mode="stay",
+        mode="refine",
         best_json=BEST,
         history_json=HISTORY,
         tried_mechanisms=["invoice_delivery"],
@@ -186,9 +195,29 @@ def test_evolve_prompt_stay_batch_refines_first_and_diversifies_rest() -> None:
         evidence="No historical outcome evidence is available for this journey window yet.",
         count=3,
     )
-    assert "FIRST idea" in prompt
-    assert "DIFFERENT grounded mechanism" in prompt
+    assert "EVERY idea" in prompt
+    assert "same mechanism" in prompt
     assert "exactly 3" in prompt
+
+
+def test_evolve_prompt_cold_batch_is_not_a_refinement_of_none() -> None:
+    from waypoint.prompts import evolve_prompt
+
+    prompt = evolve_prompt(
+        "{}",
+        mode="cold",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms", "email"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available.",
+        count=3,
+    )
+    assert "Mode: COLD" in prompt
+    assert "distinct" in prompt.lower()
+    assert "Current selected idea" not in prompt
+    assert "None" not in prompt
 
 
 def test_ranker_prompt_fences_candidates_and_states_output_contract() -> None:

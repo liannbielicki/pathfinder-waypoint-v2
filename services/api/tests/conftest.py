@@ -84,6 +84,7 @@ async def db_session(
 # --- pipeline fakes -------------------------------------------------------
 
 import json
+import re
 from decimal import Decimal
 
 from waypoint import queue as queue_module
@@ -250,8 +251,41 @@ class FakeLLM:
         )
         if stage in self._fail:
             raise RateLimitExhausted("injected model failure")
+        text = self._next(stage)
+        if stage == "evolve" and "Mode: REFINE" in prompt and text == BATCH_OK:
+            current = re.search(r'"mechanism":\s*"([^"]+)"', prompt)
+            if current:
+                mechanism = current.group(1)
+                text = json.dumps(
+                    [json.loads(idea_json(mechanism, index)) for index in range(3)]
+                )
+        if stage == "evolve" and "Mode: SHIFT" in prompt and text == BATCH_OK:
+            # The default fake should honor the production contract: SHIFT
+            # returns genuinely untried mechanisms and distinct touch concepts.
+            pool = [f"shift_{index}" for index in range(30)]
+            chosen = [
+                mechanism
+                for mechanism in pool
+                if mechanism not in prompt and mechanism.replace("_", "-") not in prompt
+            ][:3]
+            text = json.dumps(
+                [
+                    json.loads(idea_json(mechanism, pool.index(mechanism) + 10))
+                    for mechanism in chosen
+                ]
+            )
+        if stage in {"screen", "final"}:
+            try:
+                payload = json.loads(text)
+                requested = set(re.findall(r'"persona_id":\s*"([^"]+)"', prompt))
+                if isinstance(payload, list) and requested:
+                    text = json.dumps(
+                        [item for item in payload if item.get("persona_id") in requested]
+                    )
+            except (json.JSONDecodeError, AttributeError):
+                pass
         return LLMResult(
-            text=self._next(stage),
+            text=text,
             model=f"fake-{tier}",
             input_tokens=10,
             output_tokens=5,
@@ -362,6 +396,7 @@ async def seeded_job(db_session: AsyncSession):
         audience_query="audience_v7",
         audience_run="2026-08-06T18:00:00Z",
         channels=["sms"],
+        model_tier="fast",
         cost_limit=Decimal("100.00"),
     )
     db_session.add(run)

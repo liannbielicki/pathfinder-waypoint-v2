@@ -32,6 +32,33 @@ async def test_pattern_summaries_aggregate_by_channel_mechanism(db_session) -> N
     assert by_mech["review_boost"].unsubscribed == 1
 
 
+async def test_pattern_summaries_count_one_logical_touch_across_sources(db_session) -> None:
+    """A send observed by two sources is one send, with merged outcome facts."""
+    db_session.add(
+        outcome(
+            recommendation_id="w1",
+            source="iterable",
+            returned_7d=False,
+            unsubscribed=False,
+        )
+    )
+    db_session.add(
+        outcome(
+            recommendation_id="w1",
+            source="amplitude",
+            returned_7d=True,
+            unsubscribed=True,
+        )
+    )
+    await db_session.commit()
+
+    [pattern] = await pattern_summaries(db_session, "churn_risk", ["sms"])
+
+    assert pattern.sent == 1
+    assert pattern.returned["7d"] == (1, 1)
+    assert pattern.unsubscribed == 1
+
+
 async def test_churn_risk_and_churn_risk_open_share_one_evidence_corpus(db_session) -> None:
     """Same objective, same history — and symmetrically, or the ungated window
     would run blind while its gated twin held every measured outcome."""

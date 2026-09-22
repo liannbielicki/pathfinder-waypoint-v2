@@ -672,6 +672,12 @@ export interface components {
             loop_config?: {
                 [key: string]: number;
             } | null;
+            /**
+             * Model Tier
+             * @default deep
+             * @enum {string}
+             */
+            model_tier: "fast" | "deep";
             /** Pro Ids */
             pro_ids: string[];
         };
@@ -731,6 +737,12 @@ export interface components {
             measurements: {
                 [key: string]: unknown;
             }[];
+            /**
+             * Model Tier
+             * @default deep
+             * @enum {string}
+             */
+            model_tier: "fast" | "deep";
             /** Pro Ids */
             pro_ids: string[];
             /** Rounds */
@@ -790,6 +802,12 @@ export interface components {
             loop_config: {
                 [key: string]: number;
             };
+            /**
+             * Model Tier
+             * @default deep
+             * @enum {string}
+             */
+            model_tier: "fast" | "deep";
             /** Pro Ids */
             pro_ids: string[];
             /** Status */

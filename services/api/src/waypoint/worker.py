@@ -50,6 +50,28 @@ LEASE_SECONDS = 1800
 CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibration_cards.json"
 
 
+async def _supervise(
+    name: str,
+    child: Callable[[], Awaitable[None]],
+    *,
+    max_delay: float = 60.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Keep one long-lived service loop alive across transient failures."""
+    delay = POLL_SECONDS
+    while True:
+        try:
+            await child()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s crashed; restarting in %.0fs", name, delay)
+        else:
+            log.error("%s exited unexpectedly; restarting in %.0fs", name, delay)
+        await sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+
 async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> None:
     """KILL_SWITCH, LEARNING_KILL_SWITCH, and DAY_COST_USD are env-owned;
     apply them on startup. The two kill switches are independent."""
@@ -325,6 +347,9 @@ async def main() -> None:
     logging.basicConfig(level="INFO")
     settings = Settings.load()
     logging.getLogger().setLevel(settings.LOG_LEVEL)
+    # httpx logs every successful request at INFO. Those 200/202 transport
+    # lines drown the application events that explain what the worker did.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     engine = make_engine(
         settings.DATABASE_URL.get_secret_value(),
         # Each loop holds one permanent fleet-slot connection plus, while busy,
@@ -445,13 +470,24 @@ async def main() -> None:
                 log.warning("%s poll failed; next tick retries", name, exc_info=True)
 
     pollers = [
-        poller_loop(name, make_client(settings), poll)
+        (name, make_client(settings), poll)
         for name, make_client, poll in poller_specs(settings)
     ]
 
     log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
     await asyncio.gather(
-        checkpoint_loop(), *pollers, *(spawn(i) for i in range(settings.WORKER_COUNT))
+        _supervise("checkpoint loop", checkpoint_loop),
+        *(
+            _supervise(
+                f"{name} poller",
+                partial(poller_loop, name, client, poll),
+            )
+            for name, client, poll in pollers
+        ),
+        *(
+            _supervise(f"worker {i}", partial(spawn, i))
+            for i in range(settings.WORKER_COUNT)
+        ),
     )
 
 

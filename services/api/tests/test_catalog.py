@@ -1,4 +1,11 @@
-from waypoint.catalog import CATALOG, _first_sentence, feature_context, waypoint_context
+from waypoint.catalog import (
+    CATALOG,
+    _first_sentence,
+    available_feature_keys,
+    feature_context,
+    resolve_cta,
+    waypoint_context,
+)
 from waypoint.n8n import OrgBrief
 
 
@@ -26,6 +33,17 @@ def test_catalog_loads_and_groups_multi_row_feature():
     assert entry.description.startswith("Lets a customer request or schedule")
     assert entry.description.endswith("office.")  # trimmed to first sentence
     assert len(entry.ctas) >= 2  # primary + replacement CTA rows
+
+
+def test_resolve_cta_returns_only_a_real_reachable_catalog_destination():
+    cta = resolve_cta("online_booking")
+    assert cta is not None
+    assert cta["label"]
+    assert cta["url"]
+    assert cta["works_on"] in {"web", "ios", "mobile"}
+    assert resolve_cta("payment_processing") is None  # sentinel-only broken row
+    assert resolve_cta("sales_proposal") is None  # every destination is explicitly untested
+    assert resolve_cta("made_up_feature") is None
 
 
 def test_feature_context_resolves_union_and_marks_top_unused():
@@ -82,6 +100,12 @@ def test_waypoint_context_uses_promoted_packet_without_legacy_catalog_dump():
 
     assert context == '{"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12}}'
     assert "voip" not in context
+
+
+def test_promoted_product_context_keys_are_available_for_cta_resolution():
+    brief = _brief(curated_context={"v": {}, "pc": {"online_booking": {"v": "unused"}}})
+
+    assert "online_booking" in available_feature_keys(brief)
 
 
 def test_waypoint_context_keeps_legacy_behavior_without_active_promotion():

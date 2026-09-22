@@ -91,12 +91,12 @@ def test_empty_poller_keys_mean_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.CONTEXT_LAYER_API_KEY is None
 
 
-def test_cta_feasibility_hints_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cta_feasibility_hints_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
     # Provide the required env so load() succeeds; default of the new flag is what we assert.
     for key, val in _MINIMAL_ENV.items():
         monkeypatch.setenv(key, val)
     monkeypatch.delenv("CTA_FEASIBILITY_HINTS", raising=False)
-    assert Settings.load().CTA_FEASIBILITY_HINTS is False
+    assert Settings.load().CTA_FEASIBILITY_HINTS is True
 
 
 def test_workbench_only_dotenv_keys_do_not_break_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:

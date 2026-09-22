@@ -19,6 +19,31 @@ def test_run_requires_clean_audience_lineage() -> None:
     assert run.audience_query == "audience_v7"
     assert run.context_source == "standard"
     assert run.include_features_not_in_current_plan is False
+    assert run.model_tier == "deep"
+
+
+def test_run_accepts_only_configured_model_tiers() -> None:
+    run = RunCreate(
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["email"],
+        model_tier="fast",
+    )
+    assert run.model_tier == "fast"
+    with pytest.raises(ValidationError):
+        RunCreate(
+            pro_ids=["pro_1"],
+            audience_query="audience_v7",
+            audience_run="2026-08-06T18:00:00Z",
+            channels=["email"],
+            model_tier="unknown",
+        )
+
+
+def test_run_table_enforces_model_tiers_at_the_database_boundary() -> None:
+    constraints = {constraint.name for constraint in RunRow.__table__.constraints}
+    assert "ck_runs_model_tier" in constraints
 
 
 def test_run_accepts_only_known_context_sources() -> None:

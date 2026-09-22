@@ -7,6 +7,7 @@ from pytest_httpx import HTTPXMock
 from waypoint.n8n import (
     ALLOWED_FIELDS,
     CONTRACT_VERSION,
+    ContextConfigurationError,
     ContextUnavailable,
     N8NContextClient,
     OrgBrief,
@@ -59,6 +60,29 @@ def test_segment_reaches_match_features() -> None:
     features = brief.match_feature_map()
     assert features["segment"] == "1A"
     assert features["plan"] == "basic"
+
+
+def test_channel_recommendation_and_usage_states_reach_safe_match_context() -> None:
+    brief = OrgBrief(
+        org_uuid="pro_1",
+        suggested_channel="EMAIL",
+        feature_online_booking_state="attached_unused",
+        feature_voip_state="not_attached",
+    )
+    assert brief.suggested_outreach_channel() == "email"
+    assert brief.match_feature_map()["booking_attached"] is True
+    assert brief.match_feature_map()["voip_attached"] is False
+
+
+def test_unknown_feature_state_is_not_misrepresented_as_attached() -> None:
+    features = OrgBrief(
+        org_uuid="pro_1", feature_voip_state="unexpected_upstream_value"
+    ).match_feature_map()
+    assert "voip_attached" not in features
+
+
+def test_invalid_channel_recommendation_is_not_treated_as_outreach() -> None:
+    assert OrgBrief(org_uuid="pro_1", suggested_channel="push").suggested_outreach_channel() is None
 
 
 async def test_unknown_fields_are_dropped_not_stored(httpx_mock: HTTPXMock) -> None:
@@ -325,6 +349,15 @@ async def test_hard_errors_are_not_retried(httpx_mock: HTTPXMock) -> None:
     # A 4xx contract problem won't fix itself; retrying just hammers the flow.
     httpx_mock.add_response(status_code=400)
     with pytest.raises(ContextUnavailable):
+        await make_client().fetch(["pro_1"])
+    assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_async_202_is_reported_as_a_configuration_error(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(status_code=202, json={"status": "accepted"})
+    with pytest.raises(ContextConfigurationError, match="synchronous Standard workflow"):
         await make_client().fetch(["pro_1"])
     assert len(httpx_mock.get_requests()) == 1
 

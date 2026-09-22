@@ -30,8 +30,8 @@ const LOOP_FIELDS: LoopField[] = [
     help: "A reduction above this ends the search as a success.", min: 0 },
   { key: "CANDIDATE_COUNT", label: "Ideas per round",
     help: "How many candidate ideas are generated and ranked each round.", min: 1 },
-  { key: "TIE_MARGIN", label: "Ranker tie margin (0-1)",
-    help: "Ranker-score gap at or under which the top two candidates are both persona-screened.",
+  { key: "TIE_MARGIN", label: "Near-tie evidence margin (0-1)",
+    help: "Labels close ranker scores in the audit evidence; every candidate is persona-screened.",
     min: 0 },
   { key: "WARM_START_THRESHOLD", label: "Warm-start similarity (0-1)",
     help: "How similar a past validated winner's Pro must be before its mechanism seeds round 1.",
@@ -53,6 +53,8 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [journeyWindow, setJourneyWindow] = useState("churn_risk_open");
   const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
   const [includeFeaturesNotInCurrentPlan, setIncludeFeaturesNotInCurrentPlan] = useState(false);
+  const [modelTier, setModelTier] = useState<"fast" | "deep">("deep");
+  const [models, setModels] = useState({ fast: "fast", deep: "deep" });
   const [stagingAvailable, setStagingAvailable] = useState(false);
   const [stagingContext, setStagingContext] = useState<Awaited<ReturnType<typeof getFleetSettings>>["staging_context"]>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         setFleetCap(settings.max_in_flight_llm_calls);
         setStagingAvailable(settings.staging_context_available);
         setStagingContext(settings.staging_context);
+        setModels(settings.models);
         // Only fields the server actually advertises get a value. A key the
         // API does not know (an older API than this UI) would otherwise render
         // as the string "undefined" — an empty number input that reads as
@@ -161,6 +164,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         context_source: contextSource,
         include_features_not_in_current_plan:
           contextSource === "staging" && includeFeaturesNotInCurrentPlan,
+        model_tier: modelTier,
         ...(contextSource === "staging" && stagingContext
           ? {
               context_promotion_id: stagingContext.promotion_id,
@@ -227,6 +231,24 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
             </label>
           ))}
         </div>
+        <div>
+          <span>Model</span>
+          {(["deep", "fast"] as const).map((tier) => (
+            <label key={tier} htmlFor={`model-${tier}`}>
+              <input
+                id={`model-${tier}`}
+                type="radio"
+                name="model-tier"
+                checked={modelTier === tier}
+                onChange={() => setModelTier(tier)}
+              />
+              {tier === "deep" ? "Deep" : "Fast"} ({models[tier]})
+            </label>
+          ))}
+        </div>
+        <p className="helper">
+          Deep is the default for idea generation and evaluation; Fast is cheaper.
+        </p>
         <label htmlFor="journey-window">Journey window</label>
         <select
           id="journey-window"

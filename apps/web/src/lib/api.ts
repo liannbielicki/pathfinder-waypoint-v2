@@ -14,12 +14,16 @@ export interface PanelItem {
   family: string;
   role: string;
   fit_score: number;
+  coverage_score?: number;
   rationale: string;
+  reused?: boolean;
 }
 
 export interface PanelEvidence {
   panel?: { items?: PanelItem[]; snapshot_version?: string };
   reactions?: number[];
+  tier?: string;
+  model?: string;
 }
 
 export interface Candidate {
@@ -71,6 +75,21 @@ export interface EvolveRound {
   mechanism: string;
   outcome: "win" | "lose" | "suppressed" | "unavailable";
   score_pp: number | null;
+  ranking?: {
+    order?: Array<{
+      token: string;
+      candidate_id: string;
+      mechanism: string;
+      rank: number | null;
+      score: number | null;
+    }>;
+    selection_reason?: string;
+    ranker_model?: string;
+    screen_model?: string;
+    screen_scores_pp?: Record<string, number | null>;
+    warm_start?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 }
 
 export type RunDetail = Omit<
@@ -143,6 +162,7 @@ export const createRun = (body: RunCreateInput) =>
 export interface FleetSettings {
   loop_defaults: Record<string, number>;
   max_in_flight_llm_calls: number;
+  models: { fast: string; deep: string };
   staging_context_available: boolean;
   staging_context: {
     promotion_id: string;

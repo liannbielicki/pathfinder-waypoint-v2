@@ -10,6 +10,7 @@ const FLEET_SETTINGS = {
     CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
   max_in_flight_llm_calls: 7,
+  models: { fast: "claude-haiku-4-5", deep: "claude-sonnet-5" },
   staging_context_available: true,
   staging_context: {
     promotion_id: "promotion-shared",
@@ -59,6 +60,20 @@ async function fillRequiredInputs() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("RunStart", () => {
+  it("defaults new runs to the configured deep model and permits fast override", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText(/deep.*claude-sonnet-5/i)).toBeChecked(),
+    );
+    await fillRequiredInputs();
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0].model_tier).toBe("deep");
+
+    await userEvent.click(screen.getByLabelText(/fast.*claude-haiku-4-5/i));
+    expect(screen.getByLabelText(/fast.*claude-haiku-4-5/i)).toBeChecked();
+  });
   it("autofills the audience run timestamp with now (UTC, editable)", () => {
     stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
@@ -110,7 +125,7 @@ describe("RunStart", () => {
       /pro ids/i, /audience run/i, /channel: sms/i, /channel: email/i, /channel: call/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
-      /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
+      /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }

@@ -88,6 +88,7 @@ describe("RetryPanel", () => {
       journey_window: "onboarding",
       context_source: "staging",
       include_features_not_in_current_plan: true,
+      model_tier: RUN_FIXTURE.model_tier,
       context_promotion_id: "promotion-shared",
     });
     const link = await screen.findByRole("link", { name: /run-2/ });

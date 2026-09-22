@@ -119,11 +119,11 @@ async def test_default_round_generates_criticizes_ranks_and_screens_once(
     assert deps.gateway.calls_for("evolve") == 1  # ONE batched generation call
     assert deps.gateway.calls_for("critics") == 1  # ONE batched critic call
     assert deps.gateway.calls_for("rank") == 1
-    assert deps.gateway.calls_for("screen") == 1  # clear winner: only rank 1
+    assert deps.gateway.calls_for("screen") == 3  # every rankable idea is comparable
     assert await candidate_count(deps.db, seeded_job.run_id) == 3  # one row per idea
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].outcome == "win"
-    assert ledger[0].ranking["selection_reason"] == "clear_winner"
+    assert ledger[0].ranking["selection_reason"] == "all_rankable_candidates_screened"
     assert await run_status(deps.db, seeded_job.run_id) == "complete"
 
 
@@ -177,7 +177,7 @@ async def test_duplicate_mechanisms_are_deduped_and_refilled(deps: FakeDeps, see
     }
     assert mechanisms == {"invoice_delivery", "review_requests", "feature_adoption"}
     refill_prompt = deps.gateway.prompts_for("evolve")[1]
-    assert "Mode: SHIFT" in refill_prompt
+    assert "Mode: COLD" in refill_prompt
     assert "invoice_delivery" in refill_prompt  # already held → forbidden
     assert "exactly 2 new ideas" in refill_prompt  # only the missing count
 
@@ -245,6 +245,106 @@ async def test_one_critic_call_carries_every_non_pre_gated_idea(
     assert pre_gated.persona_evidence == {}  # zero persona spend on a blocked idea
 
 
+async def test_reco_channel_override_requires_an_explicit_reason(
+    deps: FakeDeps, seeded_job
+) -> None:
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"suggested_channel": "email"}
+    )
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["sms", "email"]
+    await deps.db.commit()
+    await one_round(deps, seeded_job.run_id)
+
+    await run_job(seeded_job.id, deps)
+
+    candidates = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalars().all()
+    assert candidates
+    assert {candidate.critics["block_kind"] for candidate in candidates} == {
+        "channel_override_without_reason"
+    }
+    assert deps.gateway.calls_for("screen") == 0
+
+
+async def test_unsupported_reco_override_is_suppressed_by_the_critic(
+    deps: FakeDeps, seeded_job
+) -> None:
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(
+        update={"suggested_channel": "email"}
+    )
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["sms", "email"]
+    run.loop_config = {"MAX_ROUNDS": 1, "CANDIDATE_COUNT": 1}
+    await deps.db.commit()
+    idea = json.loads(batch_json(["invoice_delivery"]))[0]
+    idea["channel_override_reason"] = "because SMS"
+    deps.gateway.responses["evolve"] = json.dumps(idea)
+    deps.gateway.responses["critics"] = critics_json(["unsupported_channel_override"])
+
+    await run_job(seeded_job.id, deps)
+
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert candidate.status == "suppressed"
+    assert candidate.critics["block_kind"] == "unsupported_channel_override"
+
+
+async def test_verified_feature_gets_deterministic_catalog_cta(
+    deps: FakeDeps, seeded_job
+) -> None:
+    idea = json.loads(batch_json(["booking_activation"]))[0]
+    idea["feature_key"] = "online_booking"
+    deps.gateway.responses["evolve"] = json.dumps(idea)
+    await one_round(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+
+    await run_job(seeded_job.id, deps)
+
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert candidate.recommendation["cta"]["url"]
+    assert candidate.recommendation["cta"]["works_on"] in {"web", "ios", "mobile"}
+
+
+async def test_model_supplied_cta_is_removed_without_a_verified_feature(
+    deps: FakeDeps, seeded_job
+) -> None:
+    idea = json.loads(batch_json(["invoice_delivery"]))[0]
+    idea["cta"] = {"label": "Unverified", "url": "https://malicious.example"}
+    deps.gateway.responses["evolve"] = json.dumps(idea)
+    await one_round(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+
+    await run_job(seeded_job.id, deps)
+
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert candidate.recommendation.get("cta") is None
+
+
+async def test_unavailable_feature_is_suppressed_before_persona_spend(
+    deps: FakeDeps, seeded_job
+) -> None:
+    idea = json.loads(batch_json(["imaginary_activation"]))[0]
+    idea["feature_key"] = "made_up_feature"
+    deps.gateway.responses["evolve"] = json.dumps(idea)
+    await one_round(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+
+    await run_job(seeded_job.id, deps)
+
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert candidate.status == "suppressed"
+    assert candidate.critics["block_kind"] == "infeasible_execution"
+    assert deps.gateway.calls_for("screen") == 0
+
+
 async def test_blocked_ideas_are_suppressed_without_persona_spend(
     deps: FakeDeps, seeded_job
 ) -> None:
@@ -261,7 +361,7 @@ async def test_blocked_ideas_are_suppressed_without_persona_spend(
         ).scalars()
     }
     assert statuses["invoice_delivery"] == "suppressed"
-    assert deps.gateway.calls_for("screen") == 1  # only the ranked winner was screened
+    assert deps.gateway.calls_for("screen") == 2  # every non-suppressed idea was screened
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].mechanism == "review_requests"  # the suppressed idea never competed
 
@@ -281,6 +381,17 @@ async def test_missing_verdicts_fail_closed_as_unreviewed(deps: FakeDeps, seeded
     ]
     assert len(unreviewed) == 2 and all(c.status == "suppressed" for c in unreviewed)
     assert deps.gateway.calls_for("rank") == 0  # one survivor left: nothing to rank
+
+
+async def test_generic_critic_note_does_not_suppress_an_idea(deps: FakeDeps, seeded_job) -> None:
+    deps.gateway.responses["critics"] = critics_json(["generic", "none", "none"])
+    await one_round(deps, seeded_job.run_id)
+    await run_job(seeded_job.id, deps)
+    candidates = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalars().all()
+    generic = next(candidate for candidate in candidates if candidate.critics["block_kind"] == "generic")
+    assert generic.status != "suppressed"
 
 
 async def test_an_all_suppressed_batch_is_a_suppressed_round(deps: FakeDeps, seeded_job) -> None:
@@ -351,7 +462,20 @@ async def test_a_ranking_failure_preserves_the_champion_and_a_later_round_wins(
         bad,  # round 2 never produces a valid ranking
         rank_json(("c2", 0.95), ("c1", 0.4), ("c3", 0.2)),  # round 3 promotes a new mechanism
     ]
-    deps.gateway.responses["screen"] = [reactions_json(GOOD), reactions_json(GREAT)]
+    shifted = json.loads(
+        batch_json(["service_agreement_nudge", "payment_setup", "booking_activation"])
+    )
+    for index, idea in enumerate(shifted):
+        idea["pro_facing_concept"] = f"Distinct shifted concept {index}."
+    deps.gateway.responses["evolve"] = [
+        batch_json(DEFAULT_MECHANISMS),
+        batch_json([DEFAULT_MECHANISMS[0]] * 3),
+        json.dumps(shifted),
+    ]
+    deps.gateway.responses["screen"] = [
+        *[reactions_json(GOOD)] * 3,
+        *[reactions_json(GREAT)] * 3,
+    ]
     await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=3, MAX_NO_IMPROVE=99)
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
@@ -365,7 +489,7 @@ async def test_a_ranking_failure_preserves_the_champion_and_a_later_round_wins(
         )
     ).scalar_one()
     assert champion.round == 3
-    assert champion.recommendation["mechanism"] == DEFAULT_MECHANISMS[1]
+    assert champion.recommendation["mechanism"] == "payment_setup"
 
 
 async def test_the_ranker_call_is_deterministic(deps: FakeDeps, seeded_job) -> None:
@@ -386,10 +510,10 @@ async def test_tied_finalists_are_both_screened_and_the_screen_breaks_the_tie(
     deps.gateway.responses["screen"] = [reactions_json(LOSE), reactions_json(GREAT)]
     await one_round(deps, seeded_job.run_id)
     await run_job(seeded_job.id, deps)
-    assert deps.gateway.calls_for("screen") == 2  # the tie is decided by the panel
+    assert deps.gateway.calls_for("screen") == 3  # all rankable ideas are compared
     ledger = await rounds(deps.db, seeded_job.run_id)
-    assert ledger[0].ranking["finalists"] == ["c1", "c2"]
-    assert ledger[0].ranking["selection_reason"] == "tie_broken_by_screen_runner_up"
+    assert ledger[0].ranking["finalists"] == ["c1", "c2", "c3"]
+    assert ledger[0].ranking["selection_reason"] == "screen_selected_ranker_non_top"
     assert ledger[0].mechanism == DEFAULT_MECHANISMS[1]  # rank 2 won the screen
     assert ledger[0].outcome == "win"
 
@@ -402,7 +526,7 @@ async def test_a_tie_the_top_candidate_still_wins_is_recorded_as_a_screened_tie(
     await one_round(deps, seeded_job.run_id)
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
-    assert ledger[0].ranking["selection_reason"] == "tie_within_margin_top_two_screened"
+    assert ledger[0].ranking["selection_reason"] == "all_rankable_candidates_screened"
     assert ledger[0].mechanism == DEFAULT_MECHANISMS[0]
 
 
@@ -432,7 +556,8 @@ async def test_ranking_evidence_records_the_whole_round_decision(
     assert [item["mechanism"] for item in ranking["order"]] == DEFAULT_MECHANISMS
     assert ranking["tie"] is False
     assert ranking["tie_margin"] == 0.05
-    assert ranking["finalists"] == ["c1"]
+    assert ranking["finalists"] == ["c1", "c2", "c3"]
+    assert set(ranking["screen_scores_pp"]) == {"c1", "c2", "c3"}
     assert ranking["ranker_model"] == "model-fast"
     ids = ranking["candidate_ids"]
     assert set(ids) == {"c1", "c2", "c3"}

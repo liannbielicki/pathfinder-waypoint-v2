@@ -41,6 +41,7 @@ PENDING_AUDIENCE_QUERY = "pending_n8n"
 # (see evidence.evidence_windows) — same objective, same history.
 JourneyWindow = Literal["churn_risk", "churn_risk_open", "onboarding", "upsell"]
 ContextSource = Literal["standard", "staging"]
+ModelTier = Literal["fast", "deep"]
 
 
 class RunCreate(BaseModel):
@@ -56,6 +57,7 @@ class RunCreate(BaseModel):
     context_source: ContextSource = "standard"
     context_promotion_id: str | None = None
     include_features_not_in_current_plan: bool = False
+    model_tier: ModelTier = "deep"
 
 
 class RunView(BaseModel):
@@ -75,6 +77,7 @@ class RunView(BaseModel):
     journey_window: str
     context_source: ContextSource = "standard"
     include_features_not_in_current_plan: bool = False
+    model_tier: ModelTier = "deep"
 
 
 class Recommendation(BaseModel):
@@ -85,7 +88,10 @@ class Recommendation(BaseModel):
     actions: list[str] = Field(min_length=1)
     pro_facing_concept: str = Field(min_length=1)
     manager_rationale: str = Field(min_length=1)
-    channel: Literal["sms", "email", "call", "none"]
+    channel: Channel
+    channel_override_reason: str = ""
+    feature_key: str | None = None
+    cta: dict[str, str] | None = None
     risk: str = ""
 
 

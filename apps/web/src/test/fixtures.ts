@@ -26,6 +26,7 @@ export const RUN_FIXTURE: RunDetail = {
   journey_window: "churn_risk",
   context_source: "standard",
   include_features_not_in_current_plan: false,
+  model_tier: "deep",
   stages: {},
   rounds: [],
   candidates: [],

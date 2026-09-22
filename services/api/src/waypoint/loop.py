@@ -4,6 +4,7 @@ One reactive rule, one challenger per round: a win refines the same mechanism,
 a loss (after PATIENCE tries) forces an untried one. Stop is mechanical.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
@@ -107,16 +108,22 @@ class LoopState:
     round: int = 0  # rounds completed
     best_score: float | None = None
     best_candidate_id: str | None = None
+    current_candidate_id: str | None = None
     current_mechanism: str | None = None
     tries_on_current: int = 0
     dry_mechanisms: int = 0
     tried_mechanisms: tuple[str, ...] = ()
 
 
-def next_mode(state: LoopState, config: LoopConfig) -> Literal["stay", "shift"]:
+def mechanism_key(value: str) -> str:
+    """Stable identity for model-authored mechanism labels."""
+    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+
+
+def next_mode(state: LoopState, config: LoopConfig) -> Literal["cold", "refine", "shift"]:
     if state.current_mechanism is None:
-        return "stay"  # cold start: nothing to shift away from
-    return "shift" if state.tries_on_current >= config.patience else "stay"
+        return "shift" if state.tried_mechanisms else "cold"
+    return "shift" if state.tries_on_current >= config.patience else "refine"
 
 
 def is_win(state: LoopState, score_pp: float | None, config: LoopConfig, floor_pp: float) -> bool:
@@ -143,26 +150,44 @@ def apply_round(
     # win / patience / dry bookkeeping below.
     tried = state.tried_mechanisms
     for name in (mechanism, *also_tried):
-        if name not in tried:
-            tried = (*tried, name)
+        key = mechanism_key(name)
+        if key and key not in tried:
+            tried = (*tried, key)
+    if outcome in {"suppressed", "unavailable"}:
+        # Nothing was selected this round. Preserve the actual current idea;
+        # refining an arbitrary suppressed/unranked row corrupts live and replay
+        # state. The failed attempt still advances patience/dry bookkeeping.
+        tries = state.tries_on_current + 1 if state.current_mechanism is not None else 0
+        dry = state.dry_mechanisms + (
+            1 if state.current_mechanism is None or tries >= config.patience else 0
+        )
+        return replace(
+            state,
+            round=state.round + 1,
+            tries_on_current=tries,
+            dry_mechanisms=dry,
+            tried_mechanisms=tried,
+        )
     if outcome == "win":
         return replace(
             state,
             round=state.round + 1,
             best_score=score_pp,
             best_candidate_id=candidate_id,
+            current_candidate_id=candidate_id,
             current_mechanism=mechanism,
             tries_on_current=0,
             dry_mechanisms=0,
             tried_mechanisms=tried,
         )
-    same = mechanism == state.current_mechanism
+    same = mechanism_key(mechanism) == mechanism_key(state.current_mechanism or "")
     tries = state.tries_on_current + 1 if same else 1
     dry = state.dry_mechanisms + (1 if tries >= config.patience else 0)
     return replace(
         state,
         round=state.round + 1,
         current_mechanism=mechanism,
+        current_candidate_id=candidate_id,
         tries_on_current=tries,
         dry_mechanisms=dry,
         tried_mechanisms=tried,
@@ -193,6 +218,9 @@ def _round_also_tried(ranking: dict[str, Any]) -> list[str]:
     or a resumed SHIFT re-proposes and re-pays for mechanisms already generated,
     critiqued and ranked. Suppressed ideas never reach `order`, but they are
     re-gated for free on re-proposal, so omitting them costs no paid call."""
+    generated = ranking.get("generated_mechanisms")
+    if isinstance(generated, list):
+        return [str(mechanism) for mechanism in generated if mechanism]
     return [o["mechanism"] for o in ranking.get("order", ()) if o.get("mechanism")]
 
 

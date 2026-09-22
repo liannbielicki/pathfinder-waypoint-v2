@@ -76,6 +76,27 @@ def _load(path: Path = CATALOG_PATH) -> dict[str, CatalogEntry]:
 CATALOG: dict[str, CatalogEntry] = _load()
 
 
+def resolve_cta(feature_key: str) -> dict[str, str] | None:
+    """Return the first usable catalog CTA; sentinel rows are not destinations."""
+    entry = CATALOG.get(feature_key)
+    if entry is None:
+        return None
+    return next(
+        (
+            cta
+            for cta in entry.ctas
+            if cta["works_on"] in _REAL_CHANNELS
+            and cta["label"]
+            and cta["url"]
+            and not any(
+                marker in cta["notes"].casefold()
+                for marker in ("untested", "unverified", "failed to load")
+            )
+        ),
+        None,
+    )
+
+
 def _state_features(brief: OrgBrief) -> dict[str, str]:
     """{feature_key: state} for every feature_<key>_state set on the brief, in
     field-declaration order. Derived from the model's fields, so a new
@@ -93,6 +114,19 @@ def _state_features(brief: OrgBrief) -> dict[str, str]:
             if value is not None:
                 out[name[len(_STATE_PREFIX) : -len(_STATE_SUFFIX)]] = value
     return out
+
+
+def available_feature_keys(brief: OrgBrief) -> set[str]:
+    keys = set(_state_features(brief))
+    if brief.top_unused_paid_feature:
+        keys.add(brief.top_unused_paid_feature)
+    # Promoted Context Workbench payloads replace the legacy feature-state
+    # columns. Their product-context keys are equally authoritative inputs to
+    # the deterministic CTA resolver.
+    product_context = (brief.curated_context or {}).get("pc", {})
+    if isinstance(product_context, dict):
+        keys.update(str(key) for key in product_context)
+    return keys
 
 
 def _feasibility_suffix(entry: CatalogEntry) -> str:

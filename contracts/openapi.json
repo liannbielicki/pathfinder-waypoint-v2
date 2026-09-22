@@ -506,6 +506,15 @@
             ],
             "title": "Loop Config"
           },
+          "model_tier": {
+            "default": "deep",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "title": "Model Tier",
+            "type": "string"
+          },
           "pro_ids": {
             "items": {
               "type": "string"
@@ -625,6 +634,15 @@
             },
             "title": "Measurements",
             "type": "array"
+          },
+          "model_tier": {
+            "default": "deep",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "title": "Model Tier",
+            "type": "string"
           },
           "pro_ids": {
             "items": {
@@ -766,6 +784,15 @@
             },
             "title": "Loop Config",
             "type": "object"
+          },
+          "model_tier": {
+            "default": "deep",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "title": "Model Tier",
+            "type": "string"
           },
           "pro_ids": {
             "items": {

@@ -114,6 +114,74 @@ describe("WinnerReview", () => {
     expect(screen.getByText(/evolve loop: 1 round/i)).toBeInTheDocument();
   });
 
+  it("shows a compact channel, selection, warm-start, and model explanation", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      candidates: [{
+        ...WINNER_RUN.candidates[0],
+        round: 1,
+        recommendation: {
+          ...WINNER_RUN.candidates[0].recommendation,
+          channel_override_reason: "email engagement was low",
+          cta: { label: "Online Booking", url: "https://example.test/booking" },
+        },
+        persona_evidence: {
+          ...WINNER_RUN.candidates[0].persona_evidence,
+          final: {
+            ...WINNER_RUN.candidates[0].persona_evidence.final,
+            tier: "deep",
+            model: "claude-sonnet-5",
+          },
+        },
+      }],
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: { ...WINNER_RUN.winners[0].evidence, suggested_channel: "email" },
+      }],
+      rounds: [{
+        pro_id: "pro_1", round: 1, mechanism: "invoice_delivery",
+        outcome: "win", score_pp: 4.2,
+        ranking: {
+          order: [
+            { token: "c1", candidate_id: "cand-1", mechanism: "invoice_delivery", rank: 1, score: 0.82 },
+            { token: "c2", candidate_id: "cand-2", mechanism: "review_request", rank: 2, score: 0.65 },
+          ],
+          screen_scores_pp: { c1: 4.2, c2: 1.1 },
+          selection_reason: "all_rankable_candidates_screened",
+          ranker_model: "claude-sonnet-5",
+          screen_model: "claude-sonnet-5",
+          warm_start: { outcome: "cold" },
+        },
+      }],
+    };
+    render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByText(/selected SMS · RECO email/i)).toBeVisible();
+    expect(screen.getByText(/override: email engagement was low/i)).toBeVisible();
+    expect(screen.getByText(/2 candidates compared across 1 round/i)).toBeVisible();
+    expect(screen.getByText(/warm start: no/i)).toBeVisible();
+    expect(screen.getByText(/claude-sonnet-5/i)).toBeVisible();
+    expect(screen.getByText(/technical selection evidence/i)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Online Booking" })).toHaveAttribute(
+      "href", "https://example.test/booking",
+    );
+  });
+
+  it("does not call a full fallback panel undersized", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: {
+          ...WINNER_RUN.winners[0].evidence,
+          panel_disclaimer: { final: "fallback panel: insufficient strong matches" },
+        },
+      }],
+    };
+    render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/fallback panel/i);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/fewer personas/i);
+  });
+
   it("counts every round for a Pro, including discarded losers", () => {
     const loser = { ...WINNER_RUN.candidates[0], id: "cand-0", status: "discarded" };
     render(

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { Candidate, RunDetail, Winner } from "@/lib/api";
+import type { Candidate, EvolveRound, RunDetail, Winner } from "@/lib/api";
 
 function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   const reduction = score.reduction_pp as number | null;
@@ -164,11 +164,13 @@ function WinnerCard({
   candidate,
   rounds,
   proCandidates,
+  proRounds,
 }: {
   winner: Winner;
   candidate?: Candidate;
   rounds: number;
   proCandidates: Candidate[];
+  proRounds: EvolveRound[];
 }) {
   if (winner.kind === "no_action") {
     return <NoActionCard winner={winner} proCandidates={proCandidates} />;
@@ -185,6 +187,19 @@ function WinnerCard({
   const rec = candidate?.recommendation;
   const finalEvidence = candidate?.persona_evidence?.final;
   const finalScore = candidate?.score?.final;
+  const decisionRound =
+    proRounds.find((round) => round.round === candidate?.round) ?? proRounds.at(-1);
+  const ranking = decisionRound?.ranking;
+  const compared = ranking?.order?.length ?? proCandidates.length;
+  const suggested = winner.evidence?.suggested_channel;
+  const overrideReason = rec?.channel_override_reason;
+  const cta = rec?.cta as Record<string, unknown> | undefined;
+  const warmStart = ranking?.warm_start as Record<string, unknown> | undefined;
+  const models = [...new Set([
+    ranking?.ranker_model,
+    ranking?.screen_model,
+    finalEvidence?.model,
+  ].filter((model): model is string => typeof model === "string" && model !== "skipped"))];
   return (
     <div className="card">
       <h4>
@@ -194,6 +209,11 @@ function WinnerCard({
         </span>
       </h4>
       <p>{String(rec?.pro_facing_concept ?? "")}</p>
+      {typeof cta?.url === "string" && typeof cta?.label === "string" && (
+        <p>
+          Verified CTA: <a href={cta.url}>{cta.label}</a>
+        </p>
+      )}
       <p>
         <small>
           mechanism: {String(rec?.mechanism)} · channel: {String(rec?.channel)}
@@ -205,6 +225,37 @@ function WinnerCard({
         </small>
       </p>
       <Rounds rounds={rounds} championRound={candidate?.round} />
+      <h5>Selection summary</h5>
+      <p>
+        Selected {String(rec?.channel ?? "unknown").toUpperCase()} · RECO{" "}
+        {String(suggested ?? "unavailable")}
+        {suggested && suggested !== rec?.channel
+          ? ` · override: ${String(overrideReason || "reason missing")}`
+          : ""}
+      </p>
+      <p>
+        {compared} candidate{compared === 1 ? "" : "s"} compared across {rounds}{" "}
+        round{rounds === 1 ? "" : "s"} · warm start:{" "}
+        {warmStart?.mechanism_in_batch === true ? "yes" : "no"}
+      </p>
+      {models.length > 0 && <p>Models: {models.join(", ")}</p>}
+      {ranking && (
+        <details>
+          <summary>Technical selection evidence</summary>
+          <p>{String(ranking.selection_reason ?? "selection reason unavailable")}</p>
+          <ul>
+            {(ranking.order ?? []).map((item) => (
+              <li key={item.candidate_id}>
+                #{item.rank ?? "—"} {item.mechanism} · ranker{" "}
+                {item.score == null ? "—" : item.score.toFixed(2)} · screen{" "}
+                {ranking.screen_scores_pp?.[item.token] == null
+                  ? "unavailable"
+                  : `${ranking.screen_scores_pp[item.token]?.toFixed(1)} pp`}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       {winner.evidence?.panel_disclaimer != null && (
         <p role="alert">
           <strong>⚠ Degraded panel:</strong>{" "}
@@ -213,7 +264,6 @@ function WinnerCard({
           )
             .map(([stage, detail]) => `${stage}: ${detail}`)
             .join("; ")}
-          {" — evaluated with fewer personas than requested."}
         </p>
       )}
       <h5>Why (manager rationale)</h5>
@@ -300,6 +350,7 @@ export function WinnerReview({
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
           rounds={countRounds(candidatesByPro.get(winner.pro_id) ?? [])}
           proCandidates={candidatesByPro.get(winner.pro_id) ?? []}
+          proRounds={run.rounds.filter((round) => round.pro_id === winner.pro_id)}
         />
       ))}
 

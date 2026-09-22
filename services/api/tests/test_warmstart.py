@@ -38,7 +38,7 @@ from .conftest import (
     rank_json,
     reactions_json,
 )
-from .test_pipeline import GOOD, LOSE, candidate_count, rounds, run_status, set_loop_config
+from .test_pipeline import LOSE, candidate_count, rounds, run_status, set_loop_config
 
 BRIEF = OrgBrief(
     org_uuid="org-abc-123",
@@ -400,7 +400,9 @@ async def test_retrieve_with_no_eligible_winners_is_a_cold_start(db_session: Asy
     assert match is None
     assert telemetry == {
         "scanned": 0, "latency_ms": telemetry["latency_ms"], "best_score": None,
-        "outcome": "cold",
+        "outcome": "cold", "query_field_count": 3,
+        "best_candidate_field_count": 0, "best_shared_field_count": 0,
+        "min_shared_fields": 2,
     }
 
 
@@ -428,6 +430,56 @@ async def test_retrieve_just_below_the_threshold_is_a_cold_start(
     assert match is None
     assert telemetry["outcome"] == "cold"
     assert telemetry["best_score"] == 0.75  # scored, just not similar enough
+
+
+async def test_segment_only_match_is_too_thin_to_warm_start(
+    db_session: AsyncSession,
+) -> None:
+    await seed_source_winner(
+        db_session,
+        winner_id="win-thin",
+        fingerprint={"segment": "1A"},
+    )
+
+    match, telemetry = await retrieve(
+        db_session,
+        OrgBrief(org_uuid="org-thin", segment="1A"),
+        threshold=0.75,
+    )
+
+    assert match is None
+    assert telemetry["outcome"] == "cold"
+    assert telemetry["best_score"] == 1.0
+    assert telemetry["query_field_count"] == 1
+    assert telemetry["best_candidate_field_count"] == 1
+    assert telemetry["best_shared_field_count"] == 1
+    assert telemetry["min_shared_fields"] == 2
+
+
+async def test_thin_high_score_does_not_hide_an_adequately_covered_match(
+    db_session: AsyncSession,
+) -> None:
+    await seed_source_winner(
+        db_session,
+        winner_id="win-thin",
+        fingerprint={"segment": "1A"},
+    )
+    await seed_source_winner(
+        db_session,
+        winner_id="win-covered",
+        fingerprint={"segment": "9Z", "vertical": "hvac", "plan_tier": "basic"},
+    )
+
+    match, telemetry = await retrieve(
+        db_session,
+        QUERY_BRIEF,
+        threshold=0.1,
+        weights={"segment": 10.0, "vertical": 1.0, "plan_tier": 1.0},
+    )
+
+    assert match is not None
+    assert match.winner_id == "win-covered"
+    assert telemetry["best_shared_field_count"] == 3
 
 
 async def test_ineligible_winners_are_never_retrieved(db_session: AsyncSession) -> None:
@@ -532,7 +584,11 @@ async def test_every_retrieval_logs_one_structured_line(
     lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert len(lines) == 1
     assert "outcome=cold" in lines[0]
-    for field in ("scanned=", "latency_ms=", "best_score=", "threshold="):
+    for field in (
+        "scanned=", "latency_ms=", "best_score=", "threshold=",
+        "query_field_count=", "best_candidate_field_count=",
+        "best_shared_field_count=", "min_shared_fields=",
+    ):
         assert field in lines[0]
 
 
@@ -683,7 +739,7 @@ async def test_only_round_one_retrieves(deps: FakeDeps, seeded_job, monkeypatch)
         rank_json(("c1", 0.9), ("c2", 0.5), ("c3", 0.3), ("c4", 0.1)),
         rank_json(("c1", 0.9), ("c2", 0.5), ("c3", 0.3)),
     ]
-    deps.gateway.responses["screen"] = [reactions_json(GOOD), reactions_json(LOSE)]
+    deps.gateway.responses["screen"] = [reactions_json(LOSE)]
     await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=3)
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
@@ -701,7 +757,7 @@ async def test_warm_candidate_ranked_last_is_not_selected(deps: FakeDeps, seeded
     script_warm_batch(deps, rank=(("c2", 0.9), ("c3", 0.5), ("c4", 0.3), ("c1", 0.1)))
     await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1)
     await run_job(seeded_job.id, deps)
-    assert deps.gateway.calls_for("screen") == 1  # clear winner: only rank 1 screened
+    assert deps.gateway.calls_for("screen") == 4  # warm seed plus three cold ideas
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].mechanism != WARM_MECHANISM  # never an automatic winner
     champion = await deps.db.get(CandidateRow, ledger[0].candidate_id)
@@ -727,7 +783,7 @@ async def test_warm_candidate_ranked_first_is_screened_like_any_finalist(
     await run_job(seeded_job.id, deps)
     assert deps.gateway.calls_for("critics") == 1
     assert deps.gateway.calls_for("rank") == 1
-    assert deps.gateway.calls_for("screen") == 1
+    assert deps.gateway.calls_for("screen") == 4
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].mechanism == WARM_MECHANISM
     assert ledger[0].score_pp is not None  # it earned its place through the screen

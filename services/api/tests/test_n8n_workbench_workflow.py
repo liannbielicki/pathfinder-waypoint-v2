@@ -6,6 +6,24 @@ WORKFLOW = (
     / "n8n"
     / "waypoint-variable-audit-context-async-v1.json"
 )
+STANDARD_WORKFLOW = (
+    Path(__file__).parents[3]
+    / "n8n"
+    / "waypoint-variable-audit-context-v1.json"
+)
+
+
+def _webhook_path(path: Path) -> str:
+    workflow = json.loads(path.read_text())
+    return next(
+        node["parameters"]["path"]
+        for node in workflow["nodes"]
+        if node["type"] == "n8n-nodes-base.webhook"
+    )
+
+
+def test_async_workbench_webhook_never_collides_with_standard_context() -> None:
+    assert _webhook_path(WORKFLOW) != _webhook_path(STANDARD_WORKFLOW)
 
 
 def test_async_workbench_workflow_validates_before_acknowledging() -> None:

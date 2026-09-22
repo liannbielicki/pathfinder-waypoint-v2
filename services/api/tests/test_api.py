@@ -133,6 +133,7 @@ async def test_run_detail_exposes_per_pro_loop_rounds(
         EvolveRoundRow(
             run_id=created["id"], pro_id="pro_1", round=1,
             mechanism="discount", outcome="win", score_pp=1.2,
+            ranking={"selection_reason": "all_rankable_candidates_screened"},
         )
     )
     await db_session.commit()
@@ -144,6 +145,7 @@ async def test_run_detail_exposes_per_pro_loop_rounds(
             "mechanism": "discount",
             "outcome": "win",
             "score_pp": 1.2,
+            "ranking": {"selection_reason": "all_rankable_candidates_screened"},
         }
     ]
 
@@ -226,7 +228,8 @@ async def test_handoff_creates_durable_receipt(
         run_id=run_id,
         pro_id="pro_1",
         recommendation={"title": "T", "mechanism": "invoice_delivery",
-                        "pro_facing_concept": "C", "manager_rationale": "R"},
+                        "pro_facing_concept": "C", "manager_rationale": "R",
+                        "channel": "sms"},
     )
     db_session.add(candidate)
     await db_session.flush()
@@ -272,7 +275,7 @@ async def test_handoff_creates_durable_receipt(
     # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
     assert row.payload == {
         "pro_uuid": "pro_1", "theme": "T: C", "theme_category": "invoice_delivery",
-        "org_id": "org_1", "row_id": winner.id,
+        "org_id": "org_1", "row_id": winner.id, "channel": "sms",
     }
 
 
@@ -383,6 +386,31 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
         "CANDIDATE_COUNT": 3,
         "TIE_MARGIN": 0.05,
         "WARM_START_THRESHOLD": 0.75,
+    }
+
+
+async def test_run_model_tier_defaults_deep_and_can_be_overridden(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    deep = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    assert deep["model_tier"] == "deep"
+    deep_row = await db_session.get(RunRow, deep["id"])
+    assert deep_row is not None and deep_row.model_tier == "deep"
+
+    fast = (
+        await auth_client.post("/api/runs", json={**RUN_REQUEST, "model_tier": "fast"})
+    ).json()
+    assert fast["model_tier"] == "fast"
+
+
+async def test_fleet_settings_exposes_actual_models(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    settings = (await auth_client.get("/api/fleet/settings")).json()
+    assert settings["models"] == {
+        "fast": "claude-haiku-4-5",
+        "deep": "claude-sonnet-5",
     }
 
 

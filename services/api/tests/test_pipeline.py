@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
 from waypoint.models import PENDING_AUDIENCE_QUERY
+from waypoint.n8n import ContextConfigurationError, OrgContextBatch
 from waypoint.personas import PanelItem, PanelSelection
 from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
 from waypoint.prompts import UNTRUSTED_END
@@ -124,6 +125,21 @@ async def test_happy_path_completes_with_champion_and_measurement(
     tiers = {(c["stage"], c["tier"]) for c in deps.gateway.calls}
     assert ("screen", "fast") in tiers
     assert ("final", "deep") in tiers
+
+
+async def test_deep_run_routes_every_reasoning_stage_to_the_deep_model(
+    deps: FakeDeps, seeded_job
+) -> None:
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.model_tier = "deep"
+    run.loop_config = {"MAX_ROUNDS": 1}
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    by_stage = {call["stage"]: call["tier"] for call in deps.gateway.calls}
+    for stage in ("evolve", "critics", "rank", "screen", "wargame", "final"):
+        assert by_stage[stage] == "deep"
 
 
 async def test_staging_run_starts_async_context_and_waits_without_retrying(
@@ -292,7 +308,8 @@ async def test_patience_two_gives_a_mechanism_a_second_try(deps: FakeDeps, seede
     await run_job(seeded_job.id, deps)
     prompts = deps.gateway.prompts_for("evolve")
     assert len(prompts) == 2  # two tries on one mechanism, then dry → stop
-    assert all("Mode: REFINE" in p for p in prompts)  # never shifted
+    assert "Mode: COLD" in prompts[0]
+    assert "Mode: REFINE" in prompts[1]  # second try, never shifted
     assert await run_status(deps.db, seeded_job.run_id) == "no_action"
 
 
@@ -380,11 +397,9 @@ async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seede
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
     assert ledger[0].outcome == "suppressed"
-    # One suppressed round + lose rounds, but the fixture's evolve idea never
-    # changes across rounds: after the first paid screen, later rounds hit the
-    # persona reaction cache (same panel+concept+channel), so spend stays at 1
-    # regardless of how many non-suppressed rounds ran.
-    assert deps.gateway.calls_for("screen") == 1
+    # The suppressed round itself never spends on personas. Every subsequent
+    # one-candidate round is screened because SHIFT now produces a distinct touch.
+    assert deps.gateway.calls_for("screen") == len(ledger) - 1
     suppressed = (
         (
             await deps.db.execute(
@@ -532,6 +547,37 @@ async def test_malformed_reactions_are_unavailable_not_a_crash(
     assert {r.outcome for r in await rounds(deps.db, seeded_job.run_id)} == {"unavailable"}
 
 
+async def test_out_of_range_reactions_are_unavailable_not_scores(
+    deps: FakeDeps, seeded_job
+) -> None:
+    await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1, CANDIDATE_COUNT=1)
+    deps.gateway.responses["screen"] = json.dumps(
+        [{"persona_id": persona.persona_id, "reaction": 8} for persona in PERSONAS]
+    )
+
+    await run_job(seeded_job.id, deps)
+
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "unavailable"
+    assert ledger[0].score_pp is None
+
+
+async def test_invalid_reactions_are_retried_before_candidate_is_unavailable(
+    deps: FakeDeps, seeded_job
+) -> None:
+    await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1, CANDIDATE_COUNT=1)
+    invalid = json.dumps(
+        [{"persona_id": persona.persona_id, "reaction": 8} for persona in PERSONAS]
+    )
+    deps.gateway.responses["screen"] = [invalid, reactions_json(GREAT)]
+
+    await run_job(seeded_job.id, deps)
+
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "win"
+    assert deps.gateway.calls_for("screen") == 2
+
+
 async def test_flat_reactions_resolve_to_no_action(deps: FakeDeps, seeded_job) -> None:
     flat = reactions_json(deps.calibration.pivot)
     deps.gateway.responses["screen"] = flat
@@ -562,11 +608,13 @@ async def test_short_panel_degrades_with_flagged_output_instead_of_abstaining(
     # The notes name what the short panel actually voids: no dissenting
     # family, and a "held-out" final check that reused the screen's personas.
     assert "no counterweight" in disclaimer["final"]
-    assert "reused the screen panel" in disclaimer["final"]
+    assert "reused 2 screen persona" in disclaimer["final"]
 
 
-async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seeded_job) -> None:
-    # Below the 2-persona floor there is no panel at all: still an abstention.
+async def test_available_persona_fallback_never_abstains_for_no_exact_match(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # Even a one-card pool stays runnable and labels the short/reused panel.
     lone = [p for p in PERSONAS if p.family == "solo_operators"][:1]
 
     async def _lone(segment: str):
@@ -574,12 +622,12 @@ async def test_unmatchable_pro_abstains_with_low_panel_fit(deps: FakeDeps, seede
 
     deps.get_personas = _lone
     await run_job(seeded_job.id, deps)
-    assert await run_status(deps.db, seeded_job.run_id) == "abstained"
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
     winner = (
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()
-    assert winner.kind == "abstained"
-    assert "panel" in winner.rationale
+    assert winner.kind == "winner"
+    assert "panel_disclaimer" in winner.evidence
 
 
 # --- safety rails -------------------------------------------------------------
@@ -613,6 +661,23 @@ async def test_context_outage_waits_for_retry(deps: FakeDeps, seeded_job) -> Non
     run = await deps.db.get(RunRow, seeded_job.run_id)
     assert run is not None
     assert "standard" in str(run.stop_reason)
+
+
+async def test_context_configuration_error_fails_without_requeue(
+    deps: FakeDeps, seeded_job
+) -> None:
+    class MisconfiguredContext:
+        async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+            raise ContextConfigurationError("async webhook cannot return rows")
+
+    deps.context = MisconfiguredContext()
+    await run_job(seeded_job.id, deps)
+
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert job is not None
+    await deps.db.refresh(job)
+    assert job.status == "failed"
+    assert "context_configuration" in job.checkpoint["failure"]["reason"]
 
 
 async def test_staging_context_outage_is_labeled_in_diagnostics(
@@ -970,6 +1035,7 @@ async def test_persona_reactions_are_cached_across_jobs(
         audience_query="audience_v7",
         audience_run="2026-08-06T18:00:00Z",
         channels=["sms"],
+        model_tier="fast",
         cost_limit=Decimal("100.00"),
     )
     db_session.add(run2)
@@ -1061,7 +1127,7 @@ async def test_war_game_prompt_omits_channels_this_pro_opted_out_of(
         audience_run="2026-08-06T18:00:00Z",
         channels=["sms", "email"],
         cost_limit=Decimal("100.00"),
-        loop_config={"CANDIDATE_COUNT": 1},
+        loop_config={"CANDIDATE_COUNT": 1, "MAX_ROUNDS": 1},
     )
     db_session.add(run)
     db_session.add(FleetControlRow(id=1, day_cost_limit=Decimal("1000.00")))

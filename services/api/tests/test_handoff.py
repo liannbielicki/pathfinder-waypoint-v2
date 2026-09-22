@@ -208,7 +208,8 @@ async def seed_ready_winner(
     db_session.add(CandidateRow(
         id="cand-1", run_id="run-t", pro_id="pro_1", status="champion",
         recommendation={"title": "AR nudge", "mechanism": "invoice_delivery",
-                        "pro_facing_concept": "A gentle check-in about overdue invoices"},
+                        "pro_facing_concept": "A gentle check-in about overdue invoices",
+                        "channel": "sms"},
     ))
     db_session.add(WinnerRow(
         id="win-t", run_id="run-t", pro_id="pro_1", kind="winner",
@@ -333,6 +334,28 @@ async def test_call_winners_are_never_handed_to_lcm(
     assert await ready_rows(db_session, "run-1") == []
 
 
+async def test_legacy_none_channel_can_never_inherit_lcm_sms(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={"title": "Hold", "mechanism": "monitor",
+                        "pro_facing_concept": "wait", "manager_rationale": "r",
+                        "actions": ["wait"], "channel": "none"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+    assert await ready_rows(db_session, "run-1") == []
+
+
 async def test_ready_rows_carry_the_winner_channel(
     db_session: AsyncSession, seeded_run: None,
 ) -> None:
@@ -354,6 +377,34 @@ async def test_ready_rows_carry_the_winner_channel(
     await db_session.commit()
     rows = await ready_rows(db_session, "run-1")
     assert [r["channel"] for r in rows] == ["email"]
+
+
+async def test_ready_rows_carry_verified_cta_inside_the_stable_theme_contract(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={
+            "title": "Booking setup", "mechanism": "booking_activation",
+            "pro_facing_concept": "Let customers book online.", "manager_rationale": "r",
+            "actions": ["open booking settings"], "channel": "email",
+            "cta": {"label": "Online Booking", "url": "https://example.test/booking"},
+        },
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+    rows = await ready_rows(db_session, "run-1")
+    assert rows[0]["theme"].endswith(
+        "CTA: Online Booking — https://example.test/booking"
+    )
 
 
 async def _make_ready(db_session: AsyncSession, evidence: dict) -> None:

@@ -3,7 +3,7 @@
     {
       "parameters": {
         "httpMethod": "POST",
-        "path": "waypoint/context-v1",
+        "path": "waypoint/context-async-v1",
         "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
