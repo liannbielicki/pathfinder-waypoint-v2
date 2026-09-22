@@ -62,6 +62,23 @@ def test_channel_directive_forbids_sms_consent_asks() -> None:
     assert "consent" not in channel_directive(["email"])
 
 
+def test_channel_directive_opens_call_and_shapes_it_for_a_rep() -> None:
+    from waypoint.models import Recommendation
+    from waypoint.prompts import channel_directive
+
+    every = channel_directive(["sms", "email", "call"])
+    assert '"sms"' in every and '"email"' in every and '"call"' in every
+    # A call is delivered by a person, so the idea is shaped as one reason to
+    # call plus one ask, not as sendable copy.
+    assert "placed by a housecall pro rep" in every.lower()
+    assert "rep" not in channel_directive(["sms", "email"]).lower()
+    # The recommendation contract accepts the new channel.
+    assert Recommendation(
+        title="t", mechanism="m", actions=["a"], pro_facing_concept="c",
+        manager_rationale="r", channel="call",
+    ).channel == "call"
+
+
 def test_critic_prompt_fences_untrusted_ideas() -> None:
     prompt = critic_prompt(org_context="{}", ideas_json="[]")
     assert UNTRUSTED_START in prompt

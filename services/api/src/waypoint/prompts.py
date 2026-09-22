@@ -29,10 +29,13 @@ def fenced_context(context: str) -> str:
 
 def channel_directive(channels: list[str]) -> str:
     """Gate idea generation to the run's operator-selected delivery channels.
-    SMS carries an extra constraint so ideas are shaped as one realistic
-    single-touch event fitting a ~160-character text — never a sequence or
-    long-form mechanics that only work in email."""
-    allowed = [c for c in channels if c in ("sms", "email")]
+    With more than one open, the model picks the channel per idea and the
+    persona panel scores the touch as delivered on it. SMS carries an extra
+    constraint so ideas are shaped as one realistic single-touch event fitting
+    a ~160-character text — never a sequence or long-form mechanics that only
+    work in email. A call is placed by a person, so it is shaped as one reason
+    to call plus one ask."""
+    allowed = [c for c in channels if c in ("sms", "email", "call")]
     if not allowed:  # defensive: never leave the model unconstrained
         allowed = ["sms", "email"]
     picks = " or ".join(f'"{c}"' for c in allowed)
@@ -49,6 +52,13 @@ def channel_directive(channels: list[str]) -> str:
             "a ~160-character text and could plausibly land on a Pro's phone as-is. "
             "No sequences, follow-ups, drips, multi-step or multi-part flows, and "
             "no email-only mechanics; each idea stands alone as exactly one send."
+        )
+    if "call" in allowed:
+        lines.append(
+            'A "call" idea is a short live phone call placed by a Housecall Pro rep: '
+            "shape it as ONE concrete reason to call this Pro plus ONE ask or offer "
+            "the rep makes on the call. Choose call only when a conversation would "
+            "land better than a message for this Pro and this moment."
         )
     if "sms" in allowed:
         lines.append(
@@ -82,7 +92,7 @@ question-framed touch but never a stated fact.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
-email or SMS copy.
+copy or a call script.
 
 {channel_directive(channels)}
 Make ideas operationally testable and meaningfully different from each other.
@@ -106,6 +116,7 @@ REACTION_SYSTEM = (
 _CHANNEL_FRAMING = {
     "sms": "an SMS text message on your phone, read in a spare moment between jobs",
     "email": "an email in your inbox, skimmed alongside the day's other mail",
+    "call": "a short phone call from a Housecall Pro rep, answered between jobs",
 }
 
 
@@ -236,7 +247,7 @@ question-framed touch but never a stated fact.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
-email or SMS copy.
+copy or a call script.
 
 {channel_directive(channels)}
 

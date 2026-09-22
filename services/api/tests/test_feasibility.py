@@ -29,6 +29,15 @@ def test_unknown_consent_passes() -> None:
     assert result.allowed_channels == ("sms",)
 
 
+def test_call_has_no_consent_field_and_passes_open() -> None:
+    # No call-consent signal exists in the brief, so call is never blocked
+    # (fail-open on unknown data, like the other channels).
+    result = gate_pro(
+        brief(sms_consent_state="opted_out"), ["sms", "email", "call"], "churn_risk"
+    )
+    assert result.allowed_channels == ("email", "call")
+
+
 def test_low_churn_risk_contradicts_churn_window() -> None:
     result = gate_pro(brief(churn_risk_state="low"), ["sms"], "churn_risk")
     assert result.blocked

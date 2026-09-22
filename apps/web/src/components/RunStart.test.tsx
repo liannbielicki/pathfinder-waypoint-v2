@@ -97,7 +97,7 @@ describe("RunStart", () => {
       expect(screen.getByLabelText(/max rounds per pro/i)).toBeInTheDocument(),
     );
     for (const label of [
-      /pro ids/i, /audience run/i, /channel/i,
+      /pro ids/i, /audience run/i, /^sms$/i, /^email$/i, /^call$/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
       /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
@@ -210,6 +210,46 @@ describe("RunStart", () => {
     expect(alert).toHaveTextContent(/audience rejected/);
     expect(screen.getByLabelText(/pro ids/i)).toHaveValue("pro_1");
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
+  });
+
+  it("opens every channel by default and lets Waypoint pick per Pro", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ channels: ["sms", "email", "call"] }),
+    );
+  });
+
+  it("sends only the channels left checked", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByLabelText(/^call$/i));
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ channels: ["sms", "email"] }),
+    );
+  });
+
+  it("refuses to start with no channel selected", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    for (const name of [/^sms$/i, /^email$/i, /^call$/i]) {
+      await userEvent.click(screen.getByLabelText(name));
+    }
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/channel/i);
+    expect(createCalls).toHaveLength(0);
   });
 
   it("sends the selected journey window", async () => {

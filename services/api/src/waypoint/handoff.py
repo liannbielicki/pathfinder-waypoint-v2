@@ -243,6 +243,10 @@ async def ready_rows(
     rows: list[dict[str, Any]] = []
     for winner in winners:
         candidate = candidates_by_id.get(winner.candidate_id) if winner.candidate_id else None
+        if candidate is not None and candidate.recommendation.get("channel") == "call":
+            # A call is placed by a person, not sent by LCM: the winner stays
+            # in the Waypoint portal for manual follow-up.
+            continue
         if winner.id in measured_winner_ids and candidate is not None:
             rows.append(
                 {

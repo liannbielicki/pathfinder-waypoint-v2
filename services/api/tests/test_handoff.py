@@ -198,6 +198,7 @@ async def seed_ready_winner(
     audience_query: str,
     status: str = "running",
     winner_evidence: dict | None = None,
+    channel: str = "sms",
 ) -> None:
     db_session.add(RunRow(
         id="run-t", pro_ids=["pro_1"], audience_query=audience_query, status=status,
@@ -208,7 +209,8 @@ async def seed_ready_winner(
     db_session.add(CandidateRow(
         id="cand-1", run_id="run-t", pro_id="pro_1", status="champion",
         recommendation={"title": "AR nudge", "mechanism": "invoice_delivery",
-                        "pro_facing_concept": "A gentle check-in about overdue invoices"},
+                        "pro_facing_concept": "A gentle check-in about overdue invoices",
+                        "channel": channel},
     ))
     db_session.add(WinnerRow(
         id="win-t", run_id="run-t", pro_id="pro_1", kind="winner",
@@ -237,6 +239,20 @@ async def test_trickle_push_sends_ready_winner_and_is_idempotent(
     # The theme carries the title (feature name) AND the customer moment.
     sent = json.loads(httpx_mock.get_requests()[0].content)
     assert sent["rows"][0]["theme"] == "AR nudge: A gentle check-in about overdue invoices"
+
+
+async def test_call_winners_are_held_back_from_lcm(
+    db_session: AsyncSession,
+) -> None:
+    # LCM Personalization sends SMS and email; a call is placed by a person,
+    # so a call winner stays in the Waypoint portal and never becomes a row.
+    await seed_ready_winner(db_session, audience_query="audience_v7", channel="call")
+    assert await ready_rows(db_session, "run-t") == []
+
+
+async def test_email_winners_reach_lcm(db_session: AsyncSession) -> None:
+    await seed_ready_winner(db_session, audience_query="audience_v7", channel="email")
+    assert [row["row_id"] for row in await ready_rows(db_session, "run-t")] == ["win-t"]
 
 
 async def test_trickle_push_is_scoped_to_the_finished_pro(

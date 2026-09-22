@@ -74,7 +74,7 @@ class Recommendation(BaseModel):
     actions: list[str] = Field(min_length=1)
     pro_facing_concept: str = Field(min_length=1)
     manager_rationale: str = Field(min_length=1)
-    channel: Literal["sms", "email", "none"]
+    channel: Literal["sms", "email", "call", "none"]
     risk: str = ""
 
 
@@ -222,7 +222,7 @@ class ExposureIn(BaseModel):
 
 class FollowUpBranch(BaseModel):
     action: str = Field(min_length=1)  # "stop" or ONE concrete next touch (seed, not copy)
-    channel: Literal["sms", "email", "none"] = "none"
+    channel: Literal["sms", "email", "call", "none"] = "none"
 
 
 class FollowUpPlan(BaseModel):

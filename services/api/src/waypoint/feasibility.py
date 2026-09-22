@@ -24,7 +24,13 @@ NEGATIVE_CONSENT = frozenset(
     {"opted_out", "opted-out", "unsubscribed", "suppressed", "dnc", "blocked", "revoked", "no"}
 )
 
-CONSENT_FIELD = {"sms": "sms_consent_state", "email": "email_consent_state"}
+# A channel maps to the brief field holding its consent state; None means the
+# brief carries no consent signal for it, so it can only pass (fail-open).
+CONSENT_FIELD: dict[str, str | None] = {
+    "sms": "sms_consent_state",
+    "email": "email_consent_state",
+    "call": None,
+}
 
 _LOW_CHURN = frozenset({"low", "none", "minimal"})
 
@@ -42,7 +48,8 @@ class GateResult:
 
 
 def _consent_blocks(brief: OrgBrief, channel: str) -> bool:
-    state = getattr(brief, CONSENT_FIELD[channel], None)
+    field = CONSENT_FIELD[channel]
+    state = getattr(brief, field, None) if field else None
     return state is not None and state.strip().lower() in NEGATIVE_CONSENT
 
 

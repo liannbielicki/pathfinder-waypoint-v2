@@ -38,6 +38,8 @@ const LOOP_FIELDS: LoopField[] = [
     min: 0 },
 ];
 
+const CHANNELS = ["sms", "email", "call"] as const;
+
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [proIds, setProIds] = useState("");
   // Autofilled with "now" (second precision, UTC) — the operator can overwrite
@@ -45,7 +47,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [audienceRun, setAudienceRun] = useState(
     () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   );
-  const [channel, setChannel] = useState("sms");
+  // Every checked channel is open for this run; Waypoint picks the best one
+  // per Pro (and per idea) inside generation, gated by consent.
+  const [channels, setChannels] = useState<string[]>([...CHANNELS]);
   const [journeyWindow, setJourneyWindow] = useState("churn_risk");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -123,6 +127,10 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
+    if (channels.length === 0) {
+      setError("Select at least one channel.");
+      return;
+    }
     const invalid = validateLoopControls();
     if (invalid) {
       setError(invalid);
@@ -141,7 +149,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         // the run; the pipeline overwrites it with the authoritative value.
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
-        channels: [channel],
+        channels: CHANNELS.filter((c) => channels.includes(c)),
         journey_window: journeyWindow as RunCreateInput["journey_window"],
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
@@ -182,11 +190,27 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           placeholder="2026-08-06T18:00:00Z"
           required
         />
-        <label htmlFor="channel">Channel</label>
-        <select id="channel" value={channel} onChange={(e) => setChannel(e.target.value)}>
-          <option value="sms">sms</option>
-          <option value="email">email</option>
-        </select>
+        <p className="helper">
+          Channels. Every checked channel is open; Waypoint picks the best one
+          per Pro, gated by consent. Call winners stay here for manual follow-up.
+        </p>
+        <div>
+          {CHANNELS.map((c) => (
+            <label key={c} htmlFor={`channel-${c}`}>
+              <input
+                id={`channel-${c}`}
+                type="checkbox"
+                checked={channels.includes(c)}
+                onChange={(e) =>
+                  setChannels((prev) =>
+                    e.target.checked ? [...prev, c] : prev.filter((x) => x !== c),
+                  )
+                }
+              />{" "}
+              {c}
+            </label>
+          ))}
+        </div>
         <label htmlFor="journey-window">Journey window</label>
         <select
           id="journey-window"
