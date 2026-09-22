@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
@@ -35,6 +36,15 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# A migration that alters a live table needs ACCESS EXCLUSIVE, so any open
+# transaction touching it blocks us. Without a timeout that block is silent and
+# unbounded: the Railway preDeployCommand hangs, the deploy never finishes, and
+# the logs stop after "Running upgrade". Fail fast and retry instead -- a
+# transient holder clears within a poll or two, and a real one fails loudly.
+LOCK_TIMEOUT_MS = int(os.environ.get("MIGRATION_LOCK_TIMEOUT_MS", "10000"))
+LOCK_ATTEMPTS = int(os.environ.get("MIGRATION_LOCK_ATTEMPTS", "5"))
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
@@ -46,10 +56,33 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # As a connect-time server setting, not a SET statement: issuing SQL on
+        # the connection here would open a transaction alembic never commits,
+        # and every migration would silently roll back at close.
+        connect_args={"server_settings": {"lock_timeout": f"{LOCK_TIMEOUT_MS}"}},
     )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    try:
+        for attempt in range(1, LOCK_ATTEMPTS + 1):
+            try:
+                async with connectable.connect() as connection:
+                    await connection.run_sync(do_run_migrations)
+                return
+            except OperationalError as error:
+                # 55P03 lock_not_available: someone else holds the table. The
+                # transaction rolled back whole, so a retry is safe.
+                if getattr(error.orig, "sqlstate", None) != "55P03":
+                    raise
+                if attempt == LOCK_ATTEMPTS:
+                    raise
+                delay = 2**attempt
+                print(
+                    f"migration blocked on a table lock "
+                    f"(attempt {attempt}/{LOCK_ATTEMPTS}); retrying in {delay}s",
+                    flush=True,
+                )
+                await asyncio.sleep(delay)
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():
