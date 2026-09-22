@@ -4,7 +4,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_engine_from_config
 
 from alembic import context
@@ -41,8 +41,14 @@ def run_migrations_offline() -> None:
 # unbounded: the Railway preDeployCommand hangs, the deploy never finishes, and
 # the logs stop after "Running upgrade". Fail fast and retry instead -- a
 # transient holder clears within a poll or two, and a real one fails loudly.
-LOCK_TIMEOUT_MS = int(os.environ.get("MIGRATION_LOCK_TIMEOUT_MS", "10000"))
-LOCK_ATTEMPTS = int(os.environ.get("MIGRATION_LOCK_ATTEMPTS", "5"))
+# Short timeout, many attempts: each try gives up quickly so a queued
+# ACCESS EXCLUSIVE never stalls the live app's own queries behind it, and we
+# keep trying long enough to land in a gap between the holder's transactions.
+# Railway runs preDeployCommand while the OLD instance still serves traffic,
+# so a holder is expected -- we wait it out rather than demand an idle database.
+LOCK_TIMEOUT_MS = int(os.environ.get("MIGRATION_LOCK_TIMEOUT_MS", "5000"))
+LOCK_ATTEMPTS = int(os.environ.get("MIGRATION_LOCK_ATTEMPTS", "40"))
+RETRY_CAP_SECONDS = int(os.environ.get("MIGRATION_RETRY_CAP_SECONDS", "15"))
 
 # The API and the worker deploy from one railway.json, so both run
 # "alembic upgrade head" against one database seconds apart. This session-level
@@ -93,20 +99,66 @@ async def _upgrade_with_retry(connectable: AsyncEngine) -> None:
             async with connectable.connect() as connection:
                 await connection.run_sync(do_run_migrations)
             return
-        except OperationalError as error:
-            # 55P03 lock_not_available: a process outside this deploy holds the
-            # table. The transaction rolled back whole, so a retry is safe.
-            if getattr(error.orig, "sqlstate", None) != "55P03":
+        except DBAPIError as error:
+            # 55P03 lock_not_available. Catch DBAPIError, not OperationalError:
+            # asyncpg raises LockNotAvailableError, which SQLAlchemy wraps as a
+            # bare DBAPIError, so an OperationalError clause silently never
+            # matches and the "retry" gives up on the first attempt.
+            if _sqlstate(error) != "55P03":
                 raise
             if attempt == LOCK_ATTEMPTS:
+                await _report_blockers(connectable)
                 raise
-            delay = 2**attempt
+            delay = min(2**attempt, RETRY_CAP_SECONDS)
             print(
                 f"migration blocked on a table lock "
                 f"(attempt {attempt}/{LOCK_ATTEMPTS}); retrying in {delay}s",
                 flush=True,
             )
+            if attempt == 1 or attempt % 10 == 0:
+                await _report_blockers(connectable)
             await asyncio.sleep(delay)
+
+
+def _sqlstate(error: DBAPIError) -> str | None:
+    orig = error.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        state = getattr(candidate, "sqlstate", None) or getattr(
+            candidate, "pgcode", None
+        )
+        if state:
+            return str(state)
+    return None
+
+
+async def _report_blockers(connectable: AsyncEngine) -> None:
+    """Name who is holding the table, into the deploy log.
+
+    Without this the failure says only "lock timeout", which is true and
+    useless: the holder is in the database, not in this process, and nobody
+    reading a failed deploy can see it after the fact.
+    """
+    try:
+        async with connectable.connect() as connection:
+            rows = (
+                await connection.exec_driver_sql(
+                    r"""
+                    SELECT pid, application_name, state,
+                           round(extract(epoch from now()-xact_start)) AS xact_s,
+                           left(regexp_replace(query, '\s+', ' ', 'g'), 80) AS q
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND xact_start IS NOT NULL
+                    ORDER BY xact_start
+                    LIMIT 10
+                    """
+                )
+            ).fetchall()
+        for row in rows:
+            print(f"  holder: {tuple(row)}", flush=True)
+    except Exception as error:  # noqa: BLE001 - diagnostics must never fail a deploy
+        print(f"  (could not read pg_stat_activity: {error})", flush=True)
 
 
 if context.is_offline_mode():
