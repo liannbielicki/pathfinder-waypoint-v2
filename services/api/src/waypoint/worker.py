@@ -29,13 +29,16 @@ from waypoint.pipeline import (
     PipelineDeps,
     PostgresStore,
     QueueOps,
+    StagingContextLike,
     finalize_stalled_runs,
     run_job,
 )
 from waypoint.queue import claim_job, fail_stale_jobs
 from waypoint.scoring import Calibration, load_calibration
 from waypoint.settings import Settings
+from waypoint.staging_context import WorkbenchStagingContextClient
 from waypoint.tables import FleetControlRow
+from waypoint.workbench_jobs import PostgresWorkbenchStore
 
 log = logging.getLogger("waypoint.worker")
 
@@ -45,6 +48,28 @@ POLL_SECONDS = 2.0
 # the job re-claimed mid-fetch and worked twice.
 LEASE_SECONDS = 1800
 CALIBRATION_PATH = Path(__file__).parents[2] / "data" / "reaction_churn_calibration_cards.json"
+
+
+async def _supervise(
+    name: str,
+    child: Callable[[], Awaitable[None]],
+    *,
+    max_delay: float = 60.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Keep one long-lived service loop alive across transient failures."""
+    delay = POLL_SECONDS
+    while True:
+        try:
+            await child()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s crashed; restarting in %.0fs", name, delay)
+        else:
+            log.error("%s exited unexpectedly; restarting in %.0fs", name, delay)
+        await sleep(delay)
+        delay = min(delay * 2, max_delay)
 
 
 async def apply_fleet_settings(session: AsyncSession, settings: Settings) -> None:
@@ -218,6 +243,7 @@ async def _worker_loop(
     slots: FleetSlots,
     llm_stacks: LLMStacks,
     context: N8NContextClient,
+    staging_context: StagingContextLike | None,
     anthropic: AsyncAnthropic,
     pricing: Pricing,
     persona_source: Callable[[str], Awaitable[list[Persona]]],
@@ -269,6 +295,7 @@ async def _worker_loop(
                         reconcile=partial(queue.reconcile_cost, usage_session),
                     ),
                     context=context,
+                    staging_context=staging_context,
                     queue=QueueOps(session),
                     get_personas=persona_source,
                     calibration=calibration,
@@ -320,6 +347,9 @@ async def main() -> None:
     logging.basicConfig(level="INFO")
     settings = Settings.load()
     logging.getLogger().setLevel(settings.LOG_LEVEL)
+    # httpx logs every successful request at INFO. Those 200/202 transport
+    # lines drown the application events that explain what the worker did.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     engine = make_engine(
         settings.DATABASE_URL.get_secret_value(),
         # Each loop holds one permanent fleet-slot connection plus, while busy,
@@ -348,6 +378,25 @@ async def main() -> None:
         timeout=settings.N8N_TIMEOUT_SECONDS,
         max_concurrent=settings.N8N_MAX_CONCURRENT,
     )
+    promotion_store = PostgresWorkbenchStore(factory)
+
+    staging_context = (
+        WorkbenchStagingContextClient(
+            workbench_url=str(settings.N8N_CONTEXT_URL_WORKBENCH),
+            n8n_token=settings.N8N_TOKEN.get_secret_value(),
+            context_layer_url=str(settings.CONTEXT_LAYER_BASE_URL),
+            context_layer_key=settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
+            max_concurrent=settings.N8N_MAX_CONCURRENT,
+            n8n_timeout=settings.N8N_TIMEOUT_SECONDS,
+            promotion_loader=promotion_store.read_active_promotion,
+        )
+        if (
+            settings.N8N_CONTEXT_URL_WORKBENCH is not None
+            and settings.CONTEXT_LAYER_BASE_URL is not None
+            and settings.CONTEXT_LAYER_API_KEY is not None
+        )
+        else None
+    )
 
     # One long-lived LCM transport shared by every loop (like the n8n client):
     # no per-Pro TLS handshake on the trickle path.
@@ -371,6 +420,7 @@ async def main() -> None:
                 slots=FleetSlots(slots_connection, max_slots=settings.MAX_LLM_IN_FLIGHT),
                 llm_stacks=llm_stacks,
                 context=context,
+                staging_context=staging_context,
                 anthropic=anthropic,
                 pricing=pricing,
                 persona_source=persona_source,
@@ -420,13 +470,24 @@ async def main() -> None:
                 log.warning("%s poll failed; next tick retries", name, exc_info=True)
 
     pollers = [
-        poller_loop(name, make_client(settings), poll)
+        (name, make_client(settings), poll)
         for name, make_client, poll in poller_specs(settings)
     ]
 
     log.info("starting %d worker loop(s)", settings.WORKER_COUNT)
     await asyncio.gather(
-        checkpoint_loop(), *pollers, *(spawn(i) for i in range(settings.WORKER_COUNT))
+        _supervise("checkpoint loop", checkpoint_loop),
+        *(
+            _supervise(
+                f"{name} poller",
+                partial(poller_loop, name, client, poll),
+            )
+            for name, client, poll in pollers
+        ),
+        *(
+            _supervise(f"worker {i}", partial(spawn, i))
+            for i in range(settings.WORKER_COUNT)
+        ),
     )
 
 

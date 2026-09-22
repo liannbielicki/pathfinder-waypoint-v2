@@ -17,6 +17,58 @@ def test_run_requires_clean_audience_lineage() -> None:
     )
     assert run.pro_ids == ["pro_1", "pro_2"]
     assert run.audience_query == "audience_v7"
+    assert run.context_source == "standard"
+    assert run.include_features_not_in_current_plan is False
+    assert run.model_tier == "deep"
+
+
+def test_run_accepts_only_configured_model_tiers() -> None:
+    run = RunCreate(
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["email"],
+        model_tier="fast",
+    )
+    assert run.model_tier == "fast"
+    with pytest.raises(ValidationError):
+        RunCreate(
+            pro_ids=["pro_1"],
+            audience_query="audience_v7",
+            audience_run="2026-08-06T18:00:00Z",
+            channels=["email"],
+            model_tier="unknown",
+        )
+
+
+def test_run_table_enforces_model_tiers_at_the_database_boundary() -> None:
+    constraints = {constraint.name for constraint in RunRow.__table__.constraints}
+    assert "ck_runs_model_tier" in constraints
+
+
+def test_run_accepts_only_known_context_sources() -> None:
+    staging = RunCreate(
+        pro_ids=["pro_1"],
+        audience_query="audience_v7",
+        audience_run="2026-08-06T18:00:00Z",
+        channels=["email"],
+        context_source="staging",
+    )
+    assert staging.context_source == "staging"
+    assert staging.include_features_not_in_current_plan is False
+
+    with_other_features = staging.model_copy(
+        update={"include_features_not_in_current_plan": True}
+    )
+    assert with_other_features.include_features_not_in_current_plan is True
+    with pytest.raises(ValidationError):
+        RunCreate(
+            pro_ids=["pro_1"],
+            audience_query="audience_v7",
+            audience_run="2026-08-06T18:00:00Z",
+            channels=["email"],
+            context_source="experimental",
+        )
 
 
 def test_run_rejects_empty_audience() -> None:
@@ -208,3 +260,19 @@ async def test_run_defaults_to_churn_risk_window(db_session) -> None:
     db_session.add(run)
     await db_session.commit()
     assert run.journey_window == "churn_risk"
+    assert run.context_source == "standard"
+
+
+async def test_run_context_source_round_trips(db_session) -> None:
+    run = RunRow(
+        pro_ids=["p"],
+        audience_query="q",
+        audience_run="r",
+        channels=["sms"],
+        context_source="staging",
+        include_features_not_in_current_plan=True,
+    )
+    db_session.add(run)
+    await db_session.commit()
+    assert (await db_session.get(RunRow, run.id)).context_source == "staging"
+    assert (await db_session.get(RunRow, run.id)).include_features_not_in_current_plan is True

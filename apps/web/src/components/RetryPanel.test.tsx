@@ -71,6 +71,9 @@ describe("RetryPanel", () => {
           pro_ids: ["pro_1", "pro_2"],
           winners: [winner("pro_1", "winner")],
           journey_window: "onboarding",
+          context_source: "staging",
+          include_features_not_in_current_plan: true,
+          audience_query: "workbench:promotion-shared",
         }}
       />,
     );
@@ -83,6 +86,10 @@ describe("RetryPanel", () => {
       loop_config: RUN_FIXTURE.loop_config,
       // A rerun keeps the original window — never silently churn_risk.
       journey_window: "onboarding",
+      context_source: "staging",
+      include_features_not_in_current_plan: true,
+      model_tier: RUN_FIXTURE.model_tier,
+      context_promotion_id: "promotion-shared",
     });
     const link = await screen.findByRole("link", { name: /run-2/ });
     expect(link).toHaveAttribute("href", "/runs/run-2");

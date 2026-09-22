@@ -67,6 +67,30 @@ REAL_SEND_ROUTING = "route-to-pro"
 CONFLICTING_ROUTING = "conflict"
 
 
+async def winners_by_run_pro(
+    session: AsyncSession, pairs: set[tuple[str, str]]
+) -> dict[tuple[str, str], str]:
+    """(run_id, pro) -> winner id, where `pro` is the run key OR the contact
+    pro_uuid the context flow resolved for an org_id-keyed run (evidence)."""
+    if not pairs:
+        return {}
+    rows = (
+        await session.execute(
+            select(WinnerRow.id, WinnerRow.run_id, WinnerRow.pro_id, WinnerRow.evidence).where(
+                WinnerRow.run_id.in_({run for run, _ in pairs}), WinnerRow.kind == "winner"
+            )
+        )
+    ).all()
+    # Exact run key first; a resolved contact never overrides it (two orgs in
+    # one run could resolve to the same admin, or a run could mix id kinds).
+    found = {(r.run_id, r.pro_id): r.id for r in rows if (r.run_id, r.pro_id) in pairs}
+    for row in rows:
+        contact = row.evidence.get("pro_uuid")
+        if contact and (row.run_id, contact) in pairs:
+            found.setdefault((row.run_id, contact), row.id)
+    return found
+
+
 async def _resolve_run_pro(
     session: AsyncSession, body: list[TouchOutcomeIn]
 ) -> list[TouchOutcomeIn]:
@@ -91,16 +115,7 @@ async def _resolve_run_pro(
     needs = [item for item in body if not item.recommendation_id]
     if not needs:
         return body
-    rows = (
-        await session.execute(
-            select(WinnerRow.id, WinnerRow.run_id, WinnerRow.pro_id).where(
-                WinnerRow.run_id.in_({item.run_id for item in needs}),
-                WinnerRow.pro_id.in_({item.pro_id for item in needs}),
-                WinnerRow.kind == "winner",
-            )
-        )
-    ).all()
-    by_pair = {(row.run_id, row.pro_id): row.id for row in rows}
+    by_pair = await winners_by_run_pro(session, {(item.run_id, item.pro_id) for item in needs})
     return [
         item
         if item.recommendation_id
@@ -484,7 +499,10 @@ def _apply_item(
             "routing": routing,
             "evidence_limitation": evidence_limitation(winner, exposure, routing, item.delivered),
             "pro_id": item.pro_id,
-            "exposure_id": item.exposure_id,
+            # Only a REGISTERED exposure may be pointed at (exposures FK); an
+            # unknown id stays in recommendation_id and attributes on re-ingest
+            # or the checkpoint sweep once the send lands.
+            "exposure_id": exposure.id if exposure is not None else None,
             "send_status": item.send_status,
             "send_confirmed_at": item.send_confirmed_at,
             **{k: getattr(item, k) for k in _OUTCOME_FLAGS},

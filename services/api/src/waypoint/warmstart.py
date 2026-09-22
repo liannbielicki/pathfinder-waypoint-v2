@@ -61,6 +61,20 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
 # best match falling off the end of the window.
 DEFAULT_SCAN_LIMIT = 200
 
+# One shared band can produce a mathematically perfect score while carrying
+# almost no transfer evidence (for example, segment-only 1A -> 1A).
+MIN_SHARED_FINGERPRINT_FIELDS = 2
+
+
+def _coverage(
+    query_fp: dict[str, str],
+    candidate_fp: dict[str, str],
+    weights: dict[str, float],
+) -> tuple[int, int, int]:
+    query_fields = {field for field in weights if field in query_fp}
+    candidate_fields = {field for field in weights if field in candidate_fp}
+    return len(query_fields), len(candidate_fields), len(query_fields & candidate_fields)
+
 
 def similarity(
     query_fp: dict[str, str],
@@ -117,10 +131,15 @@ async def retrieve(
         "latency_ms": 0.0,
         "best_score": None,
         "outcome": "cold",
+        "query_field_count": 0,
+        "best_candidate_field_count": 0,
+        "best_shared_field_count": 0,
+        "min_shared_fields": MIN_SHARED_FINGERPRINT_FIELDS,
     }
     match: WarmStartMatch | None = None
     try:
         query_fp = build_fingerprint(brief)
+        telemetry["query_field_count"] = _coverage(query_fp, {}, weights)[0]
         rows = (
             await session.execute(
                 select(WinnerRow.id, WinnerRow.fingerprint, WinnerRow.warm_start_evidence)
@@ -134,20 +153,42 @@ async def retrieve(
         ).all()
         telemetry["scanned"] = len(rows)
         best: WarmStartMatch | None = None
+        best_candidate_fields = 0
+        best_shared_fields = 0
         for row in rows:
             mechanism = str((row.warm_start_evidence or {}).get("mechanism") or "")
             if not mechanism:
                 continue  # nothing to seed with; the label IS the payload
-            score = similarity(query_fp, row.fingerprint or {}, weights)
-            if best is None or score > best.score:
+            candidate_fp = row.fingerprint or {}
+            score = similarity(query_fp, candidate_fp, weights)
+            _, candidate_fields, shared_fields = _coverage(query_fp, candidate_fp, weights)
+            candidate_key = (
+                shared_fields >= MIN_SHARED_FINGERPRINT_FIELDS,
+                score,
+                shared_fields,
+            )
+            best_key = (
+                best_shared_fields >= MIN_SHARED_FINGERPRINT_FIELDS,
+                best.score if best is not None else -1.0,
+                best_shared_fields,
+            )
+            if best is None or candidate_key > best_key:
                 best = WarmStartMatch(
                     mechanism=mechanism,
                     score=score,
                     winner_id=row.id,
                     fingerprint_version=FINGERPRINT_VERSION,
                 )
+                best_candidate_fields = candidate_fields
+                best_shared_fields = shared_fields
         telemetry["best_score"] = best.score if best is not None else None
-        if best is not None and best.score >= threshold:
+        telemetry["best_candidate_field_count"] = best_candidate_fields
+        telemetry["best_shared_field_count"] = best_shared_fields
+        if (
+            best is not None
+            and best.score >= threshold
+            and best_shared_fields >= MIN_SHARED_FINGERPRINT_FIELDS
+        ):
             match, telemetry["outcome"] = best, "warm"
     except Exception as error:  # degraded cold start, never a crash
         # The caller writes the round's candidate/ledger rows through THIS
@@ -169,11 +210,17 @@ async def retrieve(
         )
     telemetry["latency_ms"] = round((perf_counter() - started) * 1000, 3)
     log.info(
-        "warm_start outcome=%s scanned=%s latency_ms=%s best_score=%s threshold=%s",
+        "warm_start outcome=%s scanned=%s latency_ms=%s best_score=%s threshold=%s "
+        "query_field_count=%s best_candidate_field_count=%s "
+        "best_shared_field_count=%s min_shared_fields=%s",
         telemetry["outcome"],
         telemetry["scanned"],
         telemetry["latency_ms"],
         telemetry["best_score"],
         threshold,
+        telemetry["query_field_count"],
+        telemetry["best_candidate_field_count"],
+        telemetry["best_shared_field_count"],
+        telemetry["min_shared_fields"],
     )
     return match, telemetry

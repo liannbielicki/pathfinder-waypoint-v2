@@ -10,6 +10,17 @@ const FLEET_SETTINGS = {
     CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
   max_in_flight_llm_calls: 7,
+  models: { fast: "claude-haiku-4-5", deep: "claude-sonnet-5" },
+  staging_context_available: true,
+  staging_context: {
+    promotion_id: "promotion-shared",
+    context_catalog_version_id: "context-shared",
+    context_catalog_name: "Shared context",
+    feature_catalog_version_id: "features-shared",
+    feature_catalog_name: "September features",
+    included_variables: 287,
+    created_at: "2026-09-18T16:04:05Z",
+  },
 };
 
 function stubFetch(overrides?: {
@@ -49,6 +60,20 @@ async function fillRequiredInputs() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("RunStart", () => {
+  it("defaults new runs to the configured deep model and permits fast override", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText(/deep.*claude-sonnet-5/i)).toBeChecked(),
+    );
+    await fillRequiredInputs();
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0].model_tier).toBe("deep");
+
+    await userEvent.click(screen.getByLabelText(/fast.*claude-haiku-4-5/i));
+    expect(screen.getByLabelText(/fast.*claude-haiku-4-5/i)).toBeChecked();
+  });
   it("autofills the audience run timestamp with now (UTC, editable)", () => {
     stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
@@ -97,10 +122,10 @@ describe("RunStart", () => {
       expect(screen.getByLabelText(/max rounds per pro/i)).toBeInTheDocument(),
     );
     for (const label of [
-      /pro ids/i, /audience run/i, /channel/i,
+      /pro ids/i, /audience run/i, /channel: sms/i, /channel: email/i, /channel: call/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
-      /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
+      /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
@@ -212,6 +237,20 @@ describe("RunStart", () => {
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
   });
 
+  it("sends every channel by default and drops an unchecked one", async () => {
+    const { createCalls } = stubFetch();
+    const onStarted = vi.fn();
+    render(<RunStart onStarted={onStarted} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByLabelText(/channel: call/i));
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
+    expect(createCalls[0]).toEqual(
+      expect.objectContaining({ channels: ["sms", "email"] }),
+    );
+  });
+
   it("sends the selected journey window", async () => {
     const { createCalls } = stubFetch();
     const onStarted = vi.fn();
@@ -226,6 +265,86 @@ describe("RunStart", () => {
     expect(createCalls[0]).toEqual(
       expect.objectContaining({ journey_window: "onboarding" }),
     );
+  });
+
+  it("defaults to Standard and submits a numeric organization ID in Staging", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.getByLabelText(/standard context/i)).toBeChecked();
+    expect(screen.getByLabelText(/pro ids \(one per line\)/i)).toHaveValue("pro_1");
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+    expect(screen.getByLabelText(/include features not in the current plan/i))
+      .not.toBeChecked();
+    await userEvent.click(
+      screen.getByLabelText(/include features not in the current plan/i),
+    );
+    const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
+    await userEvent.clear(organizationIds);
+    await userEvent.type(organizationIds, "31336");
+    expect(screen.getByText(/staging uses/i)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0]).toEqual(expect.objectContaining({
+      context_source: "staging",
+      context_promotion_id: "promotion-shared",
+      include_features_not_in_current_plan: true,
+      pro_ids: ["31336"],
+    }));
+  });
+
+  it("hides the plan-availability toggle for Standard context", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+
+    expect(screen.queryByLabelText(/include features not in the current plan/i))
+      .not.toBeInTheDocument();
+  });
+
+  it("blocks organization IDs outside five or six digits in Staging", async () => {
+    const { createCalls } = stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await fillRequiredInputs();
+    await screen.findByLabelText(/max rounds per pro/i);
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+    const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
+    await userEvent.clear(organizationIds);
+    await userEvent.type(organizationIds, "1234");
+    await userEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /five- or six-digit organization ids/i,
+    );
+    expect(createCalls).toEqual([]);
+  });
+
+  it("shows the exact active catalog and second-precise timestamp for Staging", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+
+    await userEvent.click(screen.getByLabelText(/staging context/i));
+
+    expect(screen.getByText("Shared context")).toBeVisible();
+    expect(screen.getByText("context-shared")).toBeVisible();
+    expect(screen.getByText("September features")).toBeVisible();
+    expect(screen.getByText("features-shared")).toBeVisible();
+    expect(screen.getByText(/287 approved variables/i)).toBeVisible();
+    const expected = new Intl.DateTimeFormat("en-US", {
+      timeZoneName: "short", year: "numeric", month: "short", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+    }).format(new Date(FLEET_SETTINGS.staging_context.created_at));
+    expect(screen.getByText(new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"))).toBeVisible();
+  });
+
+  it("disables Staging context when its Railway URL is unavailable", async () => {
+    stubFetch({ settings: { ...FLEET_SETTINGS, staging_context_available: false } });
+    render(<RunStart onStarted={vi.fn()} />);
+    await screen.findByLabelText(/max rounds per pro/i);
+    expect(screen.getByLabelText(/staging context/i)).toBeDisabled();
+    expect(screen.getByLabelText(/standard context/i)).toBeChecked();
   });
 
   it("offers the ungated churn-risk window and sends it", async () => {

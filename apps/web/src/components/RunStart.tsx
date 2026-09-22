@@ -30,13 +30,17 @@ const LOOP_FIELDS: LoopField[] = [
     help: "A reduction above this ends the search as a success.", min: 0 },
   { key: "CANDIDATE_COUNT", label: "Ideas per round",
     help: "How many candidate ideas are generated and ranked each round.", min: 1 },
-  { key: "TIE_MARGIN", label: "Ranker tie margin (0-1)",
-    help: "Ranker-score gap at or under which the top two candidates are both persona-screened.",
+  { key: "TIE_MARGIN", label: "Near-tie evidence margin (0-1)",
+    help: "Labels close ranker scores in the audit evidence; every candidate is persona-screened.",
     min: 0 },
   { key: "WARM_START_THRESHOLD", label: "Warm-start similarity (0-1)",
     help: "How similar a past validated winner's Pro must be before its mechanism seeds round 1.",
     min: 0 },
 ];
+
+// Same vocabulary as waypoint.models.CHANNELS; the API rejects anything else.
+const CHANNELS = ["sms", "email", "call"] as const;
+type Channel = (typeof CHANNELS)[number];
 
 export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [proIds, setProIds] = useState("");
@@ -45,8 +49,14 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
   const [audienceRun, setAudienceRun] = useState(
     () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   );
-  const [channel, setChannel] = useState("sms");
-  const [journeyWindow, setJourneyWindow] = useState("churn_risk");
+  const [channels, setChannels] = useState<Channel[]>([...CHANNELS]);
+  const [journeyWindow, setJourneyWindow] = useState("churn_risk_open");
+  const [contextSource, setContextSource] = useState<"standard" | "staging">("standard");
+  const [includeFeaturesNotInCurrentPlan, setIncludeFeaturesNotInCurrentPlan] = useState(false);
+  const [modelTier, setModelTier] = useState<"fast" | "deep">("deep");
+  const [models, setModels] = useState({ fast: "fast", deep: "deep" });
+  const [stagingAvailable, setStagingAvailable] = useState(false);
+  const [stagingContext, setStagingContext] = useState<Awaited<ReturnType<typeof getFleetSettings>>["staging_context"]>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaults, setDefaults] = useState<Record<string, number> | null>(null);
@@ -63,6 +73,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         if (cancelled) return;
         setDefaults(settings.loop_defaults);
         setFleetCap(settings.max_in_flight_llm_calls);
+        setStagingAvailable(settings.staging_context_available);
+        setStagingContext(settings.staging_context);
+        setModels(settings.models);
         // Only fields the server actually advertises get a value. A key the
         // API does not know (an older API than this UI) would otherwise render
         // as the string "undefined" — an empty number input that reads as
@@ -128,6 +141,11 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       setError(invalid);
       return;
     }
+    if (contextSource === "staging" && ids.some((id) => !/^\d{5,6}$/.test(id))) {
+      focusField("pro-ids");
+      setError("Staging context requires five- or six-digit organization IDs.");
+      return;
+    }
     setBusy(true);
     const overrides = Object.fromEntries(
       LOOP_FIELDS.filter((f) => changed(f.key))
@@ -141,8 +159,17 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
         // the run; the pipeline overwrites it with the authoritative value.
         audience_query: PENDING_AUDIENCE_QUERY,
         audience_run: audienceRun,
-        channels: [channel],
+        channels,
         journey_window: journeyWindow as RunCreateInput["journey_window"],
+        context_source: contextSource,
+        include_features_not_in_current_plan:
+          contextSource === "staging" && includeFeaturesNotInCurrentPlan,
+        model_tier: modelTier,
+        ...(contextSource === "staging" && stagingContext
+          ? {
+              context_promotion_id: stagingContext.promotion_id,
+            }
+          : {}),
         ...(Object.keys(overrides).length ? { loop_config: overrides } : {}),
       });
       onStarted(run);
@@ -162,7 +189,11 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
 
       <fieldset>
         <legend>Run inputs</legend>
-        <label htmlFor="pro-ids">Pro IDs (one per line)</label>
+        <label htmlFor="pro-ids">
+          {contextSource === "staging"
+            ? "Organization IDs (one per line)"
+            : "Pro IDs (one per line)"}
+        </label>
         <textarea
           id="pro-ids"
           value={proIds}
@@ -182,11 +213,42 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           placeholder="2026-08-06T18:00:00Z"
           required
         />
-        <label htmlFor="channel">Channel</label>
-        <select id="channel" value={channel} onChange={(e) => setChannel(e.target.value)}>
-          <option value="sms">sms</option>
-          <option value="email">email</option>
-        </select>
+        <div>
+          <span>Channels (Waypoint picks per idea)</span>
+          {CHANNELS.map((c) => (
+            <label key={c} className="check-row" htmlFor={`channel-${c}`}>
+              <input
+                id={`channel-${c}`}
+                type="checkbox"
+                checked={channels.includes(c)}
+                onChange={(e) =>
+                  setChannels(e.target.checked
+                    ? CHANNELS.filter((x) => x === c || channels.includes(x))
+                    : channels.filter((x) => x !== c))
+                }
+              />
+              Channel: {c}
+            </label>
+          ))}
+        </div>
+        <div>
+          <span>Model</span>
+          {(["deep", "fast"] as const).map((tier) => (
+            <label key={tier} htmlFor={`model-${tier}`}>
+              <input
+                id={`model-${tier}`}
+                type="radio"
+                name="model-tier"
+                checked={modelTier === tier}
+                onChange={() => setModelTier(tier)}
+              />
+              {tier === "deep" ? "Deep" : "Fast"} ({models[tier]})
+            </label>
+          ))}
+        </div>
+        <p className="helper">
+          Deep is the default for idea generation and evaluation; Fast is cheaper.
+        </p>
         <label htmlFor="journey-window">Journey window</label>
         <select
           id="journey-window"
@@ -204,6 +266,56 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           The customer state this run optimizes a touch for. Touches are
           selected for return-to-app impact within this window.
         </p>
+        <div>
+          <span>Context source</span>
+          <label htmlFor="context-standard">
+            <input
+              id="context-standard"
+              type="radio"
+              name="context-source"
+              checked={contextSource === "standard"}
+              onChange={() => setContextSource("standard")}
+            />
+            Standard context
+          </label>
+          <label htmlFor="context-staging">
+            <input
+              id="context-staging"
+              type="radio"
+              name="context-source"
+              checked={contextSource === "staging"}
+              disabled={!stagingAvailable}
+              onChange={() => setContextSource("staging")}
+            />
+            Staging context
+          </label>
+        </div>
+        <p className="helper">
+          {contextSource === "staging"
+            ? stagingContext
+              ? <>Staging uses <strong>{stagingContext.context_catalog_name}</strong> (<code>{stagingContext.context_catalog_version_id}</code>) with <strong>{stagingContext.feature_catalog_name}</strong> (<code>{stagingContext.feature_catalog_version_id}</code>) · {stagingContext.included_variables} approved variables · {new Intl.DateTimeFormat("en-US", { timeZoneName: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date(stagingContext.created_at))}.</>
+              : "Staging is not ready because no active approved Workbench catalog is available."
+            : "Standard uses today&apos;s production workflow."}
+        </p>
+        {contextSource === "staging" && (
+          <>
+            <label htmlFor="include-features-not-in-current-plan">
+              <input
+                id="include-features-not-in-current-plan"
+                type="checkbox"
+                checked={includeFeaturesNotInCurrentPlan}
+                onChange={(event) => setIncludeFeaturesNotInCurrentPlan(event.target.checked)}
+              />
+              Include features not in the current plan
+            </label>
+            <p className="helper">
+              Off excludes only features proven unavailable on the organization&apos;s
+              current Core SaaS plan. On includes those features labeled as not included
+              in the current plan. Add-ons and unknown plan coverage stay included and
+              are labeled unknown.
+            </p>
+          </>
+        )}
       </fieldset>
 
       <fieldset disabled={defaults === null}>

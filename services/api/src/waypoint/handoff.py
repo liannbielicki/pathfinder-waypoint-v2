@@ -13,6 +13,7 @@ side is also idempotent per (batch, row_id), so retrying the whole batch is
 always safe.
 """
 
+import logging
 import typing
 from typing import Any, Literal, cast
 
@@ -23,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.models import PENDING_AUDIENCE_QUERY, HandoffReceipt
 from waypoint.tables import CandidateRow, HandoffRow, MeasurementRow, RunRow, WinnerRow
+
+log = logging.getLogger("waypoint.handoff")
 
 if typing.TYPE_CHECKING:
     from waypoint.settings import Settings
@@ -243,22 +246,46 @@ async def ready_rows(
     rows: list[dict[str, Any]] = []
     for winner in winners:
         candidate = candidates_by_id.get(winner.candidate_id) if winner.candidate_id else None
+        if candidate is not None and candidate.recommendation.get("channel") not in {
+            "sms", "email"
+        }:
+            continue  # call/operator work and malformed legacy values never reach LCM
         if winner.id in measured_winner_ids and candidate is not None:
-            rows.append(
-                {
-                    "pro_uuid": winner.pro_id,
-                    # Title AND the full customer-moment text: Allison's SMS
-                    # copywriter sees ONLY this field (her journeyStage). The
-                    # concept alone often omits the feature name (it is written
-                    # in plain language), the title alone collapses compound
-                    # themes to their headline, so send both.
-                    "theme": f"{candidate.recommendation['title']}: "
-                    f"{candidate.recommendation['pro_facing_concept']}",
-                    "theme_category": candidate.recommendation["mechanism"],
-                    "org_id": winner.evidence.get("org_id", ""),
-                    "row_id": winner.id,
-                }
+            # The contact pro the context flow resolved for the org; a run keyed
+            # by pro_uuid resolves to itself. An org_id with no resolution is
+            # held back: LCM cannot reach an org_id, and must not be sent one.
+            pro_uuid = str(winner.evidence.get("pro_uuid") or winner.pro_id)
+            if not pro_uuid.startswith("pro_"):
+                log.warning("winner %s: no contact pro resolved for %s; held back",
+                            winner.id, winner.pro_id)
+                continue
+            theme = (
+                f"{candidate.recommendation['title']}: "
+                f"{candidate.recommendation['pro_facing_concept']}"
             )
+            cta = candidate.recommendation.get("cta")
+            if isinstance(cta, dict) and cta.get("label") and cta.get("url"):
+                # LCM's stable intake contract has no CTA fields. Keep the
+                # verified destination inside its existing theme input so the
+                # downstream copywriter can actually use it.
+                theme += f" CTA: {cta['label']} — {cta['url']}"
+            row: dict[str, Any] = {
+                "pro_uuid": pro_uuid,
+                # Title AND the full customer-moment text: Allison's SMS
+                # copywriter sees ONLY this field (her journeyStage). The
+                # concept alone often omits the feature name (it is written
+                # in plain language), the title alone collapses compound
+                # themes to their headline, so send both.
+                "theme": theme,
+                "theme_category": candidate.recommendation["mechanism"],
+                "org_id": winner.evidence.get("org_id", ""),
+                "row_id": winner.id,
+            }
+            # Per-row channel (LCM intake accepts sms|email since 2026-09-15). A
+            # row without one inherits LCM's batch default, which is sms — so an
+            # email winner would be texted. Omit rather than send anything else.
+            row["channel"] = candidate.recommendation["channel"]
+            rows.append(row)
     return rows
 
 

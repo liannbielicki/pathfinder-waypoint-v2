@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { LoginForm } from "@/components/LoginForm";
@@ -14,7 +15,12 @@ export default function Home() {
       {!authed ? (
         <LoginForm onSuccess={() => setAuthed(true)} />
       ) : (
-        <RunStart onStarted={(run) => router.push(`/runs/${run.id}`)} />
+        <>
+          <p>
+            <Link href="/calls">Calls to place →</Link>
+          </p>
+          <RunStart onStarted={(run) => router.push(`/runs/${run.id}`)} />
+        </>
       )}
     </main>
   );

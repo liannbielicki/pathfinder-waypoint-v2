@@ -17,10 +17,14 @@ Redirects are refused so the bearer token is never forwarded.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from waypoint.context_promotion import PromotionStore, compile_promoted_context
+from waypoint.workbench import scrub_pii
 
 log = logging.getLogger("waypoint.n8n")
 
@@ -45,6 +49,7 @@ ALLOWED_FIELDS = (
     "marketing_campaigns_28d_band", "leads_created_28d_band",
     "jobs_reviewed_28d_band", "last_job_activity_band", "wisetack_state",
     "mrr_band", "platform_usage_band",
+    "suggested_channel",
 )
 
 # v2 band field -> the permitted persona-match feature key it maps onto
@@ -65,6 +70,10 @@ _MATCH_FEATURE_MAP = {
 
 class ContextUnavailable(Exception):
     """The context flow could not produce a valid batch. Explicit, never empty."""
+
+
+class ContextConfigurationError(ContextUnavailable):
+    """The configured context endpoint cannot satisfy the runtime contract."""
 
 
 class OrgBrief(BaseModel):
@@ -117,6 +126,13 @@ class OrgBrief(BaseModel):
     wisetack_state: str | None = None
     mrr_band: str | None = None
     platform_usage_band: str | None = None
+    suggested_channel: str | None = None
+    curated_context: dict[str, Any] | None = Field(default=None, exclude=True)
+    # Identifiers, not context: the numeric org id the run was keyed by and the
+    # contact pro the context flow resolved for it (founding admin). The LCM
+    # handoff sends pro_uuid; Iterable/Amplitude report on it.
+    pro_uuid: str | None = None
+    org_id: str | None = None
 
     @property
     def pro_id(self) -> str:
@@ -125,13 +141,31 @@ class OrgBrief(BaseModel):
         # `brief.pro_id` working unchanged.
         return self.org_uuid
 
-    def match_feature_map(self) -> dict[str, str]:
-        out: dict[str, str] = {}
+    def match_feature_map(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
         for source, key in _MATCH_FEATURE_MAP.items():
             value = getattr(self, source)
             if value is not None:
                 out[key] = value
+        for field_name in type(self).model_fields:
+            if not field_name.startswith("feature_") or not field_name.endswith("_state"):
+                continue
+            state = getattr(self, field_name)
+            if state is None:
+                continue
+            key = field_name.removeprefix("feature_").removesuffix("_state")
+            key = {"online_booking": "booking"}.get(key, key)
+            if state == "not_attached":
+                out[f"{key}_attached"] = False
+            elif state in {"attached_active", "attached_unused", "attached_usage_unknown"}:
+                out[f"{key}_attached"] = True
         return out
+
+    def suggested_outreach_channel(self) -> str | None:
+        curated = (self.curated_context or {}).get("v") or {}
+        value = curated.get("suggested_channel", self.suggested_channel)
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in {"sms", "email", "call"} else None
 
     def calibration_cell(self) -> str | None:
         # ponytail: calibration cards are keyed `segment|plan|tenure` in v1
@@ -154,7 +188,12 @@ class OrgContextBatch(BaseModel):
     audience_query_version: str | None = None
 
 
-def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
+def _brief_from_row(
+    row: dict[str, Any],
+    promotion: Mapping[str, Any] | None = None,
+    *,
+    promotion_required: bool = False,
+) -> OrgBrief:
     """Project one wire row onto the allowlist: verify the version, keep only
     allowlisted fields (dropping any stray column — the PII guard), tolerate
     absent ones."""
@@ -167,11 +206,41 @@ def _brief_from_row(row: dict[str, Any]) -> OrgBrief:
         raise ValueError("context row missing org_uuid")
     # Restores the v1 "unexpected column" tripwire as a signal (not a hard
     # fail): the projection below still drops anything off the allowlist.
-    dropped = set(row) - set(ALLOWED_FIELDS) - {"org_uuid", "contract_version"}
+    aliases = {"RECOMMENDED_ACTION", "recommended_action"}
+    dropped = set(row) - set(ALLOWED_FIELDS) - aliases - {"org_uuid", "contract_version"}
     if dropped:
         log.debug("dropped non-allowlisted context fields: %s", sorted(dropped))
     projected: dict[str, Any] = {"org_uuid": row["org_uuid"]}
     projected.update({k: row[k] for k in ALLOWED_FIELDS if k in row})
+    for alias in ("RECOMMENDED_ACTION", "recommended_action"):
+        if alias in row and "suggested_channel" not in projected:
+            projected["suggested_channel"] = row[alias]
+    bundle = promotion
+    if promotion_required and bundle is None:
+        raise ValueError("staging context promotion artifact is missing")
+    if bundle is not None:
+        by_case = {str(key).casefold(): value for key, value in row.items()}
+        promoted_values: dict[str, Any] = {}
+        rules = bundle.get("rules")
+        if isinstance(rules, list):
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                canonical = str(rule.get("canonical_key") or "")
+                if canonical.casefold() in by_case:
+                    safe_value, pii_ledger = scrub_pii({
+                        canonical: by_case[canonical.casefold()]
+                    })
+                    if not pii_ledger and canonical in safe_value:
+                        promoted_values[canonical] = safe_value[canonical]
+                    else:
+                        log.warning(
+                            "dropped promoted value that failed the PII gate: %s",
+                            canonical,
+                        )
+        projected["curated_context"] = compile_promoted_context(
+            promoted_values, bundle
+        )
     return OrgBrief(**projected)
 
 
@@ -205,12 +274,16 @@ class N8NContextClient:
         attempts: int = 3,
         backoff_seconds: float = 15.0,
         client: httpx.AsyncClient | None = None,
+        promotion_store: PromotionStore | None = None,
+        promotion_loader: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
     ) -> None:
         # ponytail: 5-id batches match the existing n8n validate-node cap.
         self.url = url
         self.batch_size = batch_size
         self.attempts = attempts
         self.backoff_seconds = backoff_seconds
+        self._promotion_store = promotion_store
+        self._promotion_loader = promotion_loader
         # One shared client instance serves every worker loop, so this
         # semaphore is the process-wide cap on concurrent n8n executions —
         # the flow (Snowflake + Iterable behind it) degrades badly when all
@@ -251,9 +324,24 @@ class N8NContextClient:
         # and routes them.
         organizations: list[OrgBrief] = []
         query_version: str | None = None
+        promotion_required = (
+            self._promotion_store is not None or self._promotion_loader is not None
+        )
+        promotion = (
+            await self._promotion_loader()
+            if self._promotion_loader is not None
+            else self._promotion_store.read_active()
+            if self._promotion_store is not None
+            else None
+        )
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
             response = await self._post_chunk(chunk)
+            if response.status_code == 202:
+                raise ContextConfigurationError(
+                    "N8N_CONTEXT_URL returned asynchronous 202 Accepted; "
+                    "it must target the synchronous Standard workflow that returns rows"
+                )
             if response.status_code != 200:
                 raise ContextUnavailable(
                     f"n8n context flow returned {response.status_code} for {len(chunk)} ids"
@@ -270,7 +358,17 @@ class N8NContextClient:
                 None,
             )
             try:
-                pairs = [(row, _brief_from_row(row)) for row in rows]
+                pairs = [
+                    (
+                        row,
+                        _brief_from_row(
+                            row,
+                            promotion,
+                            promotion_required=promotion_required,
+                        ),
+                    )
+                    for row in rows
+                ]
             except (ValueError, KeyError, TypeError) as error:
                 raise ContextUnavailable(f"n8n context contract violation: {error}") from error
             # The flow accepts three id spaces (numeric org id, pro_<hex>

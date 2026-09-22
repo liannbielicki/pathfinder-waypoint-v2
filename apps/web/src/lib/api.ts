@@ -3,6 +3,8 @@ import type { components } from "./api-types";
 export type RunView = components["schemas"]["RunView"];
 export type RunCreate = components["schemas"]["RunCreate"];
 export type HandoffResponse = components["schemas"]["HandoffResponse"];
+export type CallItem = components["schemas"]["CallItem"];
+export type CallUpdate = components["schemas"]["CallUpdate"];
 
 // The evidence payloads are JSONB on the wire; these shapes mirror what the
 // pipeline persists (see services/api/src/waypoint/pipeline.py).
@@ -12,12 +14,16 @@ export interface PanelItem {
   family: string;
   role: string;
   fit_score: number;
+  coverage_score?: number;
   rationale: string;
+  reused?: boolean;
 }
 
 export interface PanelEvidence {
   panel?: { items?: PanelItem[]; snapshot_version?: string };
   reactions?: number[];
+  tier?: string;
+  model?: string;
 }
 
 export interface Candidate {
@@ -69,6 +75,21 @@ export interface EvolveRound {
   mechanism: string;
   outcome: "win" | "lose" | "suppressed" | "unavailable";
   score_pp: number | null;
+  ranking?: {
+    order?: Array<{
+      token: string;
+      candidate_id: string;
+      mechanism: string;
+      rank: number | null;
+      score: number | null;
+    }>;
+    selection_reason?: string;
+    ranker_model?: string;
+    screen_model?: string;
+    screen_scores_pp?: Record<string, number | null>;
+    warm_start?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 }
 
 export type RunDetail = Omit<
@@ -109,7 +130,17 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include",
     headers: { "content-type": "application/json", ...init?.headers },
   });
-  if (!response.ok) throw new ApiError(response.status, await response.text());
+  if (!response.ok) {
+    const body = await response.text();
+    let detail = body;
+    try {
+      const payload = JSON.parse(body) as { detail?: unknown };
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      // Keep the provider's plain-text response.
+    }
+    throw new ApiError(response.status, detail);
+  }
   return response.json() as Promise<T>;
 }
 
@@ -122,6 +153,7 @@ export const login = (password: string) =>
 // The server defaults journey_window; callers (RetryPanel) may omit it.
 export type RunCreateInput = Omit<RunCreate, "journey_window"> & {
   journey_window?: RunCreate["journey_window"];
+  context_source?: "standard" | "staging";
 };
 
 export const createRun = (body: RunCreateInput) =>
@@ -130,6 +162,17 @@ export const createRun = (body: RunCreateInput) =>
 export interface FleetSettings {
   loop_defaults: Record<string, number>;
   max_in_flight_llm_calls: number;
+  models: { fast: string; deep: string };
+  staging_context_available: boolean;
+  staging_context: {
+    promotion_id: string;
+    context_catalog_version_id: string;
+    context_catalog_name: string;
+    feature_catalog_version_id: string;
+    feature_catalog_name: string;
+    included_variables: number;
+    created_at: string;
+  } | null;
 }
 
 export const getFleetSettings = () => api<FleetSettings>("/fleet/settings");
@@ -141,3 +184,9 @@ export const killRun = (id: string) =>
 
 export const createHandoff = (id: string) =>
   api<HandoffResponse>(`/runs/${id}/handoff`, { method: "POST" });
+
+// Call-channel winners are worked by operators, never sent to LCM.
+export const getCalls = () => api<CallItem[]>("/calls");
+
+export const updateCall = (winnerId: string, body: CallUpdate) =>
+  api<CallItem>(`/calls/${winnerId}`, { method: "PATCH", body: JSON.stringify(body) });

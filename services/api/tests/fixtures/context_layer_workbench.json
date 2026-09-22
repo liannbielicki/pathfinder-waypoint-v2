@@ -1,0 +1,17 @@
+{
+  "firmographics": {
+    "industry": "heating_and_air_conditioning",
+    "segment": "small_business",
+    "company_size_range": "1-2",
+    "primary_contact_name": "Karla Bravo LaPointe"
+  },
+  "features": [
+    {
+      "name": "hcp_assist",
+      "display_name": "HCP AI",
+      "recommendation": "adopt",
+      "recommendation_pitch_rank": 1,
+      "sentiment": "neutral"
+    }
+  ]
+}

@@ -1,6 +1,9 @@
+import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 from pytest_httpx import HTTPXMock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +12,7 @@ from tests.conftest import TEST_SETTINGS
 from waypoint.api import create_app
 from waypoint.tables import (
     CandidateRow,
+    ContextPromotionRow,
     EvolveRoundRow,
     HandoffRow,
     JobRow,
@@ -16,6 +20,8 @@ from waypoint.tables import (
     RunRow,
     TouchOutcomeRow,
     WinnerRow,
+    WorkbenchCatalogVersionRow,
+    WorkbenchJobRow,
 )
 
 RUN_REQUEST = {
@@ -25,6 +31,35 @@ RUN_REQUEST = {
     "channels": ["sms"],
 }
 
+
+def _ready_staging_rows() -> list[object]:
+    return [
+        WorkbenchCatalogVersionRow(
+            id="context-ready", kind="context", name="Ready context",
+            entries=[], details={"feature_catalog_version_id": "features-ready"},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-ready", kind="feature", name="Ready features",
+            entries=[], details={},
+        ),
+        ContextPromotionRow(
+            id="promotion-ready",
+            active=True,
+            bundle={
+                "id": "promotion-ready",
+                "context_catalog_version_id": "context-ready",
+                "feature_catalog_version_id": "features-ready",
+                "rules": [],
+            },
+        ),
+    ]
+
+
+
+async def test_run_api_rejects_unknown_channel(client: httpx.AsyncClient) -> None:
+    await client.post("/api/auth/login", json={"password": "operator-password"})
+    bad = {**RUN_REQUEST, "channels": ["fax"]}
+    assert (await client.post("/api/runs", json=bad)).status_code == 422
 
 
 async def test_run_api_requires_session(client: httpx.AsyncClient) -> None:
@@ -53,6 +88,7 @@ async def test_start_returns_202_before_worker_runs(
     body = response.json()
     assert body["status"] == "queued"
     assert body["audience_query"] == "audience_v7"
+    assert body["context_source"] == "standard"
     # A queued job exists for the run and the run budget comes from settings.
     job = (await db_session.execute(select(JobRow).where(JobRow.run_id == body["id"]))).scalar_one()
     assert job.status == "queued"
@@ -97,6 +133,7 @@ async def test_run_detail_exposes_per_pro_loop_rounds(
         EvolveRoundRow(
             run_id=created["id"], pro_id="pro_1", round=1,
             mechanism="discount", outcome="win", score_pp=1.2,
+            ranking={"selection_reason": "all_rankable_candidates_screened"},
         )
     )
     await db_session.commit()
@@ -108,6 +145,7 @@ async def test_run_detail_exposes_per_pro_loop_rounds(
             "mechanism": "discount",
             "outcome": "win",
             "score_pp": 1.2,
+            "ranking": {"selection_reason": "all_rankable_candidates_screened"},
         }
     ]
 
@@ -190,7 +228,8 @@ async def test_handoff_creates_durable_receipt(
         run_id=run_id,
         pro_id="pro_1",
         recommendation={"title": "T", "mechanism": "invoice_delivery",
-                        "pro_facing_concept": "C", "manager_rationale": "R"},
+                        "pro_facing_concept": "C", "manager_rationale": "R",
+                        "channel": "sms"},
     )
     db_session.add(candidate)
     await db_session.flush()
@@ -236,7 +275,7 @@ async def test_handoff_creates_durable_receipt(
     # Pathfinder Intake API shape: pro_uuid only, no email/name PII.
     assert row.payload == {
         "pro_uuid": "pro_1", "theme": "T: C", "theme_category": "invoice_delivery",
-        "org_id": "org_1", "row_id": winner.id,
+        "org_id": "org_1", "row_id": winner.id, "channel": "sms",
     }
 
 
@@ -350,6 +389,31 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
     }
 
 
+async def test_run_model_tier_defaults_deep_and_can_be_overridden(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    deep = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    assert deep["model_tier"] == "deep"
+    deep_row = await db_session.get(RunRow, deep["id"])
+    assert deep_row is not None and deep_row.model_tier == "deep"
+
+    fast = (
+        await auth_client.post("/api/runs", json={**RUN_REQUEST, "model_tier": "fast"})
+    ).json()
+    assert fast["model_tier"] == "fast"
+
+
+async def test_fleet_settings_exposes_actual_models(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    settings = (await auth_client.get("/api/fleet/settings")).json()
+    assert settings["models"] == {
+        "fast": "claude-haiku-4-5",
+        "deep": "claude-sonnet-5",
+    }
+
+
 async def test_confirmed_override_snapshots_and_updates_persisted_defaults(
     auth_client: httpx.AsyncClient,
     db_session: AsyncSession,
@@ -396,10 +460,959 @@ async def test_fleet_settings_endpoint_exposes_defaults_and_the_cap(
     body = response.json()
     assert body["max_in_flight_llm_calls"] == 4
     assert body["loop_defaults"]["MAX_ROUNDS"] == 10
+    assert body["staging_context_available"] is False
+    assert body["staging_context"] is None
+
+
+async def test_staging_run_is_rejected_when_workbench_url_is_unavailable(
+    db_session_factory,
+) -> None:
+    from waypoint.api import create_app
+
+    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_WORKBENCH": None})
+    app = create_app(settings=settings, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        response = await client.post(
+            "/api/runs", json={**RUN_REQUEST, "context_source": "staging"}
+        )
+
+    assert response.status_code == 422
+    assert "staging" in response.text.casefold()
+
+
+async def test_staging_readiness_ignores_deprecated_staging_url(
+    db_session_factory,
+    db_session: AsyncSession,
+) -> None:
+    from waypoint.api import create_app
+
+    settings = TEST_SETTINGS.model_copy(update={"N8N_CONTEXT_URL_STAGING": None})
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
+    app = create_app(settings=settings, session_factory=db_session_factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        response = await client.get("/api/fleet/settings")
+
+    assert response.status_code == 200
+    assert response.json()["staging_context_available"] is True
+
+
+@pytest.mark.parametrize("invalid", ["pro_abc", "1234", "1234567"])
+async def test_staging_rejects_ids_outside_five_or_six_digits_before_enqueue(
+    auth_client: httpx.AsyncClient,
+    invalid: str,
+) -> None:
+    response = await auth_client.post(
+        "/api/runs",
+        json={**RUN_REQUEST, "pro_ids": [invalid], "context_source": "staging"},
+    )
+
+    assert response.status_code == 422
+    assert "five- or six-digit organization id" in response.text.casefold()
+
+
+async def test_staging_preserves_numeric_organization_id_as_a_string(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
+    response = await auth_client.post(
+        "/api/runs",
+        json={
+            **RUN_REQUEST,
+            "pro_ids": ["31336"],
+            "context_source": "staging",
+            "context_promotion_id": "promotion-ready",
+            "include_features_not_in_current_plan": True,
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["pro_ids"] == ["31336"]
+    assert response.json()["audience_query"] == "workbench:promotion-ready"
+    assert response.json()["include_features_not_in_current_plan"] is True
+    persisted = await db_session.get(RunRow, response.json()["id"])
+    assert persisted is not None
+    assert persisted.include_features_not_in_current_plan is True
+
+
+async def test_staging_callback_compiles_compact_context_and_requeues_once(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    promotion = ContextPromotionRow(
+        id="promotion-callback",
+        active=True,
+        bundle={
+            "id": "promotion-callback",
+            "rules": [{
+                "source_key": "SAFE_SIGNAL",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "safe_signal",
+                "related_features": ["checklists"],
+            }, {
+                "source_key": "RAW_PROFILE",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "raw_profile",
+                "related_features": [],
+            }],
+            "feature_catalog": [{
+                "feature": "checklists",
+                "Plans": "Core SaaS Essentials, Core SaaS MAX, Core SaaS MAX+",
+                "Value Statement": "Create reusable job checklists.",
+            }],
+        },
+    )
+    run = RunRow(
+        id="run-callback",
+        pro_ids=["889901"],
+        audience_query="workbench:promotion-callback",
+        audience_run="2026-09-18T18:00:00Z",
+        channels=["sms"],
+        context_source="staging",
+        include_features_not_in_current_plan=True,
+        cost_limit=Decimal("25.00"),
+        status="waiting",
+    )
+    job = JobRow(
+        id="job-callback",
+        run_id=run.id,
+        stage="pro",
+        pro_id="889901",
+        status="waiting",
+        checkpoint={"staging_request": {"promotion_id": promotion.id}},
+    )
+    db_session.add_all([promotion, run])
+    await db_session.flush()
+    db_session.add(job)
+    await db_session.commit()
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
+    payload = {
+        "request_id": job.id,
+        "organization_id": "889901",
+        "promotion_id": promotion.id,
+        "rows": [
+            {
+                "VARIABLE_NAME": "ORG_SNAPSHOT",
+                "VALUE": {
+                    "ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192",
+                    "CORE_SAAS_PLAN_LEVEL": "Basic",
+                },
+            },
+            {
+                "VARIABLE_NAME": "SAFE_SIGNAL",
+                "VALUE": 7,
+                "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+            },
+            {
+                "VARIABLE_NAME": "RAW_PROFILE",
+                "VALUE": {"email": "must-not-persist@example.test"},
+                "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+            },
+        ],
+    }
+    headers = {"authorization": "Bearer test"}
+
+    first = await client.post("/api/context/staging/callback", json=payload, headers=headers)
+    second = await client.post("/api/context/staging/callback", json=payload, headers=headers)
+
+    await db_session.refresh(job)
+    assert first.status_code == 200
+    assert first.json()["status"] == "queued"
+    assert second.status_code == 200
+    assert second.json()["status"] == "already_completed"
+    assert job.status == "queued"
+    stored = job.checkpoint["staging_context"]
+    assert stored["promotion_id"] == promotion.id
+    assert stored["brief"]["curated_context"] == {
+        "v": {
+            "core_saas_plan": "Core SaaS Basic",
+            "industry": "HVAC",
+            "safe_signal": 7,
+            "segment": "1A",
+        },
+        "f": {"safe_signal": ["checklists"]},
+        "pc": {
+            "checklists": {
+                "e": "not_in_current_plan",
+                "p": ["Core SaaS Essentials", "Core SaaS MAX", "Core SaaS MAX+"],
+                "v": "Create reusable job checklists.",
+            }
+        },
+    }
+    assert "SAFE_SIGNAL" not in str(stored)
+    assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in str(stored)
+    assert "must-not-persist" not in str(stored)
+
+
+async def test_staging_callback_never_resurrects_a_stopped_job(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    promotion = ContextPromotionRow(
+        id="promotion-stopped",
+        active=True,
+        bundle={
+            "id": "promotion-stopped",
+            "rules": [{
+                "source_key": "SAFE_SIGNAL",
+                "source_table": "ANALYTICS.SIGNALS",
+                "canonical_key": "safe_signal",
+                "related_features": [],
+            }],
+            "feature_catalog": [],
+        },
+    )
+    run = RunRow(
+        id="run-stopped-callback",
+        pro_ids=["889901"],
+        audience_query="workbench:promotion-stopped",
+        audience_run="2026-09-18T18:00:00Z",
+        channels=["sms"],
+        context_source="staging",
+        cost_limit=Decimal("25.00"),
+        status="waiting",
+    )
+    job = JobRow(
+        id="job-stopped-callback",
+        run_id=run.id,
+        stage="pro",
+        pro_id="889901",
+        status="waiting",
+        checkpoint={"staging_request": {"promotion_id": promotion.id}},
+    )
+    db_session.add_all([promotion, run])
+    await db_session.flush()
+    db_session.add(job)
+    await db_session.commit()
+
+    fetch_started = asyncio.Event()
+    finish_fetch = asyncio.Event()
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        assert organization_id == "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+        fetch_started.set()
+        await finish_fetch.wait()
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.api.ContextLayerClient.fetch", fake_context_layer)
+    callback = asyncio.create_task(
+        client.post(
+            "/api/context/staging/callback",
+            json={
+                "request_id": job.id,
+                "organization_id": "889901",
+                "promotion_id": promotion.id,
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_SNAPSHOT",
+                        "VALUE": {"ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"},
+                    },
+                    {
+                        "VARIABLE_NAME": "SAFE_SIGNAL",
+                        "VALUE": 7,
+                        "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
+                    },
+                ],
+            },
+            headers={"authorization": "Bearer test"},
+        )
+    )
+    await fetch_started.wait()
+    run.status = "stopped"
+    job.status = "stopped"
+    await db_session.commit()
+    finish_fetch.set()
+    response = await callback
+
+    await db_session.refresh(job)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert job.status == "stopped"
+    assert "staging_context" not in job.checkpoint
+
+
+async def test_staging_callback_requires_the_n8n_token(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/context/staging/callback",
+        json={
+            "request_id": "job",
+            "organization_id": "889901",
+            "promotion_id": "promotion",
+            "rows": [],
+        },
+        headers={"authorization": "Bearer wrong"},
+    )
+    assert response.status_code == 401
+
+
+async def test_workbench_snowflake_callback_resumes_the_existing_job(
+    db_session_factory,
+    monkeypatch,
+) -> None:
+    dispatched: dict[str, object] = {}
+    resumed: dict[str, object] = {}
+    context_layer_identifiers: list[str] = []
+
+    async def fake_start(
+        self, organization_id, webhook_url, token, *, request_id, promotion_id,
+        callback_mode="staging",
+    ):
+        dispatched.update({
+            "organization_id": organization_id,
+            "request_id": request_id,
+            "promotion_id": promotion_id,
+            "callback_mode": callback_mode,
+        })
+        return {"status": "accepted", "request_id": request_id}
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        resumed.update(dict(resume_state or {}))
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {"authoring": {"draft": [], "review_exception_count": 0}},
+        }
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        context_layer_identifiers.append(organization_id)
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.hosted_workbench.N8NContextClient.start", fake_start)
+    monkeypatch.setattr(
+        "waypoint.hosted_workbench.ContextLayerClient.fetch", fake_context_layer
+    )
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post("/api/context-workbench/jobs", json={
+            "identifier": "889901",
+            "source_mode": "both",
+            "workbench_mode": "authoring",
+        })
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["state"].get("phase") == "collecting_sources":
+                break
+            await asyncio.sleep(0.01)
+        assert dispatched == {
+            "organization_id": "889901",
+            "request_id": job_id,
+            "promotion_id": "workbench-authoring",
+            "callback_mode": "workbench",
+        }
+
+        callback = await client.post(
+            "/api/context-workbench/source-callback",
+            headers={"authorization": "Bearer test"},
+            json={
+                "request_id": job_id,
+                "organization_id": "889901",
+                "promotion_id": "workbench-authoring",
+                "callback_mode": "workbench",
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_SNAPSHOT",
+                        "VALUE": {
+                            "ORG_UUID": "cc962bf1-13bb-4eea-bf66-f3adc9e22192"
+                        },
+                    },
+                    {"VARIABLE_NAME": "SAFE_SIGNAL", "VALUE": 7},
+                    {"VARIABLE_NAME": "EMAIL", "VALUE": "hidden@example.test"},
+                ],
+            },
+        )
+        assert callback.status_code == 200
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert job["status"] == "completed"
+    assert context_layer_identifiers == ["cc962bf1-13bb-4eea-bf66-f3adc9e22192"]
+    inventory = resumed["inventory"]
+    assert isinstance(inventory, list)
+    inventory_keys = {item["key"] for item in inventory}
+    assert "SAFE_SIGNAL" in inventory_keys
+    assert "context_layer.firmographics.segment" in inventory_keys
+    assert "EMAIL" not in inventory_keys
+
+
+async def test_workbench_evaluation_uses_the_async_scrubbed_source_callback(
+    db_session_factory,
+    monkeypatch,
+) -> None:
+    dispatched: dict[str, object] = {}
+    resumed: dict[str, object] = {}
+
+    async def fake_start(
+        self, organization_id, webhook_url, token, *, request_id, promotion_id,
+        callback_mode="staging",
+    ):
+        dispatched.update({
+            "organization_id": organization_id,
+            "request_id": request_id,
+            "promotion_id": promotion_id,
+            "callback_mode": callback_mode,
+        })
+        return {"status": "accepted", "request_id": request_id}
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        resumed.update(dict(resume_state or {}))
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {"evaluation": {"judge": {"winner": "curated"}}},
+        }
+
+    async def fake_context_layer(self, organization_id, base_url, api_key):
+        return {"firmographics": {"segment": "1A", "industry": "HVAC"}}
+
+    monkeypatch.setattr("waypoint.hosted_workbench.N8NContextClient.start", fake_start)
+    monkeypatch.setattr(
+        "waypoint.hosted_workbench.ContextLayerClient.fetch", fake_context_layer
+    )
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://operator.test") as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post("/api/context-workbench/jobs", json={
+            "identifier": "889901",
+            "source_mode": "both",
+            "workbench_mode": "evaluate",
+        })
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["state"].get("phase") == "collecting_sources":
+                break
+            await asyncio.sleep(0.01)
+
+        assert dispatched == {
+            "organization_id": "889901",
+            "request_id": job_id,
+            "promotion_id": "workbench-authoring",
+            "callback_mode": "workbench",
+        }
+        callback = await client.post(
+            "/api/context-workbench/source-callback",
+            headers={"authorization": "Bearer test"},
+            json={
+                "request_id": job_id,
+                "organization_id": "889901",
+                "promotion_id": "workbench-authoring",
+                "callback_mode": "workbench",
+                "rows": [
+                    {
+                        "VARIABLE_NAME": "ORG_UUID",
+                        "VALUE": "cc962bf1-13bb-4eea-bf66-f3adc9e22192",
+                    },
+                    {"VARIABLE_NAME": "SAFE_SIGNAL", "VALUE": 7},
+                    {"VARIABLE_NAME": "EMAIL", "VALUE": "hidden@example.test"},
+                ],
+            },
+        )
+        assert callback.status_code == 200
+        for _ in range(100):
+            job = (await client.get(f"/api/context-workbench/jobs/{job_id}")).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert job["status"] == "completed"
+    sources = resumed["scrubbed_sources"]
+    assert isinstance(sources, dict)
+    snowflake_rows = sources["snowflake"]["rows"]
+    assert any(row["VARIABLE_NAME"] == "SAFE_SIGNAL" for row in snowflake_rows)
+    assert all(row["VARIABLE_NAME"] != "EMAIL" for row in snowflake_rows)
+    assert sources["context_layer"]["firmographics"]["segment"] == "1A"
+
+
+async def test_staging_rejects_a_promotion_that_changed_after_display(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all(_ready_staging_rows())
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/runs",
+        json={
+            **RUN_REQUEST,
+            "pro_ids": ["889901"],
+            "context_source": "staging",
+            "context_promotion_id": "promotion-previously-displayed",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "changed" in response.text.casefold()
+    assert (await db_session.execute(select(RunRow))).scalars().all() == []
 
 
 async def test_fleet_settings_requires_session(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/fleet/settings")).status_code == 401
+
+
+async def test_hosted_workbench_routes_require_the_waypoint_session(
+    client: httpx.AsyncClient,
+) -> None:
+    assert (await client.get("/api/context-workbench/status")).status_code == 401
+    assert (await client.post(
+        "/api/context-workbench/jobs",
+        json={"identifier": "889901", "workbench_mode": "compile"},
+    )).status_code == 401
+
+
+async def test_hosted_workbench_catalog_versions_are_shared_and_immutable(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    version = {
+        "id": "context-shared",
+        "kind": "context",
+        "name": "Shared context",
+        "entries": [{
+            "key": "JOBS_CREATED_T28",
+            "canonical_key": "jobs_created_t28",
+            "disposition": "include",
+        }],
+        "details": {"feature_catalog_version_id": "features-shared"},
+    }
+
+    created = await auth_client.post("/api/context-workbench/catalogs", json=version)
+    listed = await auth_client.get("/api/context-workbench/catalogs?kind=context")
+    loaded = await auth_client.get("/api/context-workbench/catalogs/context-shared")
+    conflict = await auth_client.post(
+        "/api/context-workbench/catalogs", json={**version, "name": "Changed"}
+    )
+
+    assert created.status_code == 201
+    assert listed.json()[0]["id"] == "context-shared"
+    assert loaded.json()["entries"][0]["key"] == "JOBS_CREATED_T28"
+    assert conflict.status_code == 409
+
+
+async def test_catalog_metadata_is_scrubbed_before_persistence(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    response = await auth_client.post("/api/context-workbench/catalogs", json={
+        "id": "context-safe-metadata",
+        "kind": "context",
+        "name": "pro@example.com",
+        "entries": [],
+        "details": {"prompt": "Contact pro@example.com", "confidence_threshold": 0.8},
+    })
+
+    assert response.status_code == 201
+    assert response.json()["name"] == "context catalog"
+    assert response.json()["details"] == {"confidence_threshold": 0.8}
+
+
+async def test_reuploading_the_same_feature_catalog_is_idempotent(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    csv_text = "feature,description,customer_email\njobs,Manage jobs,pro@example.com\n"
+
+    first = await auth_client.post(
+        "/api/context-workbench/catalog/validate",
+        json={"name": "September features", "filename": "features.csv", "csv_text": csv_text},
+    )
+    repeated = await auth_client.post(
+        "/api/context-workbench/catalog/validate",
+        json={
+            "name": "Renamed upload",
+            "filename": "renamed.csv",
+            "csv_text": csv_text.replace("pro@example.com", "other@example.com"),
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["entries"] == [{"feature": "jobs", "description": "Manage jobs"}]
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == first.json()["id"]
+
+
+async def test_orphaned_promotion_does_not_make_staging_available(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(ContextPromotionRow(
+        id="promotion-orphaned",
+        active=True,
+        bundle={
+            "context_catalog_version_id": "missing-context",
+            "feature_catalog_version_id": "missing-features",
+            "rules": [],
+        },
+    ))
+    await db_session.commit()
+
+    body = (await auth_client.get("/api/fleet/settings")).json()
+
+    assert body["staging_context_available"] is False
+    assert body["staging_context"] is None
+
+
+async def test_fleet_settings_identifies_the_active_staging_catalog(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-shared", kind="context", name="Shared context",
+            entries=[], details={"feature_catalog_version_id": "features-shared"},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-shared", kind="feature", name="September features",
+            entries=[], details={},
+        ),
+        ContextPromotionRow(
+            id="promotion-shared",
+            active=True,
+                bundle={
+                    "id": "promotion-shared",
+                    "created_at": "2026-09-18T16:04:05+00:00",
+                    "activated_at": "2026-09-18T16:04:05+00:00",
+                "context_catalog_version_id": "context-shared",
+                "feature_catalog_version_id": "features-shared",
+                "rules": [{"canonical_key": "jobs_created_t28"}],
+            },
+            activated_at=datetime(2026, 9, 18, 16, 4, 5, tzinfo=UTC),
+        ),
+    ])
+    await db_session.commit()
+
+    body = (await auth_client.get("/api/fleet/settings")).json()
+
+    assert body["staging_context_available"] is True
+    assert body["staging_context"] == {
+        "promotion_id": "promotion-shared",
+        "context_catalog_version_id": "context-shared",
+        "context_catalog_name": "Shared context",
+        "feature_catalog_version_id": "features-shared",
+        "feature_catalog_name": "September features",
+        "included_variables": 1,
+        "created_at": "2026-09-18T16:04:05+00:00",
+    }
+
+
+async def test_recovered_catalogs_keep_an_existing_promotion_available(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    rows = _ready_staging_rows()
+    context = rows[0]
+    feature = rows[1]
+    assert isinstance(context, WorkbenchCatalogVersionRow)
+    assert isinstance(feature, WorkbenchCatalogVersionRow)
+    context.details = {
+        "feature_catalog_version_id": "features-ready",
+        "recovered_metadata": True,
+    }
+    feature.details = {"recovered_metadata": True}
+    db_session.add_all(rows)
+    await db_session.commit()
+
+    response = await auth_client.get("/api/fleet/settings")
+
+    assert response.status_code == 200
+    assert response.json()["staging_context_available"] is True
+    assert response.json()["staging_context"]["promotion_id"] == "promotion-ready"
+
+
+async def test_active_waypoint_run_locks_the_hosted_workbench(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    status = await auth_client.get("/api/context-workbench/status")
+    blocked = await auth_client.post(
+        "/api/context-workbench/jobs",
+        json={"identifier": "889901", "workbench_mode": "compile"},
+    )
+
+    assert status.status_code == 200
+    assert status.json()["activity"] == "waypoint"
+    assert blocked.status_code == 409
+    assert "Waypoint run is active" in blocked.text
+
+
+async def test_degraded_waypoint_run_does_not_lock_the_hosted_workbench(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    run = await db_session.get(RunRow, created["id"])
+    assert run is not None
+    run.status = "degraded"
+    await db_session.commit()
+
+    status = await auth_client.get("/api/context-workbench/status")
+
+    assert status.status_code == 200
+    assert status.json()["activity"] == "idle"
+
+
+async def test_active_workbench_blocks_login_and_waypoint_run_creation(
+    client: httpx.AsyncClient,
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(
+        WorkbenchJobRow(
+            id="workbench-active",
+            status="running",
+            request={"identifier": "889901", "workbench_mode": "authoring"},
+        )
+    )
+    await db_session.commit()
+
+    login = await client.post(
+        "/api/auth/login", json={"password": "operator-password"}
+    )
+    run = await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    assert login.status_code == 409
+    assert "Context Workbench is running" in login.text
+    assert run.status_code == 409
+    assert "Context Workbench is running" in run.text
+
+
+async def test_hosted_workbench_runs_and_checkpoints_in_postgres(
+    db_session_factory,
+) -> None:
+    checkpoints: list[dict[str, object]] = []
+
+    async def fake_execute(body, *, resume_state=None, checkpoint=None):
+        state = {"phase": "drafting", "pending_keys": 2}
+        checkpoints.append(state)
+        assert checkpoint is not None
+        await checkpoint(state)
+        return {
+            "stages": [],
+            "warnings": [],
+            "outputs": {
+                "authoring": {
+                    "draft": [],
+                    "review_exception_count": 0,
+                }
+            },
+        }
+
+    app = create_app(
+        settings=TEST_SETTINGS,
+        session_factory=db_session_factory,
+        workbench_executor=fake_execute,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://operator.test"
+    ) as client:
+        assert (await client.post(
+            "/api/auth/login", json={"password": "operator-password"}
+        )).status_code == 200
+        started = await client.post(
+            "/api/context-workbench/jobs",
+            json={
+                "identifier": "889901",
+                "source_mode": "context_layer",
+                "workbench_mode": "authoring",
+            },
+        )
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        for _ in range(100):
+            job = (await client.get(
+                f"/api/context-workbench/jobs/{job_id}"
+            )).json()
+            if job["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("hosted Workbench job did not complete")
+
+    assert checkpoints == [{"phase": "drafting", "pending_keys": 2}]
+    assert job["state"] == checkpoints[0]
+    assert job["result"]["outputs"]["authoring"]["draft"] == []
+
+
+async def test_hosted_workbench_activates_an_immutable_promotion(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    entry = {
+        "key": "JOBS_CREATED_T28",
+        "canonical_key": "jobs_created_t28",
+        "value_category": "activity",
+        "related_features": ["jobs"],
+        "usefulness_rank": 5,
+        "disposition": "include",
+        "aggregate_prompt": "Calculate the matched cohort percentile.",
+        "review_status": "reviewed",
+        "approval_status": "auto_approved",
+        "confidence": 0.95,
+        "uncertainty_reason": None,
+        "source_table": "ANALYTICS.JOBS",
+    }
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-v1", kind="context", name="Context v1",
+            entries=[entry], details={"feature_catalog_version_id": "features-v1"},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-v1", kind="feature", name="Features v1",
+            entries=[{
+                "feature": "jobs",
+                "Product Area": "Operations",
+                "Value Statement": "Create and manage jobs.",
+            }], details={},
+        ),
+        WorkbenchJobRow(
+        id="evaluation-complete",
+        status="completed",
+        request={
+            "identifier": "889901",
+            "workbench_mode": "evaluate",
+            "catalog_override": [entry],
+            "feature_catalog_entries": [{
+                "feature": "jobs",
+                "Product Area": "Operations",
+                "Value Statement": "Create and manage jobs.",
+            }],
+            "catalog_version_id": "context-v1",
+            "feature_catalog_version_id": "features-v1",
+        },
+        result={"outputs": {"evaluation": {"judge": {"winner": "curated"}}}},
+        ),
+    ])
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-complete"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["included_variables"] == 1
+    assert response.json()["csv"].splitlines()[0] == (
+        "canonical_key,source_table,cohort_aggregate_prompt"
+    )
+    promotion = await db_session.get(ContextPromotionRow, response.json()["id"])
+    assert promotion is not None and promotion.active is True
+    activated_at = promotion.activated_at
+    assert promotion.bundle["feature_catalog"][0]["feature"] == "jobs"
+
+    repeated = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-complete"},
+    )
+    await db_session.refresh(promotion)
+
+    assert repeated.status_code == 200
+    assert promotion.activated_at == activated_at
+
+
+async def test_hosted_workbench_rejects_mismatched_feature_lineage(
+    auth_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    entry = {
+        "key": "JOBS_CREATED_T28",
+        "canonical_key": "jobs_created_t28",
+        "value_category": "activity",
+        "related_features": ["jobs"],
+        "usefulness_rank": 5,
+        "disposition": "include",
+        "aggregate_prompt": "Calculate the matched cohort percentile.",
+        "review_status": "reviewed",
+        "approval_status": "auto_approved",
+        "confidence": 0.95,
+        "uncertainty_reason": None,
+        "source_table": "ANALYTICS.JOBS",
+    }
+    features = [{"feature": "jobs", "description": "Manage jobs"}]
+    db_session.add_all([
+        WorkbenchCatalogVersionRow(
+            id="context-v1", kind="context", name="Context v1",
+            entries=[entry], details={"feature_catalog_version_id": "features-v1"},
+        ),
+        WorkbenchCatalogVersionRow(
+            id="features-v2", kind="feature", name="Features v2",
+            entries=features, details={},
+        ),
+        WorkbenchJobRow(
+            id="evaluation-wrong-features",
+            status="completed",
+            request={
+                "identifier": "889901",
+                "workbench_mode": "evaluate",
+                "catalog_override": [entry],
+                "feature_catalog_entries": features,
+                "catalog_version_id": "context-v1",
+                "feature_catalog_version_id": "features-v2",
+            },
+            result={"outputs": {"evaluation": {"judge": {"winner": "curated"}}}},
+        ),
+    ])
+    await db_session.commit()
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "evaluation-wrong-features"},
+    )
+
+    assert response.status_code == 409
+    assert "feature catalog" in response.text.casefold()
+    assert (await db_session.execute(select(ContextPromotionRow))).scalars().all() == []
+
+
+async def test_hosted_workbench_cannot_promote_during_a_waypoint_run(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    await auth_client.post("/api/runs", json=RUN_REQUEST)
+
+    response = await auth_client.post(
+        "/api/context-workbench/promotions",
+        json={"evaluation_job_id": "anything"},
+    )
+
+    assert response.status_code == 409
+    assert "Waypoint run" in response.text
 
 
 async def test_stages_aggregate_across_per_pro_jobs(
@@ -696,3 +1709,58 @@ async def test_a_bearer_header_with_no_token_configured_is_refused(
         "/api/outcomes", json=[OUTCOME], headers={"authorization": "Bearer anything"}
     )
     assert response.status_code == 401
+
+
+async def test_calls_panel_lists_call_winners_and_tracks_done(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    created = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()
+    run_id = created["id"]
+    winners = []
+    for channel in ("call", "sms"):
+        candidate = CandidateRow(
+            run_id=run_id, pro_id=f"pro_{channel}",
+            recommendation={"title": f"T-{channel}", "mechanism": "onboarding_call",
+                            "pro_facing_concept": "C", "manager_rationale": "R",
+                            "actions": ["a"], "channel": channel},
+        )
+        db_session.add(candidate)
+        await db_session.flush()
+        winner = WinnerRow(run_id=run_id, pro_id=f"pro_{channel}", kind="winner",
+                           candidate_id=candidate.id, evidence={"org_id": "org_1"})
+        db_session.add(winner)
+        await db_session.flush()
+        winners.append(winner)
+    call_winner, sms_winner = winners
+    # Mark the call winner's candidate as champion with a final score, and add
+    # ranked runner-ups plus a suppressed idea that must never surface.
+    champion = await db_session.get(CandidateRow, call_winner.candidate_id)
+    assert champion is not None
+    champion.status = "champion"
+    champion.score = {"final": {"reduction_pp": 5.0}}
+    for title, pp, status in (("second", 3.0, "discarded"), ("third", 2.0, "discarded"),
+                              ("fourth", 1.0, "discarded"), ("blocked", 9.0, "suppressed")):
+        db_session.add(CandidateRow(
+            run_id=run_id, pro_id="pro_call", status=status,
+            score={"screen": {"reduction_pp": pp}},
+            recommendation={"title": title, "mechanism": "m", "pro_facing_concept": "c",
+                            "manager_rationale": "r", "actions": ["a"], "channel": "call"},
+        ))
+    await db_session.commit()
+
+    listed = (await auth_client.get("/api/calls")).json()
+    assert [c["winner_id"] for c in listed] == [call_winner.id]
+    assert listed[0]["status"] == "todo" and listed[0]["title"] == "T-call"
+    assert [a["title"] for a in listed[0]["alternatives"]] == ["second", "third"]
+    assert listed[0]["alternatives"][0]["score_pp"] == 3.0
+
+    patched = await auth_client.patch(
+        f"/api/calls/{call_winner.id}", json={"status": "done", "note": "left voicemail"}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "done" and patched.json()["note"] == "left voicemail"
+    assert (await auth_client.get("/api/calls")).json()[0]["status"] == "done"
+    # An sms winner is not a call: the panel refuses to log it.
+    assert (
+        await auth_client.patch(f"/api/calls/{sms_winner.id}", json={"status": "done"})
+    ).status_code == 404

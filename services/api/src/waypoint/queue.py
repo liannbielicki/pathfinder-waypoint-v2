@@ -63,8 +63,18 @@ RETURNING id
 """)
 
 FAIL_STALE_SQL = text("""
-UPDATE jobs SET status = 'failed'
-WHERE status = 'running' AND lease_until < now() AND attempts >= max_attempts
+UPDATE jobs
+SET status = 'failed',
+    checkpoint = CASE
+      WHEN status = 'waiting' THEN checkpoint || jsonb_build_object(
+        'failure', jsonb_build_object(
+          'reason', 'context_unavailable: staging: callback timed out'
+        )
+      )
+      ELSE checkpoint
+    END
+WHERE (status = 'running' AND lease_until < now() AND attempts >= max_attempts)
+   OR (status = 'waiting' AND lease_until < now())
 RETURNING id, run_id
 """)
 

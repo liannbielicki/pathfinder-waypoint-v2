@@ -14,10 +14,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any, Protocol
@@ -30,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.catalog import feature_context
+from waypoint.catalog import available_feature_keys, resolve_cta, waypoint_context
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
@@ -40,6 +42,7 @@ from waypoint.loop import (
     LoopConfig,
     apply_round,
     is_win,
+    mechanism_key,
     next_mode,
     replay,
     stop_reason,
@@ -52,7 +55,13 @@ from waypoint.models import (
     Recommendation,
     validate_ranking,
 )
-from waypoint.n8n import ContextUnavailable, OrgBrief
+from waypoint.n8n import (
+    CONTRACT_VERSION,
+    ContextConfigurationError,
+    ContextUnavailable,
+    OrgBrief,
+    OrgContextBatch,
+)
 from waypoint.personas import (
     InsufficientPanelFit,
     PanelSelection,
@@ -124,6 +133,12 @@ class ContextLike(Protocol):
     async def fetch(self, pro_ids: list[str]) -> Any: ...
 
 
+class StagingContextLike(Protocol):
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None: ...
+
+
 class QueueOps:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -191,6 +206,22 @@ class PostgresStore:
         await self.session.commit()
         return True
 
+    async def wait_for_staging_context(
+        self, job_id: str, promotion_id: str, wait_seconds: int
+    ) -> None:
+        job = await self.session.get(JobRow, job_id)
+        assert job is not None
+        checkpoint = dict(job.checkpoint)
+        checkpoint["staging_request"] = {"promotion_id": promotion_id}
+        job.checkpoint = checkpoint
+        # Dispatching n8n successfully is not a failed pipeline attempt. Refund
+        # this claim so the callback resume keeps the normal retry budget.
+        job.attempts = max(job.attempts - 1, 0)
+        job.status = "waiting"
+        job.worker_id = None
+        job.lease_until = datetime.now(UTC) + timedelta(seconds=wait_seconds)
+        await self.session.commit()
+
     async def rounds_for(self, run_id: str, pro_id: str) -> list[EvolveRoundRow]:
         return list(
             (
@@ -226,6 +257,7 @@ class PipelineDeps:
     get_personas: Callable[[str], Awaitable[list[Persona]]]
     calibration: Calibration
     create_plan: Any  # (mechanism: str, catalog) -> MeasurementPlan (deterministic)
+    staging_context: StagingContextLike | None = None
     metric_catalog: dict[str, Any] = field(default_factory=dict)
     # Feature-catalog feasibility toggle (Settings.CTA_FEASIBILITY_HINTS). Off
     # keeps the idea context to description+state; on adds works_on hints.
@@ -290,9 +322,9 @@ async def _abstain_pro(
         await deps.store.session.commit()
 
 
-def _reaction_cache_key(panel: PanelSelection, concept: str, channel: str, tier: str) -> str:
+def _reaction_cache_key(panel: PanelSelection, concept: str, channel: str, model: str) -> str:
     ids = sorted(i.persona_id for i in panel.items)
-    raw = json.dumps([PROMPT_VERSION, panel.snapshot_version, tier, ids, concept, channel])
+    raw = json.dumps([PROMPT_VERSION, panel.snapshot_version, model, ids, concept, channel])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -319,7 +351,8 @@ async def _react(
     # own so no session or advisory-lock connection is shared across tasks.
     llm = llm if llm is not None else deps.llm
     session = cache_session if cache_session is not None else deps.store.session
-    key = _reaction_cache_key(panel, concept, channel, tier)
+    model = llm.pricing.model_for(tier)
+    key = _reaction_cache_key(panel, concept, channel, model)
     cached = (
         await session.execute(select(PersonaEvalRow).where(PersonaEvalRow.cache_key == key))
     ).scalar_one_or_none()
@@ -345,24 +378,46 @@ async def _react(
     )
     # Evaluation is the frozen metric: temperature 0 so the same idea scores
     # the same number every round (Problem 1 in the design spec).
-    result = await llm.complete(
-        call_key=call_key,
-        tier=tier,
-        prompt=reaction_prompt(panel_json, concept, channel),
-        run_id=state.run.id,
-        pro_id=state.pro_id,
-        stage=stage,
-        system=REACTION_SYSTEM,
-        temperature=0.0,
-    )
-    try:
-        by_id = {item["persona_id"]: float(item["reaction"]) for item in extract_json(result.text)}
-    except (ValueError, KeyError, TypeError) as error:
-        # A garbled panel abstains this candidate; it must not crash the job.
-        raise PipelineFailure(f"{stage}_reactions_unparseable: {error}") from error
-    missing = [i.persona_id for i in panel.items if i.persona_id not in by_id]
-    if missing:
-        raise PipelineFailure(f"{stage}_reactions_missing: {missing}")
+    expected = [item.persona_id for item in panel.items]
+    last_error: Exception | None = None
+    by_id: dict[str, float] | None = None
+    for attempt in range(JSON_CALL_ATTEMPTS):
+        attempt_key = call_key if attempt == 0 else f"{call_key}:retry{attempt + 1}"
+        result = await llm.complete(
+            call_key=attempt_key,
+            tier=tier,
+            prompt=reaction_prompt(panel_json, concept, channel),
+            run_id=state.run.id,
+            pro_id=state.pro_id,
+            stage=stage,
+            system=REACTION_SYSTEM,
+            temperature=0.0,
+        )
+        try:
+            payload = extract_json(result.text)
+            ids = [str(item["persona_id"]) for item in payload]
+            if sorted(ids) != sorted(expected) or len(ids) != len(set(ids)):
+                raise ValueError(
+                    f"persona ids must match exactly: expected {expected}, got {ids}"
+                )
+            parsed = {str(item["persona_id"]): float(item["reaction"]) for item in payload}
+            invalid = {
+                persona_id: value
+                for persona_id, value in parsed.items()
+                if not math.isfinite(value) or not 3 <= value <= 7
+            }
+            if invalid:
+                raise ValueError(f"reactions must be finite and between 3 and 7: {invalid}")
+        except (ValueError, KeyError, TypeError) as error:
+            last_error = error
+            continue
+        by_id = parsed
+        break
+    if by_id is None:
+        # Persistently garbled judgment becomes unavailable, never a score.
+        raise PipelineFailure(
+            f"{stage}_reactions_unparseable after {JSON_CALL_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
     session.add(
         PersonaEvalRow(
             cache_key=key,
@@ -378,7 +433,12 @@ async def _react(
 
 
 async def _panel_for(
-    state: PipelineState, deps: PipelineDeps, brief: OrgBrief, size: Any
+    state: PipelineState,
+    deps: PipelineDeps,
+    brief: OrgBrief,
+    size: Any,
+    *,
+    exclude_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[PanelSelection, dict[str, dict[str, Any]]]:
     """Select the panel AND return each member's full card features, keyed by
     persona_id — the reaction prompt needs the substance, not just the labels
@@ -389,7 +449,7 @@ async def _panel_for(
         raise InsufficientPanelFit(size=size, available=0)
     personas = await deps.get_personas(brief.segment)
     pro = ProMatchInput(pro_id=brief.pro_id, features=dict(brief.match_feature_map()))
-    panel = select_panel(pro, personas, size=size)
+    panel = select_panel(pro, personas, size=size, exclude_ids=exclude_ids)
     features = {p.persona_id: p.features for p in personas}
     return panel, {i.persona_id: features.get(i.persona_id, {}) for i in panel.items}
 
@@ -423,6 +483,7 @@ async def _champion_for(
 # resume, since the deterministic key stays poisoned). The default (non-zero)
 # temperature makes each attempt vary. Fail closed after the attempt budget.
 JSON_CALL_ATTEMPTS = 3
+MAX_CONCURRENT_SCREEN_STACKS = 2
 
 
 async def _valid_json_call(
@@ -514,7 +575,11 @@ SUPPRESSING_BLOCK_KINDS = (
     "consent_ask",
     "infeasible_channel",
     "recently_failed",
+    "channel_override_without_reason",
+    "unsupported_channel_override",
+    "infeasible_execution",
 )
+ALLOWED_BLOCK_KINDS = frozenset({"none", "generic", *SUPPRESSING_BLOCK_KINDS})
 
 
 def _batch_max_tokens(count: int) -> int:
@@ -526,9 +591,15 @@ def _batch_max_tokens(count: int) -> int:
     return 1200 * min(count, MAX_CANDIDATE_COUNT + 1)
 
 
-def _ranker_tier(pricing: Pricing) -> str:
+def _run_tier(run: RunRow) -> str:
+    return "deep" if run.model_tier == "deep" else "fast"
+
+
+def _ranker_tier(pricing: Pricing, run: RunRow | None = None) -> str:
     """The ranker runs on its own configured tier when the worker wired one;
     otherwise it shares the fast tier."""
+    if run is not None and _run_tier(run) == "deep":
+        return "deep"
     return "rank" if "rank" in pricing.models else "fast"
 
 
@@ -549,25 +620,42 @@ def _parse_idea_batch(text: str) -> list[Recommendation]:
     return ideas
 
 
-def _dedupe_mechanisms(
-    ideas: list[Recommendation], count: int, *, keep: str | None = None
+def _dedupe_ideas(
+    ideas: list[Recommendation],
+    count: int,
+    *,
+    mode: str,
+    current_mechanism: str | None = None,
+    keep: str | None = None,
+    forbidden_mechanisms: list[str] | None = None,
 ) -> list[Recommendation]:
-    """One idea per mechanism (first wins), truncated to the requested count —
-    a batch of near-identical mechanisms is one candidate, not N. `keep`, when
-    present in the batch, is guaranteed its slot: a warm-start mechanism must
-    not be truncated out by the ideas generated beside it."""
+    """Deduplicate mechanisms during exploration and concepts during refinement."""
     held: dict[str, Recommendation] = {}
+    current_key = mechanism_key(current_mechanism or "")
+    forbidden = {mechanism_key(item) for item in (forbidden_mechanisms or [])}
     for idea in ideas:
-        held.setdefault(idea.mechanism, idea)
+        idea_key = mechanism_key(idea.mechanism)
+        if mode == "refine" and idea_key != current_key:
+            continue
+        if mode != "refine" and idea_key in forbidden:
+            continue
+        key = (
+            mechanism_key(idea.pro_facing_concept)
+            if mode == "refine"
+            else idea_key
+        )
+        if key:
+            held.setdefault(key, idea)
     ordered = list(held.values())
-    if keep is not None and keep in held:
-        ordered = [held[keep], *(i for i in ordered if i.mechanism != keep)]
+    keep_key = mechanism_key(keep or "")
+    if keep_key and keep_key in held:
+        ordered = [held[keep_key], *(i for i in ordered if mechanism_key(i.mechanism) != keep_key)]
     return ordered[:count]
 
 
-def _round_worst_case(deps: PipelineDeps, prompt: str, count: int) -> Decimal:
+def _round_worst_case(state: PipelineState, deps: PipelineDeps, prompt: str, count: int) -> Decimal:
     """Upper bound on ONE round: generation plus every allowed refill, the batch
-    critic, the ranker, and two persona screens (the tied-finalist case).
+    critic, the ranker, and one persona screen for every candidate.
 
     Every JSON-parsed stage can re-ask up to JSON_CALL_ATTEMPTS times on bad
     output, and each re-ask is a fresh PAID call — counting them once would
@@ -577,13 +665,14 @@ def _round_worst_case(deps: PipelineDeps, prompt: str, count: int) -> Decimal:
     The generation prompt is the size proxy — the critic/ranker prompts carry
     the same org context plus the batch, so it is the right order of magnitude."""
     pricing = deps.llm.pricing
+    tier = _run_tier(state.run)
     batch_tokens = _batch_max_tokens(count)
-    generate = worst_case_cost(pricing, "fast", prompt, EVOLVE_SYSTEM, batch_tokens)
-    critic = worst_case_cost(pricing, "fast", prompt, CRITIC_SYSTEM, batch_tokens)
-    rank = worst_case_cost(pricing, _ranker_tier(pricing), prompt, RANKER_SYSTEM, 1200)
-    screen = worst_case_cost(pricing, "fast", prompt, REACTION_SYSTEM, 1200)
+    generate = worst_case_cost(pricing, tier, prompt, EVOLVE_SYSTEM, batch_tokens)
+    critic = worst_case_cost(pricing, tier, prompt, CRITIC_SYSTEM, batch_tokens)
+    rank = worst_case_cost(pricing, _ranker_tier(pricing, state.run), prompt, RANKER_SYSTEM, 1200)
+    screen = worst_case_cost(pricing, tier, prompt, REACTION_SYSTEM, 1200)
     retriable = generate * (1 + MAX_BATCH_REFILLS) + critic + rank
-    return retriable * JSON_CALL_ATTEMPTS + 2 * screen
+    return retriable * JSON_CALL_ATTEMPTS + count * screen * JSON_CALL_ATTEMPTS
 
 
 async def _reserve_round_worst_case(state: PipelineState, deps: PipelineDeps, worst: Decimal) -> None:
@@ -641,6 +730,8 @@ async def _generate_batch(
     prompt: str,
     build_prompt: Callable[..., str],
     tried: list[str],
+    mode: str,
+    current_mechanism: str | None,
     warm: str | None = None,
 ) -> list[Recommendation]:
     """One batched generation call, then bounded refills for whatever the
@@ -656,7 +747,7 @@ async def _generate_batch(
         batch: list[Recommendation] = await _valid_json_call(
             deps,
             base_key=base_key,
-            tier="fast",
+            tier=_run_tier(state.run),
             prompt=text,
             run_id=state.run.id,
             pro_id=state.pro_id,
@@ -667,9 +758,18 @@ async def _generate_batch(
         )
         return batch
 
-    ideas = _dedupe_mechanisms(await generate(f"{key}:generate", count, prompt), count, keep=warm)
+    ideas = _dedupe_ideas(
+        await generate(f"{key}:generate", count, prompt),
+        count,
+        mode=mode,
+        current_mechanism=current_mechanism,
+        keep=warm,
+        forbidden_mechanisms=tried,
+    )
     for refill in range(MAX_BATCH_REFILLS):
-        warm_missing = warm is not None and all(idea.mechanism != warm for idea in ideas)
+        warm_missing = warm is not None and all(
+            mechanism_key(idea.mechanism) != mechanism_key(warm) for idea in ideas
+        )
         if len(ideas) >= count and not warm_missing:
             break
         missing = max(count - len(ideas), 1 if warm_missing else 0)
@@ -678,11 +778,20 @@ async def _generate_batch(
             more = await generate(
                 f"{key}:refill{refill}",
                 missing,
-                build_prompt("shift", missing, forbidden, warm if warm_missing else None),
+                build_prompt(mode, missing, forbidden, warm if warm_missing else None),
             )
         except PipelineFailure:
             break
-        ideas = _dedupe_mechanisms([*ideas, *more], count, keep=warm)
+        ideas = _dedupe_ideas(
+            [*ideas, *more],
+            count,
+            mode=mode,
+            current_mechanism=current_mechanism,
+            keep=warm,
+            forbidden_mechanisms=tried,
+        )
+    if not ideas:
+        raise PipelineFailure("no_distinct_ideas_after_refills")
     return ideas
 
 
@@ -692,6 +801,7 @@ async def _verdicts_for_batch(
     *,
     key: str,
     org_context: str,
+    brief: OrgBrief,
     ideas: list[Recommendation],
     channels: list[str],
     failed: set[str],
@@ -701,18 +811,42 @@ async def _verdicts_for_batch(
     channel-feasibility gates."""
     verdicts: list[dict[str, Any] | None] = [None] * len(ideas)
     review: list[tuple[int, Recommendation]] = []
+    suggested_channel = brief.suggested_outreach_channel()
+    available_features = available_feature_keys(brief)
     for index, idea in enumerate(ideas):
-        if idea.mechanism in failed:
+        # CTA is product truth, never model-authored content. Attach it only
+        # after a feature resolves through the verified catalog below.
+        idea.cta = None
+        if mechanism_key(idea.mechanism) in failed:
             # Spec gate: not materially different from a recent failed touch.
             verdicts[index] = {
                 "block_kind": "recently_failed",
                 "reason": f"mechanism {idea.mechanism!r} recently failed for this pro",
             }
-        elif idea.channel != "none" and idea.channel not in channels:
+        elif idea.channel not in channels:
             verdicts[index] = {
                 "block_kind": "infeasible_channel",
                 "reason": f"channel {idea.channel!r} blocked by the consent gate",
             }
+        elif (
+            suggested_channel in channels
+            and idea.channel != suggested_channel
+            and not idea.channel_override_reason.strip()
+        ):
+            verdicts[index] = {
+                "block_kind": "channel_override_without_reason",
+                "reason": f"selected {idea.channel!r} instead of RECO {suggested_channel!r} without evidence",
+            }
+        elif idea.feature_key:
+            cta = resolve_cta(idea.feature_key)
+            if idea.feature_key not in available_features or cta is None:
+                verdicts[index] = {
+                    "block_kind": "infeasible_execution",
+                    "reason": f"feature {idea.feature_key!r} is unavailable or has no verified destination",
+                }
+            else:
+                idea.cta = cta
+                review.append((index, idea))
         else:
             review.append((index, idea))
     if review:
@@ -722,7 +856,7 @@ async def _verdicts_for_batch(
         reviewed = await _valid_json_call(
             deps,
             base_key=f"{key}:critic",
-            tier="fast",
+            tier=_run_tier(state.run),
             prompt=critic_prompt(
                 org_context,
                 json.dumps([{"idea_index": i, **idea.model_dump()} for i, idea in review]),
@@ -738,7 +872,10 @@ async def _verdicts_for_batch(
         )
         for index, _ in review:
             verdict = reviewed.get(index)
-            if not isinstance(verdict, dict) or "block_kind" not in verdict:
+            if (
+                not isinstance(verdict, dict)
+                or verdict.get("block_kind") not in ALLOWED_BLOCK_KINDS
+            ):
                 # Fail closed on a missing verdict, or one that parsed but is
                 # missing the field.
                 verdict = {"block_kind": "unreviewed", "reason": "no usable verdict returned"}
@@ -780,7 +917,7 @@ async def _rank_batch(
     decision: RankerDecision = await _valid_json_call(
         deps,
         base_key=f"{key}:rank",
-        tier=_ranker_tier(deps.llm.pricing),
+        tier=_ranker_tier(deps.llm.pricing, state.run),
         prompt=ranker_prompt(
             org_context,
             json.dumps([{"candidate_id": t, **idea.model_dump()} for t, idea in candidates]),
@@ -835,7 +972,7 @@ async def _screen_one(
             idea.pro_facing_concept,
             idea.channel,
             "screen",
-            "fast",
+            _run_tier(state.run),
             call_key=f"{key}:screen:{token}",
             llm=llm,
             cache_session=cache_session,
@@ -861,7 +998,7 @@ async def _screen_finalists(
     """Screen each finalist on the frozen 3-panel. A finalist whose evaluation
     fails scores nothing at all — never a fabricated number.
 
-    Tied finalists (exactly two) screen concurrently when the worker wired
+    Multiple finalists screen concurrently when the worker wired
     `llm_stacks`. Both calls still queue behind the SAME fleet-wide advisory-lock
     cap, but each runs on its own connection and its own sessions — sharing
     either across tasks would corrupt the limiter and the paid-call ledger.
@@ -876,11 +1013,12 @@ async def _screen_finalists(
     degrades that one finalist to a None score inside _screen_one.
     """
     screen = partial(_screen_one, state, deps, key=key, panel=panel, cards=cards, cell=cell)
-    if len(finalists) == 2 and deps.llm_stacks is not None:
+    if len(finalists) > 1 and deps.llm_stacks is not None:
         stacks = deps.llm_stacks
+        stack_slots = asyncio.Semaphore(MAX_CONCURRENT_SCREEN_STACKS)
 
         async def screen_in_own_stack(token: str, index: int) -> _ScreenOutcome:
-            async with stacks() as (llm, cache_session):
+            async with stack_slots, stacks() as (llm, cache_session):
                 return await screen(
                     idea=ideas[index],
                     token=token,
@@ -932,7 +1070,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     session = deps.store.session
     patterns = await pattern_summaries(session, state.run.journey_window, channels)
     evidence = evidence_block(patterns)
-    failed = set(await failed_mechanisms(session, state.pro_id))
+    failed = {mechanism_key(item) for item in await failed_mechanisms(session, state.pro_id)}
 
     while (reason := stop_reason(lstate, config)) is None:
         await _guard(state, deps)
@@ -941,16 +1079,12 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         key = f"{state.run.id}:{state.pro_id}:r{rnd}"
 
         best_json = None
-        if lstate.best_candidate_id is not None:
-            best = await session.get(CandidateRow, lstate.best_candidate_id)
-            best_json = json.dumps(best.recommendation) if best is not None else None
-        org_context = brief.model_dump_json()
-        # Resolve the features this brief references to their catalog meaning,
-        # so generation/critic/ranker (all reading this one string) know what
-        # each feature is and whether this Pro uses it. Additive + deterministic.
-        block = feature_context(brief, feasibility=deps.cta_feasibility_hints)
-        if block:
-            org_context = f"{org_context}\n{block}"
+        if lstate.current_candidate_id is not None:
+            current = await session.get(CandidateRow, lstate.current_candidate_id)
+            best_json = json.dumps(current.recommendation) if current is not None else None
+        org_context = waypoint_context(
+            brief, feasibility=deps.cta_feasibility_hints
+        )
         build_prompt = _prompt_builder(
             org_context=org_context,
             best_json=best_json,
@@ -982,7 +1116,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     "score": match.score,
                     "mechanism": match.mechanism,
                 }
-                if match.mechanism in failed:
+                if mechanism_key(match.mechanism) in failed:
                     # The pro already rejected this mechanism; a cross-pro win
                     # does not override this pro's own observed failure.
                     warm_evidence |= {"outcome": "cold", "skipped": "recently_failed"}
@@ -990,7 +1124,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     warm_mechanism = match.mechanism
         batch_count = count + (1 if warm_mechanism else 0)
         prompt = build_prompt(mode, count, tried, warm_mechanism)
-        await _reserve_round_worst_case(state, deps, _round_worst_case(deps, prompt, batch_count))
+        await _reserve_round_worst_case(
+            state, deps, _round_worst_case(state, deps, prompt, batch_count)
+        )
         ideas = await _generate_batch(
             state,
             deps,
@@ -999,10 +1135,15 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             prompt=prompt,
             build_prompt=build_prompt,
             tried=tried,
+            mode=mode,
+            current_mechanism=lstate.current_mechanism,
             warm=warm_mechanism,
         )
         if warm_mechanism is not None and warm_evidence is not None:
-            in_batch = any(idea.mechanism == warm_mechanism for idea in ideas)
+            in_batch = any(
+                mechanism_key(idea.mechanism) == mechanism_key(warm_mechanism)
+                for idea in ideas
+            )
             warm_evidence["mechanism_in_batch"] = in_batch
             if not in_batch:
                 # The seeded mechanism did not land in the batch — attribute
@@ -1018,6 +1159,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             deps,
             key=key,
             org_context=org_context,
+            brief=brief,
             ideas=ideas,
             channels=channels,
             failed=failed,
@@ -1037,7 +1179,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             # Recorded before the call: a failed ranking still cost up to
             # JSON_CALL_ATTEMPTS paid calls, so the audit trail must not read
             # the same as a ranker that was never invoked.
-            ranker_model = deps.llm.pricing.model_for(_ranker_tier(deps.llm.pricing))
+            ranker_model = deps.llm.pricing.model_for(
+                _ranker_tier(deps.llm.pricing, state.run)
+            )
             try:
                 decision = await _rank_batch(
                     state,
@@ -1061,15 +1205,11 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             selection_reason = "single_rankable_candidate"
             finalists = [("c1", rankable[0])]
         else:
-            first, second = decision.by_rank()[:2]
-            finalists = [(first.candidate_id, tokens[first.candidate_id])]
-            if first.score - second.score <= config.tie_margin:
-                # Indistinguishable on the ranker's evidence: the persona screen
-                # is the tiebreaker, so both finalists get screened.
-                finalists.append((second.candidate_id, tokens[second.candidate_id]))
-                selection_reason = "tie_within_margin_top_two_screened"
-            else:
-                selection_reason = "clear_winner"
+            finalists = [
+                (ranked.candidate_id, tokens[ranked.candidate_id])
+                for ranked in decision.by_rank()
+            ]
+            selection_reason = "all_rankable_candidates_screened"
 
         screens: list[_ScreenOutcome] = []
         panel: PanelSelection | None = None
@@ -1107,8 +1247,8 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             )
             challenger = best_screen.index
             outcome = "win" if is_win(lstate, score_pp, config, MIN_REDUCTION_FLOOR_PP) else "lose"
-            if len(finalists) == 2 and best_screen.token == finalists[1][0]:
-                selection_reason = "tie_broken_by_screen_runner_up"
+            if best_screen.token != finalists[0][0]:
+                selection_reason = "screen_selected_ranker_non_top"
 
         # One CandidateRow per generated idea, all committed atomically with the
         # round's single ledger row below.
@@ -1136,7 +1276,12 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 assert panel is not None
                 candidate.score = {"screen": screen.score.model_dump()}
                 candidate.persona_evidence = {
-                    "screen": {"panel": panel.model_dump(), "reactions": screen.reactions}
+                    "screen": {
+                        "panel": panel.model_dump(),
+                        "reactions": screen.reactions,
+                        "tier": _run_tier(state.run),
+                        "model": deps.llm.pricing.model_for(_run_tier(state.run)),
+                    }
                 }
             session.add(candidate)
 
@@ -1174,6 +1319,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     finalists=finalists,
                     selection_reason=selection_reason,
                     ranker_model=ranker_model,
+                    screen_model=deps.llm.pricing.model_for(_run_tier(state.run)),
                     screens=screens,
                     ranking_failure=ranking_failure,
                     warm_start=warm_evidence,
@@ -1198,6 +1344,7 @@ def _ranking_evidence(
     finalists: list[tuple[str, int]],
     selection_reason: str,
     ranker_model: str,
+    screen_model: str,
     screens: list[_ScreenOutcome],
     ranking_failure: str | None,
     warm_start: dict[str, Any] | None = None,
@@ -1222,11 +1369,22 @@ def _ranking_evidence(
         "finalists": [token for token, _ in finalists],
         "selection_reason": selection_reason,
         "ranker_model": ranker_model,
+        "screen_model": screen_model,
         "candidate_ids": {token: candidate_ids[index] for token, index in tokens.items()},
+        "generated_mechanisms": [idea.mechanism for idea in ideas],
     }
     if decision is not None:
         evidence["order"].sort(key=lambda item: item["rank"])
+        ordered = decision.by_rank()
+        evidence["within_tie_margin"] = (
+            len(ordered) > 1 and ordered[0].score - ordered[1].score <= tie_margin
+        )
     failures = {s.token: s.failure for s in screens if s.failure is not None}
+    screen_scores = {
+        s.token: s.score.reduction_pp for s in screens if s.score is not None
+    }
+    if screen_scores:
+        evidence["screen_scores_pp"] = screen_scores
     if failures:
         evidence["screen_failures"] = failures
     if ranking_failure is not None:
@@ -1299,7 +1457,16 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         return {}  # resume
     await _resolve_abandoned_calls(state, deps)  # a crashed final call may have paid
     try:
-        panel, cards = await _panel_for(state, deps, brief, 5)
+        screen_ids = {
+            str(item.get("persona_id"))
+            for item in champion.persona_evidence.get("screen", {})
+            .get("panel", {})
+            .get("items", [])
+            if item.get("persona_id")
+        }
+        panel, cards = await _panel_for(
+            state, deps, brief, 5, exclude_ids=screen_ids
+        )
     except InsufficientPanelFit as error:
         await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
         return {}
@@ -1323,6 +1490,7 @@ async def _stage_final(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 "panel": panel.model_dump(),
                 "reactions": reactions,
                 "tier": tier_used,
+                "model": deps.llm.pricing.model_for(tier_used),
                 **({"deep_failure": deep_failure} if deep_failure else {}),
             },
         }
@@ -1336,22 +1504,29 @@ def _degraded_panel_notes(persona_evidence: dict[str, Any] | None) -> dict[str, 
     honestly: a missing counterweight and a final check that re-used the
     screen's exact personas both void invariants the full panel guarantees."""
     notes: dict[str, str] = {}
-    members: dict[str, set[str]] = {}
     for stage, stage_evidence in (persona_evidence or {}).items():
         panel = stage_evidence.get("panel", {})
         if not panel.get("degraded"):
             continue
         items = panel.get("items", [])
-        qualified = [item for item in items if item.get("role") != "backfill"]
-        note = f"only {len(qualified)} of {panel.get('requested_size')} personas qualified"
+        qualified = [
+            item
+            for item in items
+            if item.get("role") not in {"backfill", "segment_fallback", "broad_fallback"}
+        ]
+        note = f"{panel.get('match_quality', 'fallback')} panel"
+        if len(items) < panel.get("requested_size", len(items)):
+            note += f", only {len(items)} of {panel.get('requested_size')} seats filled"
         if len(items) > len(qualified):
-            note += f", {len(items) - len(qualified)} below-threshold backfill seat(s)"
+            note += f", {len(items) - len(qualified)} fallback seat(s)"
         if not any(item.get("role") == "counterweight" for item in items):
             note += ", no counterweight on the panel"
+        overlap = panel.get("overlap_persona_ids") or []
+        if overlap:
+            note += f", reused {len(overlap)} screen persona(s)"
+        if panel.get("fallback_reason"):
+            note += f": {panel['fallback_reason']}"
         notes[stage] = note
-        members[stage] = {item.get("persona_id") for item in items}
-    if {"screen", "final"} <= members.keys() and members["screen"] == members["final"]:
-        notes["final"] += "; final check reused the screen panel (not held out)"
     return notes
 
 
@@ -1413,6 +1588,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 "item resolution failed for run %s pro %s; winner stays audit-only",
                 run_id, state.pro_id, exc_info=True,
             )
+        suggested_channel = state.brief.suggested_outreach_channel() if state.brief else None
         deps.store.session.add(
             WinnerRow(
                 run_id=run_id,
@@ -1426,7 +1602,19 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 evidence={
                     "final": final,
                     "screen": screen_score,
-                    "org_id": state.brief.org_uuid if state.brief else "",
+                    "org_id": (state.brief.org_id or state.brief.org_uuid) if state.brief else "",
+                    # The resolved contact pro: what LCM sends to and what
+                    # Iterable/Amplitude report on, whatever id keyed the run.
+                    **({"pro_uuid": state.brief.pro_uuid} if state.brief and state.brief.pro_uuid else {}),
+                    # RECO's channel suggestion next to the chosen channel, so
+                    # agreement with the model is measurable before we trust it more.
+                    **({"suggested_channel": suggested_channel} if suggested_channel else {}),
+                    "selected_channel": recommendation["channel"],
+                    **(
+                        {"channel_override_reason": recommendation["channel_override_reason"]}
+                        if recommendation.get("channel_override_reason")
+                        else {}
+                    ),
                     **({"panel_disclaimer": degraded_panels} if degraded_panels else {}),
                 },
                 # Sanitized bands only, and never eligible here: eligibility is
@@ -1478,9 +1666,11 @@ async def _attach_follow_up(
         plan_json = await _valid_json_call(
             deps,
             base_key=f"{state.run.id}:{state.pro_id}:wargame",
-            tier="fast",
+            tier=_run_tier(state.run),
             prompt=war_game_prompt(
-                state.brief.model_dump_json() if state.brief else "{}",
+                waypoint_context(
+                    state.brief, feasibility=deps.cta_feasibility_hints
+                ) if state.brief else "{}",
                 json.dumps(candidate.recommendation),
                 gated_channels,
             ),
@@ -1649,15 +1839,59 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
     run_id = run.id  # plain strings survive session rollbacks; ORM instances expire
     state = PipelineState(job=job, run=run, pro_id=job.pro_id)
 
-    resumed = any(stage in job.checkpoint for stage in STAGES)
+    resumed = any(stage in job.checkpoint for stage in (*STAGES, "staging_context"))
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
-    # Raw context is ephemeral: re-fetched on every (re)entry, never stored.
+    # Raw source rows are ephemeral. Staging resumes from only the compact,
+    # approved brief written by the authenticated callback.
     try:
-        batch = await deps.context.fetch([state.pro_id])
+        if run.context_source == "staging":
+            if deps.staging_context is None:
+                raise ContextUnavailable("staging context source is not configured")
+            cached = job.checkpoint.get("staging_context")
+            if isinstance(cached, Mapping):
+                brief_payload = cached.get("brief")
+                if not isinstance(brief_payload, Mapping):
+                    raise ContextUnavailable("staging context checkpoint is invalid")
+                brief = OrgBrief.model_validate(dict(brief_payload))
+                batch = OrgContextBatch(
+                    contract_version=CONTRACT_VERSION,
+                    organizations=[brief],
+                    audience_query_version=run.audience_query,
+                )
+            else:
+                prefix = "workbench:"
+                promotion_id = (
+                    run.audience_query[len(prefix):]
+                    if run.audience_query.startswith(prefix)
+                    else ""
+                )
+                if not promotion_id:
+                    raise ContextUnavailable("staging context promotion artifact has no id")
+                await deps.staging_context.start(state.pro_id, job_id, promotion_id)
+                await store.wait_for_staging_context(
+                    job_id, promotion_id, deps.lease_seconds
+                )
+                await store.set_run_status(run_id, "waiting", "staging_context_pending")
+                return
+        else:
+            batch = await deps.context.fetch([state.pro_id])
+    except ContextConfigurationError as error:
+        # A 202 async webhook (or another endpoint-contract mismatch) cannot
+        # heal on retry. Fail this Pro once instead of rapidly retriggering n8n
+        # until the job exhausts all attempts.
+        failure_reason = f"context_configuration: {run.context_source}: {error}"
+        await store.session.rollback()
+        await queue.checkpoint_job(
+            store.session, job_id, "failure", {"reason": failure_reason}
+        )
+        await store.finish_job(job_id, "failed")
+        await finalize_run(store.session, run_id)
+        return
     except ContextUnavailable as error:
+        failure_reason = f"context_unavailable: {run.context_source}: {error}"
         if await store.requeue_job(job_id):
-            await store.set_run_status(run_id, "waiting", f"context_unavailable: {error}")
+            await store.set_run_status(run_id, "waiting", failure_reason)
         else:
             # Attempts exhausted for THIS Pro only: its job fails (requeue_job
             # already marked it) and finalize_run aggregates to failed/degraded
@@ -1665,7 +1899,7 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
             # never take the whole run down.
             await queue.checkpoint_job(
                 store.session, job_id, "failure",
-                {"reason": f"context_unavailable: {error}"},
+                {"reason": failure_reason},
             )
             await finalize_run(store.session, run_id)
         return

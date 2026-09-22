@@ -9,6 +9,7 @@ from waypoint.loop import (
     LoopState,
     apply_round,
     is_win,
+    mechanism_key,
     next_mode,
     replay,
     stop_reason,
@@ -143,8 +144,8 @@ def test_missing_score_is_never_a_win() -> None:
 # --- win-stay / lose-shift --------------------------------------------------
 
 
-def test_cold_start_is_stay() -> None:
-    assert next_mode(LoopState(), cfg()) == "stay"
+def test_cold_start_is_explicit() -> None:
+    assert next_mode(LoopState(), cfg()) == "cold"
 
 
 def test_win_stays_on_the_same_mechanism() -> None:
@@ -158,7 +159,7 @@ def test_win_stays_on_the_same_mechanism() -> None:
     )
     assert state.best_score == 2.0
     assert state.current_mechanism == "invoices"
-    assert next_mode(state, cfg()) == "stay"
+    assert next_mode(state, cfg()) == "refine"
 
 
 def test_lose_at_patience_one_shifts() -> None:
@@ -171,6 +172,7 @@ def test_lose_at_patience_one_shifts() -> None:
         config=cfg(),
     )
     assert state.best_score is None
+    assert state.current_candidate_id == "c1"
     assert state.dry_mechanisms == 1
     assert next_mode(state, cfg()) == "shift"
 
@@ -185,7 +187,7 @@ def test_patience_two_gets_a_second_try_before_shifting() -> None:
         outcome="lose",
         config=config,
     )
-    assert next_mode(state, config) == "stay"
+    assert next_mode(state, config) == "refine"
     assert state.dry_mechanisms == 0
     state = apply_round(
         state,
@@ -197,6 +199,28 @@ def test_patience_two_gets_a_second_try_before_shifting() -> None:
     )
     assert next_mode(state, config) == "shift"
     assert state.dry_mechanisms == 1
+
+
+def test_mechanism_identity_ignores_case_spacing_and_punctuation() -> None:
+    assert mechanism_key(" Invoice  Reminder! ") == mechanism_key("invoice-reminder")
+    state = apply_round(
+        LoopState(),
+        mechanism="Invoice Reminder!",
+        candidate_id="c1",
+        score_pp=0.2,
+        outcome="lose",
+        config=cfg(patience=2),
+    )
+    state = apply_round(
+        state,
+        mechanism="invoice-reminder",
+        candidate_id="c2",
+        score_pp=0.3,
+        outcome="lose",
+        config=cfg(patience=2),
+    )
+    assert state.tries_on_current == 2
+    assert state.tried_mechanisms == ("invoice-reminder",)
 
 
 def test_win_resets_tries_and_dry_counters() -> None:
@@ -234,6 +258,29 @@ def test_non_scored_outcomes_consume_patience_like_losses(outcome: str) -> None:
         config=cfg(),
     )
     assert state.dry_mechanisms == 1
+    assert state.current_candidate_id is None
+    assert state.current_mechanism is None
+    assert next_mode(state, cfg()) == "shift"
+
+
+@pytest.mark.parametrize("outcome", ["suppressed", "unavailable"])
+def test_non_scored_round_preserves_the_actual_current_selection(outcome: str) -> None:
+    current = LoopState(
+        best_score=2.0,
+        best_candidate_id="winner",
+        current_candidate_id="winner",
+        current_mechanism="invoices",
+    )
+    state = apply_round(
+        current,
+        mechanism="arbitrary-row",
+        candidate_id="discarded",
+        score_pp=None,
+        outcome=outcome,
+        config=cfg(),
+    )
+    assert state.current_candidate_id == "winner"
+    assert state.current_mechanism == "invoices"
     assert next_mode(state, cfg()) == "shift"
 
 
@@ -316,3 +363,12 @@ def test_replay_recovers_non_challenger_mechanisms_from_ranking() -> None:
     ranking = {"order": [{"mechanism": "a"}, {"mechanism": "sibling"}]}
     state = replay([Row("a", "c1", 2.0, "win", ranking=ranking)], config)
     assert set(state.tried_mechanisms) == {"a", "sibling"}
+
+
+def test_replay_recovers_suppressed_generated_mechanisms() -> None:
+    ranking = {
+        "order": [{"mechanism": "ranked"}],
+        "generated_mechanisms": ["ranked", "critic-suppressed"],
+    }
+    state = replay([Row("ranked", "c1", None, "suppressed", ranking=ranking)], cfg())
+    assert set(state.tried_mechanisms) == {"ranked", "critic-suppressed"}

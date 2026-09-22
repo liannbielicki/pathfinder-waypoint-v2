@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { WinnerReview } from "./WinnerReview";
 import { RUN_FIXTURE } from "@/test/fixtures";
@@ -65,6 +66,29 @@ describe("WinnerReview", () => {
     expect(screen.getByRole("button", { name: /create lcm handoff/i })).toBeEnabled();
   });
 
+  it("tags each winner with its channel and filters by it", async () => {
+    const two: RunDetail = {
+      ...WINNER_RUN,
+      candidates: [
+        WINNER_RUN.candidates[0],
+        { ...WINNER_RUN.candidates[0], id: "cand-2", pro_id: "pro_2",
+          recommendation: { ...WINNER_RUN.candidates[0].recommendation, title: "Email the recap", channel: "email" } },
+      ],
+      winners: [
+        WINNER_RUN.winners[0],
+        { ...WINNER_RUN.winners[0], id: "win-2", pro_id: "pro_2", candidate_id: "cand-2" },
+      ],
+    };
+    render(<WinnerReview run={two} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByRole("heading", { name: /open invoices reminder.*SMS/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Email the recap.*EMAIL/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "email (1)" }));
+    expect(screen.queryByRole("heading", { name: /open invoices reminder/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Email the recap/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "all (2)" }));
+    expect(screen.getAllByRole("heading", { level: 4 })).toHaveLength(2);
+  });
+
   it("shows real persona labels, never fabricated identities", () => {
     render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
     expect(screen.getByText("Solo hustler")).toBeInTheDocument();
@@ -88,6 +112,74 @@ describe("WinnerReview", () => {
     render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
     // One candidate row per round: the fixture's single candidate → 1 round.
     expect(screen.getByText(/evolve loop: 1 round/i)).toBeInTheDocument();
+  });
+
+  it("shows a compact channel, selection, warm-start, and model explanation", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      candidates: [{
+        ...WINNER_RUN.candidates[0],
+        round: 1,
+        recommendation: {
+          ...WINNER_RUN.candidates[0].recommendation,
+          channel_override_reason: "email engagement was low",
+          cta: { label: "Online Booking", url: "https://example.test/booking" },
+        },
+        persona_evidence: {
+          ...WINNER_RUN.candidates[0].persona_evidence,
+          final: {
+            ...WINNER_RUN.candidates[0].persona_evidence.final,
+            tier: "deep",
+            model: "claude-sonnet-5",
+          },
+        },
+      }],
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: { ...WINNER_RUN.winners[0].evidence, suggested_channel: "email" },
+      }],
+      rounds: [{
+        pro_id: "pro_1", round: 1, mechanism: "invoice_delivery",
+        outcome: "win", score_pp: 4.2,
+        ranking: {
+          order: [
+            { token: "c1", candidate_id: "cand-1", mechanism: "invoice_delivery", rank: 1, score: 0.82 },
+            { token: "c2", candidate_id: "cand-2", mechanism: "review_request", rank: 2, score: 0.65 },
+          ],
+          screen_scores_pp: { c1: 4.2, c2: 1.1 },
+          selection_reason: "all_rankable_candidates_screened",
+          ranker_model: "claude-sonnet-5",
+          screen_model: "claude-sonnet-5",
+          warm_start: { outcome: "cold" },
+        },
+      }],
+    };
+    render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByText(/selected SMS · RECO email/i)).toBeVisible();
+    expect(screen.getByText(/override: email engagement was low/i)).toBeVisible();
+    expect(screen.getByText(/2 candidates compared across 1 round/i)).toBeVisible();
+    expect(screen.getByText(/warm start: no/i)).toBeVisible();
+    expect(screen.getByText(/claude-sonnet-5/i)).toBeVisible();
+    expect(screen.getByText(/technical selection evidence/i)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Online Booking" })).toHaveAttribute(
+      "href", "https://example.test/booking",
+    );
+  });
+
+  it("does not call a full fallback panel undersized", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: {
+          ...WINNER_RUN.winners[0].evidence,
+          panel_disclaimer: { final: "fallback panel: insufficient strong matches" },
+        },
+      }],
+    };
+    render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/fallback panel/i);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/fewer personas/i);
   });
 
   it("counts every round for a Pro, including discarded losers", () => {

@@ -70,7 +70,7 @@ describe("RunStatus", () => {
     for (const label of [
       /max rounds per pro/i, /dry mechanisms before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep/i,
-      /stop-early reduction/i, /ideas per round/i, /ranker tie margin/i,
+      /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
       expect(within(settings).getByText(label)).toBeInTheDocument();
     }

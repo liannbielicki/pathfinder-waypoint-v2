@@ -15,10 +15,14 @@ def _signer(settings: Settings) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.SESSION_KEY.get_secret_value())
 
 
-def login(settings: Settings, response: Response, password: str) -> None:
+def verify_password(settings: Settings, password: str) -> None:
     if not secrets.compare_digest(password, settings.APP_PASSWORD.get_secret_value()):
         # No WWW-Authenticate header: this is a cookie login, not basic auth.
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+def login(settings: Settings, response: Response, password: str) -> None:
+    verify_password(settings, password)
     response.set_cookie(
         COOKIE_NAME,
         _signer(settings).dumps({"authenticated": True}),
@@ -64,3 +68,15 @@ def require_session_or_outcomes_token(request: Request) -> None:
             raise HTTPException(status_code=401, detail="Invalid token")
         return
     require_session(request)
+
+
+def require_n8n_token(request: Request) -> None:
+    """Authenticate the narrow n8n completion callback with its existing token."""
+    settings: Settings = request.app.state.settings
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not secrets.compare_digest(
+        header[7:].strip(), settings.N8N_TOKEN.get_secret_value()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid token")

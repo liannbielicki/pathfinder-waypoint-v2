@@ -82,7 +82,7 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   return (
     <main>
       <p>
-        <Link href="/">← Start page</Link>
+        <Link href="/">← Start page</Link> · <Link href="/calls">Calls to place</Link>
       </p>
       {connectionError && <p role="alert" className="error">{connectionError}</p>}
       {actionError && <p role="alert" className="error">{actionError}</p>}

@@ -44,9 +44,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from waypoint.cursors import load_cursor, parse_time, save_cursor
 from waypoint.exposures import register
 from waypoint.models import ExposureIn, TouchOutcomeIn
-from waypoint.outcomes import ingest
+from waypoint.outcomes import ingest, winners_by_run_pro
 from waypoint.settings import Settings
-from waypoint.tables import ExposureRow, FleetControlRow, WinnerRow
+from waypoint.tables import ExposureRow, FleetControlRow
 
 log = logging.getLogger("waypoint.iterable_source")
 
@@ -194,24 +194,6 @@ async def _fetch_events(
     return events
 
 
-async def _resolve_winners(
-    session: AsyncSession, pairs: set[tuple[str, str]]
-) -> dict[tuple[str, str], str]:
-    """(run_id, pro_id) -> winner id, exact via uq_winners_run_pro."""
-    if not pairs:
-        return {}
-    rows = (
-        await session.execute(
-            select(WinnerRow.id, WinnerRow.run_id, WinnerRow.pro_id).where(
-                WinnerRow.run_id.in_({run for run, _ in pairs}),
-                WinnerRow.pro_id.in_({pro for _, pro in pairs}),
-                WinnerRow.kind == "winner",
-            )
-        )
-    ).all()
-    return {(row.run_id, row.pro_id): row.id for row in rows}
-
-
 def _send_to_exposure(event: dict[str, Any], winner_id: str | None) -> ExposureIn | None:
     message_id = event.get("messageId")
     sent_at = parse_time(event.get("createdAt"))
@@ -295,7 +277,7 @@ async def poll(
         # closed for every send (LCM team's own lost-hour warning).
         log.warning("iterable: NO send in the window carries an email; routing is dark")
     pairs = {pair for pair in (_run_pro(e) for e in sends) if pair[0] and pair[1]}
-    winners = await _resolve_winners(session, pairs)
+    winners = await winners_by_run_pro(session, pairs)
     exposures, deferred, ignored = _sends_to_exposures(sends, winners, now)
     if exposures:
         await register(session, exposures)

@@ -55,6 +55,16 @@ class PatternEvidence:
     arm_counts: dict[str, int] | None = None
 
 
+def _merged_flag(rows: list[TouchOutcomeRow], field: str) -> bool | None:
+    """Merge source observations for one touch without inventing a measurement."""
+    values = [getattr(row, field) for row in rows]
+    if any(value is True for value in values):
+        return True
+    if any(value is False for value in values):
+        return False
+    return None
+
+
 async def pattern_summaries(
     session: AsyncSession, journey_window: str, channels: list[str], limit: int = 500
 ) -> list[PatternEvidence]:
@@ -70,39 +80,55 @@ async def pattern_summaries(
             .limit(limit)
         )
     ).scalars().all()
-    grouped: dict[tuple[str, str], list[TouchOutcomeRow]] = {}
+    logical_touches: dict[tuple[str, str], list[TouchOutcomeRow]] = {}
     for row in rows:
+        identity = (
+            ("exposure", row.exposure_id)
+            if row.exposure_id
+            else ("recommendation", row.recommendation_id)
+        )
+        logical_touches.setdefault(identity, []).append(row)
+
+    grouped: dict[tuple[str, str], list[list[TouchOutcomeRow]]] = {}
+    for touch in logical_touches.values():
+        row = touch[0]  # query order makes this the newest source observation
         # V3 learns at canonical (item, version) level — a drifted concept is
         # not pooled with its predecessor; legacy rows fall back to mechanism.
         item_key = f"{row.item_id}:{row.item_version}" if row.item_id else row.mechanism
-        grouped.setdefault((row.channel, item_key), []).append(row)
+        grouped.setdefault((row.channel, item_key), []).append(touch)
     patterns = []
     for (channel, _item_key), group in sorted(grouped.items()):
         # Control (arm B) rows exist for the causal comparison, not the
         # treatment rate — pooling them would dilute every return rate.
-        treated = [r for r in group if r.arm != "B"]
+        treated = [touch for touch in group if touch[0].arm != "B"]
         if not treated:
             continue  # a pure control group is a comparison, not a pattern
         returned: dict[str, tuple[int, int]] = {}
         for horizon in _HORIZONS:
-            values = [getattr(r, f"returned_{horizon}") for r in treated]
+            values = [_merged_flag(touch, f"returned_{horizon}") for touch in treated]
             measured = [v for v in values if v is not None]
             returned[horizon] = (sum(1 for v in measured if v), len(measured))
+        first = treated[0][0]
         patterns.append(
             PatternEvidence(
                 channel=channel,
                 # Labels come from treated rows: group[0] is the NEWEST row,
                 # often a sweep-synthesized control carrying mechanism="".
-                mechanism=next((r.mechanism for r in treated if r.mechanism), ""),
+                mechanism=next(
+                    (row.mechanism for touch in treated for row in touch if row.mechanism),
+                    "",
+                ),
                 sent=len(treated),
                 returned=returned,
-                unsubscribed=sum(1 for r in treated if r.unsubscribed),
-                item_id=treated[0].item_id,
-                item_version=treated[0].item_version,
+                unsubscribed=sum(
+                    1 for touch in treated if _merged_flag(touch, "unsubscribed") is True
+                ),
+                item_id=first.item_id,
+                item_version=first.item_version,
                 arm_counts={
-                    arm: sum(1 for r in group if r.arm == arm)
+                    arm: sum(1 for touch in group if touch[0].arm == arm)
                     for arm in ("A", "B")
-                    if any(r.arm == arm for r in group)
+                    if any(touch[0].arm == arm for touch in group)
                 } or None,
             )
         )

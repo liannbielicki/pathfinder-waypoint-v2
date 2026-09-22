@@ -7,7 +7,7 @@ durable state. Health exposes nothing but liveness.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from waypoint import auth, queue
 from waypoint import funnel as funnel_report
+from waypoint.activity import current_activity, lock_fleet
+from waypoint.call_todos import list_calls, update_call
 from waypoint.db import make_engine, make_session_factory
 from waypoint.exposures import register as register_exposures_batch
 from waypoint.handoff import (
@@ -24,9 +26,17 @@ from waypoint.handoff import (
     make_lcm_client,
     ready_rows,
 )
+from waypoint.hosted_workbench import (
+    JobExecutor,
+    get_hosted_workbench,
+    install_hosted_workbench,
+)
 from waypoint.loop import LoopConfig
 from waypoint.models import (
     TERMINAL_RUN_STATUSES,
+    CallItem,
+    CallUpdate,
+    ContextSource,
     ExposureIn,
     HandoffReceipt,
     RunCreate,
@@ -35,8 +45,10 @@ from waypoint.models import (
 )
 from waypoint.outcomes import ingest as ingest_outcomes_batch
 from waypoint.settings import Settings
+from waypoint.staging_context import compile_staging_brief
 from waypoint.tables import (
     CandidateRow,
+    ContextPromotionRow,
     EvolveRoundRow,
     FleetControlRow,
     HandoffRow,
@@ -44,11 +56,67 @@ from waypoint.tables import (
     MeasurementRow,
     RunRow,
     WinnerRow,
+    WorkbenchCatalogVersionRow,
 )
+from waypoint.workbench import ContextLayerClient, org_uuid_from_n8n
+from waypoint.workbench_api import execute_run
+
+
+def _staging_context_available(settings: Settings) -> bool:
+    return all(
+        (
+            settings.N8N_CONTEXT_URL_WORKBENCH,
+            settings.CONTEXT_LAYER_BASE_URL,
+            settings.CONTEXT_LAYER_API_KEY,
+        )
+    )
+
+
+async def _staging_context_summary(
+    session: AsyncSession, settings: Settings
+) -> dict[str, Any] | None:
+    if not _staging_context_available(settings):
+        return None
+    promotion = (
+        await session.execute(
+            select(ContextPromotionRow).where(ContextPromotionRow.active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if promotion is None:
+        return None
+    bundle = dict(promotion.bundle or {})
+    context_id = str(bundle.get("context_catalog_version_id") or "")
+    feature_id = str(bundle.get("feature_catalog_version_id") or "")
+    context = await session.get(WorkbenchCatalogVersionRow, context_id)
+    feature = await session.get(WorkbenchCatalogVersionRow, feature_id)
+    if (
+        context is None
+        or context.kind != "context"
+        or feature is None
+        or feature.kind != "feature"
+    ):
+        return None
+    rules = bundle.get("rules")
+    return {
+        "promotion_id": promotion.id,
+        "context_catalog_version_id": context_id,
+        "context_catalog_name": context.name,
+        "feature_catalog_version_id": feature_id,
+        "feature_catalog_name": feature.name,
+        "included_variables": len(rules) if isinstance(rules, list) else 0,
+        "created_at": promotion.activated_at.isoformat(),
+    }
 
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class StagingContextCallback(BaseModel):
+    request_id: str
+    organization_id: str
+    promotion_id: str
+    rows: list[dict[str, Any]]
 
 
 class RunDetail(RunView):
@@ -82,6 +150,9 @@ def _view(run: RunRow, spent: Decimal | None = None) -> RunView:
         stop_reason=run.stop_reason,
         created_at=run.created_at,
         journey_window=run.journey_window,
+        context_source=cast(ContextSource, run.context_source),
+        include_features_not_in_current_plan=run.include_features_not_in_current_plan,
+        model_tier=cast(Any, run.model_tier),
     )
 
 
@@ -105,7 +176,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.session_factory is None:
         engine = make_engine(app.state.settings.DATABASE_URL.get_secret_value())
         app.state.session_factory = make_session_factory(engine)
-    yield
+    workbench = get_hosted_workbench(app)
+    await workbench.resume()
+    try:
+        yield
+    finally:
+        await workbench.shutdown()
 
 
 async def _get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -120,6 +196,7 @@ AuthDep = Annotated[None, Depends(auth.require_session)]
 # work list. Both accept the scoped OUTCOMES_TOKEN as well as an operator
 # cookie. Every other endpoint is operator-only.
 OutcomeAuthDep = Annotated[None, Depends(auth.require_session_or_outcomes_token)]
+N8NAuthDep = Annotated[None, Depends(auth.require_n8n_token)]
 
 
 async def _ensure_fleet(session: AsyncSession, settings: Settings) -> None:
@@ -152,18 +229,130 @@ async def _run_or_404(session: AsyncSession, run_id: str) -> RunRow:
 def create_app(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    workbench_executor: JobExecutor | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Pathfinder Waypoint V2", version="1.0.0", lifespan=_lifespan)
     app.state.settings = settings
     app.state.session_factory = session_factory
+    install_hosted_workbench(app, executor=workbench_executor or execute_run)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/api/context/staging/callback")
+    async def complete_staging_context(
+        request: Request,
+        body: StagingContextCallback,
+        session: SessionDep,
+        _: N8NAuthDep,
+    ) -> dict[str, str]:
+        job = await session.get(JobRow, body.request_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Staging context request not found")
+        run = await session.get(RunRow, job.run_id)
+        if (
+            run is None
+            or run.context_source != "staging"
+            or job.stage != "pro"
+            or job.pro_id != body.organization_id
+            or run.audience_query != f"workbench:{body.promotion_id}"
+        ):
+            raise HTTPException(status_code=409, detail="Staging context request does not match")
+        if "staging_context" in job.checkpoint:
+            return {"status": "already_completed", "request_id": body.request_id}
+        if job.status in {"done", "failed", "stopped"} or run.status in TERMINAL_RUN_STATUSES:
+            return {"status": "ignored", "request_id": body.request_id}
+        requested = job.checkpoint.get("staging_request")
+        if not isinstance(requested, dict) or requested.get("promotion_id") != body.promotion_id:
+            raise HTTPException(status_code=409, detail="Staging context request is not waiting")
+
+        promotion = await session.get(ContextPromotionRow, body.promotion_id)
+        if promotion is None:
+            raise HTTPException(status_code=409, detail="Staging context promotion is missing")
+        promotion_bundle = dict(promotion.bundle or {})
+        include_features_not_in_current_plan = run.include_features_not_in_current_plan
+        # Do not hold a database transaction or connection open while calling
+        # the external Context Layer service.
+        await session.rollback()
+        settings: Settings = request.app.state.settings
+        if settings.CONTEXT_LAYER_BASE_URL is None or settings.CONTEXT_LAYER_API_KEY is None:
+            raise HTTPException(status_code=503, detail="Context Layer is not configured")
+        try:
+            org_uuid = org_uuid_from_n8n(body.rows)
+            if org_uuid is None:
+                raise ValueError("Snowflake context is missing a unique org_uuid")
+            context_layer = await ContextLayerClient().fetch(
+                org_uuid,
+                str(settings.CONTEXT_LAYER_BASE_URL),
+                settings.CONTEXT_LAYER_API_KEY.get_secret_value(),
+            )
+            brief = compile_staging_brief(
+                body.organization_id,
+                body.rows,
+                context_layer,
+                promotion_bundle,
+                include_features_not_in_current_plan=include_features_not_in_current_plan,
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Staging context could not be compiled ({type(error).__name__})",
+            ) from error
+
+        job = (
+            await session.execute(
+                select(JobRow)
+                .where(JobRow.id == body.request_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if "staging_context" in job.checkpoint:
+            await session.rollback()
+            return {"status": "already_completed", "request_id": body.request_id}
+        run = (
+            await session.execute(
+                select(RunRow)
+                .where(RunRow.id == job.run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if job.status in {"done", "failed", "stopped"} or run.status in TERMINAL_RUN_STATUSES:
+            await session.rollback()
+            return {"status": "ignored", "request_id": body.request_id}
+        if job.status != "waiting":
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="Staging context request is not waiting")
+        requested = job.checkpoint.get("staging_request")
+        if not isinstance(requested, dict) or requested.get("promotion_id") != body.promotion_id:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="Staging context request does not match")
+        checkpoint = dict(job.checkpoint)
+        checkpoint["staging_context"] = {
+            "promotion_id": body.promotion_id,
+            "brief": {
+                **brief.model_dump(mode="json", exclude_none=True),
+                "curated_context": brief.curated_context,
+            },
+        }
+        job.checkpoint = checkpoint
+        job.status = "queued"
+        job.worker_id = None
+        job.lease_until = None
+        await session.commit()
+        return {"status": "queued", "request_id": body.request_id}
+
     @app.post("/api/auth/login")
     async def login(request: Request, response: Response, body: LoginRequest) -> dict[str, str]:
-        auth.login(request.app.state.settings, response, body.password)
+        settings: Settings = request.app.state.settings
+        auth.verify_password(settings, body.password)
+        async with request.app.state.session_factory() as session:
+            await lock_fleet(session, settings)
+            if await current_activity(session) == "workbench":
+                raise HTTPException(status_code=409, detail="Context Workbench is running")
+            await session.commit()
+        auth.login(settings, response, body.password)
         return {"status": "ok"}
 
     @app.post("/api/runs", status_code=202, response_model=RunView)
@@ -171,9 +360,30 @@ def create_app(
         request: Request, body: RunCreate, session: SessionDep, _: AuthDep
     ) -> RunView:
         settings: Settings = request.app.state.settings
+        if body.context_source == "staging" and any(
+            len(identifier) not in {5, 6} or not identifier.isdigit()
+            for identifier in body.pro_ids
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Staging context requires five- or six-digit organization IDs",
+            )
         await _ensure_fleet(session, settings)
-        fleet = await session.get(FleetControlRow, 1)
-        assert fleet is not None
+        fleet = await lock_fleet(session, settings)
+        if await current_activity(session) == "workbench":
+            raise HTTPException(status_code=409, detail="Context Workbench is running")
+        if body.context_source == "staging":
+            staging_context = await _staging_context_summary(session, settings)
+            if staging_context is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Staging context is unavailable because its sources or active Workbench catalog are missing",
+                )
+            if body.context_promotion_id != staging_context["promotion_id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The active Staging context changed; review it and start the run again",
+                )
         defaults = dict(fleet.loop_defaults or {})
         try:
             config = LoopConfig.from_mapping({**defaults, **(body.loop_config or {})})
@@ -187,10 +397,17 @@ def create_app(
         pro_ids = list(dict.fromkeys(body.pro_ids))
         run = RunRow(
             pro_ids=pro_ids,
-            audience_query=body.audience_query,
+            audience_query=(
+                f"workbench:{body.context_promotion_id}"
+                if body.context_source == "staging"
+                else body.audience_query
+            ),
             audience_run=body.audience_run,
             channels=body.channels,
             journey_window=body.journey_window,
+            context_source=body.context_source,
+            include_features_not_in_current_plan=body.include_features_not_in_current_plan,
+            model_tier=body.model_tier,
             loop_config=config.to_dict(),  # immutable per-run snapshot
             cost_limit=Decimal(settings.RUN_COST_USD),
         )
@@ -209,9 +426,13 @@ def create_app(
         assert fleet is not None
         effective = LoopConfig.from_mapping(dict(fleet.loop_defaults or {}))
         await session.commit()
+        staging_context = await _staging_context_summary(session, settings)
         return {
             "loop_defaults": effective.to_dict(),
             "max_in_flight_llm_calls": settings.MAX_LLM_IN_FLIGHT,
+            "models": {"fast": settings.MODEL_FAST, "deep": settings.MODEL_DEEP},
+            "staging_context_available": staging_context is not None,
+            "staging_context": staging_context,
         }
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)
@@ -289,6 +510,7 @@ def create_app(
                     "mechanism": r.mechanism,
                     "outcome": r.outcome,
                     "score_pp": r.score_pp,
+                    "ranking": r.ranking,
                 }
                 for r in rounds
             ],
@@ -399,6 +621,20 @@ def create_app(
         exposures with no WinnerRow. Winner-linked identity is derived from
         the winner; identity is immutable after registration."""
         return await register_exposures_batch(session, body)
+
+    @app.get("/api/calls", response_model=list[CallItem])
+    async def calls(session: SessionDep, _: AuthDep) -> list[CallItem]:
+        """Call-channel winners across runs: the operators' own work list.
+        These never reach LCM; Pathfinder staff place the calls."""
+        return await list_calls(session)
+
+    @app.patch("/api/calls/{winner_id}", response_model=CallItem)
+    async def patch_call(
+        winner_id: str, body: CallUpdate, session: SessionDep, _: AuthDep
+    ) -> CallItem:
+        if await update_call(session, winner_id, body.status, body.note) is None:
+            raise HTTPException(status_code=404, detail="No call-channel winner with that id")
+        return next(c for c in await list_calls(session) if c.winner_id == winner_id)
 
     @app.post("/api/runs/{run_id}/handoff", response_model=HandoffResponse)
     async def create_handoff(

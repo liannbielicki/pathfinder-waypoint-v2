@@ -65,15 +65,19 @@ def test_protected_traits_cannot_enter_match_features() -> None:
     )
 
 
-def test_insufficient_qualifying_matches_reports_low_panel_fit() -> None:
+def test_unmatched_personas_become_broad_fallbacks_instead_of_failing() -> None:
     distant = ProMatchInput(
         pro_id="pro_x",
         features={"segment": "9Z", "plan": "mystery", "tenure_bucket": "0-1d",
                   "org_size_bucket": "mega", "trade_bucket": "unknown",
                   "open_ar_band": "n/a", "lifecycle_stage": "frozen"},
     )
-    with pytest.raises(InsufficientPanelFit):
-        select_panel(distant, PERSONAS, size=3)
+    panel = select_panel(distant, PERSONAS, size=3)
+
+    assert len(panel.items) == 3
+    assert panel.match_quality == "broad_fallback"
+    assert panel.fallback_reason == "insufficient strong or same-segment matches"
+    assert all(item.role == "broad_fallback" for item in panel.items)
 
 
 def test_counterweight_shortage_degrades_with_a_flag_instead_of_abstaining() -> None:
@@ -120,42 +124,43 @@ _BACKFILL_POOL = [
 ]
 
 
-def test_backfill_seats_next_closest_above_the_floor_never_random() -> None:
+def test_same_segment_fallback_seats_next_closest_never_random() -> None:
     panel = select_panel(_BACKFILL_PRO, _BACKFILL_POOL, size=3)
-    assert [item.role for item in panel.items] == ["closest", "closest", "backfill"]
-    # The backfill seat is the best sub-threshold persona from a NEW family,
+    assert [item.role for item in panel.items] == ["closest", "closest", "segment_fallback"]
+    # The fallback seat is the best sub-threshold persona from a NEW family,
     # carrying its real fit score — never the 0.0-fit stranger.
     assert panel.items[2].persona_id == "near"
     assert panel.items[2].family == "fam_b"
     assert 0.3 <= panel.items[2].fit_score < FIT_THRESHOLD
-    # A full-size panel with a backfill seat is still flagged degraded.
+    # A full-size panel with a fallback seat is still flagged degraded.
     assert panel.degraded is True
     assert panel.requested_size == 3
 
 
-def test_backfill_never_seats_below_the_floor() -> None:
-    # Only the 0.0-fit persona is available to backfill: the seat stays empty.
+def test_broad_fallback_fills_a_seat_below_the_old_fit_floor() -> None:
+    # A weak match is labeled rather than discarded: lack of an exact persona
+    # must not fail a run when an available evaluator can still be used.
     pool = [p for p in _BACKFILL_POOL if p.persona_id != "near"]
     panel = select_panel(_BACKFILL_PRO, pool, size=3)
-    assert [item.role for item in panel.items] == ["closest", "closest"]
+    assert [item.role for item in panel.items] == ["closest", "closest", "broad_fallback"]
     assert panel.degraded is True
 
 
-def test_backfill_never_substitutes_for_the_two_qualifying_minimum() -> None:
-    # One qualifying match plus a floor-clearing backfill candidate is still
-    # no panel: backfill supplements real signal, it never constitutes it.
+def test_fallback_substitutes_when_only_one_strong_match_exists() -> None:
     pool = [p for p in _BACKFILL_POOL if p.persona_id != "full_b"]
-    with pytest.raises(InsufficientPanelFit):
-        select_panel(_BACKFILL_PRO, pool, size=3)
+    panel = select_panel(_BACKFILL_PRO, pool, size=3)
+    assert len(panel.items) == 3
+    assert panel.match_quality == "broad_fallback"
 
 
-def test_fewer_than_two_qualifying_matches_still_abstains() -> None:
+def test_one_available_persona_returns_a_labeled_short_panel() -> None:
     lone = [p for p in PERSONAS if p.family == "solo_operators"][:1]
-    with pytest.raises(InsufficientPanelFit):
-        select_panel(PRO_FIXTURE, lone, size=3)
+    panel = select_panel(PRO_FIXTURE, lone, size=3)
+    assert len(panel.items) == 1
+    assert panel.degraded is True
 
 
-def test_segment_is_enough_when_personas_are_flat() -> None:
+def test_segment_only_cards_are_usable_but_low_coverage() -> None:
     # Regression: real persona-cards items are flat (segment + usage booleans),
     # sharing ONLY `segment` with a Pro. With segment fed, fit is 1.0 for the
     # whole pool and a panel forms; without it, no key is shared -> 0 available.
@@ -167,12 +172,77 @@ def test_segment_is_enough_when_personas_are_flat() -> None:
     ]
     with_segment = ProMatchInput(pro_id="pro_a", features={"segment": "2B", "plan": "grow"})
     panel = select_panel(with_segment, flat, size=3)
-    assert [item.role for item in panel.items] == ["closest", "closest", "counterweight"]
+    assert all(item.role == "segment_fallback" for item in panel.items)
     assert all(item.fit_score == 1.0 for item in panel.items)
+    assert panel.coverage_score < 0.6
+    assert panel.match_quality == "segment_fallback"
 
     without_segment = ProMatchInput(pro_id="pro_b", features={"plan": "grow"})
+    broad = select_panel(without_segment, flat, size=3)
+    assert all(item.role == "broad_fallback" for item in broad.items)
+
+
+def test_empty_persona_pool_is_still_an_error() -> None:
     with pytest.raises(InsufficientPanelFit):
-        select_panel(without_segment, flat, size=3)
+        select_panel(PRO_FIXTURE, [], size=3)
+
+
+def test_weighted_fit_and_coverage_prefer_richer_shared_state() -> None:
+    sparse = _persona("sparse", "sparse", segment="1A")
+    rich = _persona(
+        "rich",
+        "rich",
+        segment="1A",
+        plan="basic",
+        lifecycle_stage="active",
+        trade_bucket="hvac",
+        open_ar_band="low",
+        booking_attached=True,
+    )
+    partial = _persona("partial", "partial", segment="1A", plan="max")
+    pro = ProMatchInput(
+        pro_id="pro_weighted",
+        features={
+            "segment": "1A",
+            "plan": "basic",
+            "lifecycle_stage": "active",
+            "trade_bucket": "hvac",
+            "open_ar_band": "low",
+            "booking_attached": True,
+        },
+    )
+
+    panel = select_panel(pro, [sparse, partial, rich], size=3)
+
+    assert panel.items[0].persona_id == "rich"
+    assert panel.items[0].fit_score == 1.0
+    assert panel.items[0].coverage_score == 1.0
+    assert panel.items[1].coverage_score < panel.items[0].coverage_score
+    assert [item.persona_id for item in panel.items] == ["rich", "partial", "sparse"]
+
+
+def test_excluded_personas_are_reused_only_when_needed_and_labeled() -> None:
+    screen = select_panel(PRO_FIXTURE, PERSONAS, size=3)
+    screened_ids = {item.persona_id for item in screen.items}
+
+    final = select_panel(PRO_FIXTURE, PERSONAS, size=5, exclude_ids=screened_ids)
+
+    # Four unseen fixture personas exist, so exactly one screen member must be
+    # reused to fill the five-person final panel.
+    assert len(final.overlap_persona_ids) == 1
+    assert {item.persona_id for item in final.items if item.reused} == set(
+        final.overlap_persona_ids
+    )
+    assert final.fallback_reason == "insufficient unseen personas"
+
+
+def test_excluded_personas_are_not_reused_when_unseen_supply_is_sufficient() -> None:
+    excluded = {PERSONAS[0].persona_id, PERSONAS[1].persona_id}
+
+    panel = select_panel(PRO_FIXTURE, PERSONAS, size=3, exclude_ids=excluded)
+
+    assert not panel.overlap_persona_ids
+    assert not any(item.reused for item in panel.items)
 
 
 def test_panel_selection_is_deterministic() -> None:

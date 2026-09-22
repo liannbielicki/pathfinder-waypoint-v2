@@ -17,7 +17,7 @@ from waypoint.calls import (
     RecordedCalls,
 )
 from waypoint.llm import LLMResult
-from waypoint.pipeline import run_job
+from waypoint.pipeline import MAX_CONCURRENT_SCREEN_STACKS, run_job
 from waypoint.settings import Settings
 from waypoint.tables import LlmCallRow, RunRow
 from waypoint.worker import make_pricing
@@ -173,10 +173,10 @@ async def test_tied_finalists_are_screened_concurrently(
 
     await run_job(seeded_job.id, deps)
 
-    assert gateway.peak_screens_in_flight == 2  # both were in the provider at once
-    assert gateway.calls_for("screen") == 2
+    assert gateway.peak_screens_in_flight == MAX_CONCURRENT_SCREEN_STACKS
+    assert gateway.calls_for("screen") == 3
     ledger = await rounds(deps.db, seeded_job.run_id)
-    assert ledger[0].ranking["finalists"] == ["c1", "c2"]
+    assert ledger[0].ranking["finalists"] == ["c1", "c2", "c3"]
     assert ledger[0].outcome == "win"
 
 
@@ -193,15 +193,15 @@ async def test_each_concurrent_screen_is_a_recorded_metered_call(
 
     prefix = f"{seeded_job.run_id}:{seeded_job.pro_id}:r1:screen"
     recorded = await screen_call_keys(deps, seeded_job.run_id)
-    assert set(recorded) == {f"{prefix}:c1", f"{prefix}:c2"}
+    assert set(recorded) == {f"{prefix}:c1", f"{prefix}:c2", f"{prefix}:c3"}
     assert set(recorded.values()) == {"reconciled"}  # each stack reconciled its own spend
 
 
 async def test_a_budget_exhausted_screen_propagates_and_cancels_its_sibling(
     db_engine, db_session_factory, deps: FakeDeps, seeded_job
 ) -> None:
-    """The critical contract: one finalist raising must stop the OTHER finalist's
-    paid call, not leave it running against a job we may no longer own."""
+    """One screen raising must stop every sibling paid call, not leave work
+    running against a job we may no longer own."""
     gateway = ScreenProbe(
         rendezvous=True, screen_effects={C1_CONCEPT: BudgetExhausted("injected")}
     )
@@ -213,7 +213,9 @@ async def test_a_budget_exhausted_screen_propagates_and_cancels_its_sibling(
     await run_job(seeded_job.id, deps)
 
     assert gateway.peak_screens_in_flight == 2  # both were in the provider
-    assert gateway.cancelled_screens == 1  # the sibling was cancelled, not orphaned
+    # One sibling was active in the provider and is cancelled there; the third
+    # was still waiting on the two-stack cap and never opened a connection.
+    assert gateway.cancelled_screens == 1
     assert gateway.completed_screens == 0  # and it never finished a paid call
     # BudgetExhausted reached run_job's handler as itself, not an ExceptionGroup.
     run = await deps.db.get(RunRow, seeded_job.run_id)
@@ -259,12 +261,12 @@ async def test_without_llm_stacks_the_tied_round_screens_sequentially(
     await run_job(seeded_job.id, deps)
 
     assert gateway.peak_screens_in_flight == 1  # one at a time, unchanged
-    assert gateway.calls_for("screen") == 2
+    assert gateway.calls_for("screen") == 3
     ledger = await rounds(deps.db, seeded_job.run_id)
-    assert ledger[0].ranking["selection_reason"] == "tie_broken_by_screen_runner_up"
+    assert ledger[0].ranking["selection_reason"] == "screen_selected_ranker_non_top"
     assert ledger[0].outcome == "win"
     recorded = await screen_call_keys(deps, seeded_job.run_id)
-    assert len(recorded) == 2
+    assert len(recorded) == 3
 
 
 # --- worker pricing ----------------------------------------------------------

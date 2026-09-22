@@ -19,6 +19,9 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 _TABLES = (
+    "workbench_catalog_versions",
+    "context_promotions",
+    "workbench_jobs",
     "measurements",
     "handoffs",
     "winners",
@@ -81,6 +84,7 @@ async def db_session(
 # --- pipeline fakes -------------------------------------------------------
 
 import json
+import re
 from decimal import Decimal
 
 from waypoint import queue as queue_module
@@ -247,8 +251,41 @@ class FakeLLM:
         )
         if stage in self._fail:
             raise RateLimitExhausted("injected model failure")
+        text = self._next(stage)
+        if stage == "evolve" and "Mode: REFINE" in prompt and text == BATCH_OK:
+            current = re.search(r'"mechanism":\s*"([^"]+)"', prompt)
+            if current:
+                mechanism = current.group(1)
+                text = json.dumps(
+                    [json.loads(idea_json(mechanism, index)) for index in range(3)]
+                )
+        if stage == "evolve" and "Mode: SHIFT" in prompt and text == BATCH_OK:
+            # The default fake should honor the production contract: SHIFT
+            # returns genuinely untried mechanisms and distinct touch concepts.
+            pool = [f"shift_{index}" for index in range(30)]
+            chosen = [
+                mechanism
+                for mechanism in pool
+                if mechanism not in prompt and mechanism.replace("_", "-") not in prompt
+            ][:3]
+            text = json.dumps(
+                [
+                    json.loads(idea_json(mechanism, pool.index(mechanism) + 10))
+                    for mechanism in chosen
+                ]
+            )
+        if stage in {"screen", "final"}:
+            try:
+                payload = json.loads(text)
+                requested = set(re.findall(r'"persona_id":\s*"([^"]+)"', prompt))
+                if isinstance(payload, list) and requested:
+                    text = json.dumps(
+                        [item for item in payload if item.get("persona_id") in requested]
+                    )
+            except (json.JSONDecodeError, AttributeError):
+                pass
         return LLMResult(
-            text=self._next(stage),
+            text=text,
             model=f"fake-{tier}",
             input_tokens=10,
             output_tokens=5,
@@ -259,12 +296,15 @@ class FakeLLM:
 class FakeContext:
     def __init__(self) -> None:
         self.unavailable = False
+        self.fetches: list[list[str]] = []
         self.audience_query_version: str | None = None
+        self.starts: list[tuple[str, str, str]] = []
         self.batch = OrgContextBatch.model_validate_json(
             (FIXTURES / "n8n_context.json").read_text()
         )
 
     async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+        self.fetches.append(pro_ids)
         if self.unavailable:
             raise ContextUnavailable("injected outage")
         orgs = [o for o in self.batch.organizations if o.pro_id in pro_ids]
@@ -273,6 +313,13 @@ class FakeContext:
             organizations=orgs,
             audience_query_version=self.audience_query_version,
         )
+
+    async def start(
+        self, organization_id: str, request_id: str, promotion_id: str
+    ) -> None:
+        self.starts.append((organization_id, request_id, promotion_id))
+        if self.unavailable:
+            raise ContextUnavailable("injected outage")
 
 
 class CrashableStore(PostgresStore):
@@ -349,6 +396,7 @@ async def seeded_job(db_session: AsyncSession):
         audience_query="audience_v7",
         audience_run="2026-08-06T18:00:00Z",
         channels=["sms"],
+        model_tier="fast",
         cost_limit=Decimal("100.00"),
     )
     db_session.add(run)
@@ -372,7 +420,11 @@ TEST_SETTINGS = Settings(
     DATABASE_URL="postgresql+asyncpg://localhost:5432/waypoint_test",
     LLM_API_KEY="test",
     N8N_CONTEXT_URL="https://n8n.example/webhook/context",
+    N8N_CONTEXT_URL_STAGING="https://n8n.example/webhook/context-staging",
+    N8N_CONTEXT_URL_WORKBENCH="https://n8n.example/webhook/context-workbench",
     N8N_TOKEN="test",
+    CONTEXT_LAYER_BASE_URL="https://context.example",
+    CONTEXT_LAYER_API_KEY="context-test",
     PERSONA_URL="https://personas.example/personas",
     PERSONA_TOKEN="test",
     HANDOFF_URL="https://lcm.example/handoff",

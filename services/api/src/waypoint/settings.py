@@ -7,12 +7,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="forbid")
+    # Runtime and the local Context Workbench intentionally share services/api/.env.
+    # Ignore unrelated dotenv keys while still validating every declared runtime field.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     DATABASE_URL: SecretStr
     LLM_API_KEY: SecretStr
     N8N_CONTEXT_URL: AnyHttpUrl
+    # Deprecated compatibility value. Staging runtime uses the Workbench URL.
+    N8N_CONTEXT_URL_STAGING: AnyHttpUrl | None = None
+    N8N_CONTEXT_URL_WORKBENCH: AnyHttpUrl | None = None
     N8N_TOKEN: SecretStr
+    CONTEXT_LAYER_BASE_URL: AnyHttpUrl | None = None
+    CONTEXT_LAYER_API_KEY: SecretStr | None = None
     # The context flow (Snowflake + Iterable behind one webhook) can
     # legitimately run 10-15 minutes per call under load, and it degrades
     # badly when every worker loop hits it at once.
@@ -45,7 +52,7 @@ class Settings(BaseSettings):
     # Feature-catalog CTA feasibility hints in idea context. Default OFF: today's
     # world is SMS-only and we do not yet trust channel<->works_on filtering.
     # Flip ON once multi-channel is live so ideas avoid web-only/broken links.
-    CTA_FEASIBILITY_HINTS: bool = False
+    CTA_FEASIBILITY_HINTS: bool = True
     MODEL_FAST: str
     MODEL_DEEP: str
     # The candidate ranker's model. Empty means "use MODEL_FAST". Every model
@@ -84,7 +91,15 @@ class Settings(BaseSettings):
             name.strip() for name in self.AMPLITUDE_RETURN_EVENT.split(",") if name.strip()
         )
 
-    @field_validator("ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY", mode="before")
+    @field_validator(
+        "ITERABLE_API_KEY",
+        "AMPLITUDE_API_KEY",
+        "AMPLITUDE_SECRET_KEY",
+        "N8N_CONTEXT_URL_WORKBENCH",
+        "CONTEXT_LAYER_BASE_URL",
+        "CONTEXT_LAYER_API_KEY",
+        mode="before",
+    )
     @classmethod
     def _empty_means_unset(cls, value: object) -> object:
         # Railway placeholder variables arrive as "" — that is "no key", and

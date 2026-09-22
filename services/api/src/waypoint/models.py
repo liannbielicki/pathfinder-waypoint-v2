@@ -6,6 +6,11 @@ from typing import Literal
 
 from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, model_validator
 
+# The outreach channels Waypoint may recommend. Delivery is downstream (LCM /
+# a human caller); Waypoint only decides which one fits this Pro and idea.
+CHANNELS: tuple[str, ...] = ("sms", "email", "call")
+Channel = Literal["sms", "email", "call"]
+
 RunStatus = Literal[
     "queued",
     "running",
@@ -35,18 +40,24 @@ PENDING_AUDIENCE_QUERY = "pending_n8n"
 # churn signal is missing or untrusted. It shares churn_risk's evidence corpus
 # (see evidence.evidence_windows) — same objective, same history.
 JourneyWindow = Literal["churn_risk", "churn_risk_open", "onboarding", "upsell"]
+ContextSource = Literal["standard", "staging"]
+ModelTier = Literal["fast", "deep"]
 
 
 class RunCreate(BaseModel):
     pro_ids: list[str] = Field(min_length=1)
     audience_query: str = Field(min_length=1)
     audience_run: str = Field(min_length=1)
-    channels: list[str] = Field(min_length=1)
+    channels: list[Channel] = Field(min_length=1)
     # Confirmed loop-control overrides, UPPER_CASE spec keys (e.g. MAX_ROUNDS).
     # The confirm-typing gate is a UI contract: the UI only sends confirmed
     # fields, and the server treats any supplied key as confirmed.
     loop_config: dict[str, float] | None = None
     journey_window: JourneyWindow = "churn_risk"
+    context_source: ContextSource = "standard"
+    context_promotion_id: str | None = None
+    include_features_not_in_current_plan: bool = False
+    model_tier: ModelTier = "deep"
 
 
 class RunView(BaseModel):
@@ -64,6 +75,9 @@ class RunView(BaseModel):
     stop_reason: str | None
     created_at: datetime
     journey_window: str
+    context_source: ContextSource = "standard"
+    include_features_not_in_current_plan: bool = False
+    model_tier: ModelTier = "deep"
 
 
 class Recommendation(BaseModel):
@@ -74,7 +88,10 @@ class Recommendation(BaseModel):
     actions: list[str] = Field(min_length=1)
     pro_facing_concept: str = Field(min_length=1)
     manager_rationale: str = Field(min_length=1)
-    channel: Literal["sms", "email", "none"]
+    channel: Channel
+    channel_override_reason: str = ""
+    feature_key: str | None = None
+    cta: dict[str, str] | None = None
     risk: str = ""
 
 
@@ -220,9 +237,44 @@ class ExposureIn(BaseModel):
     sent_at: AwareDatetime | None = None
 
 
+class CallAlternative(BaseModel):
+    """A runner-up idea for the same Pro, in case the winner does not fit on the call."""
+
+    title: str
+    mechanism: str
+    channel: str
+    pro_facing_concept: str
+    actions: list[str]
+    score_pp: float | None
+
+
+class CallItem(BaseModel):
+    """One call-channel winner as an operator to-do (see waypoint.call_todos)."""
+
+    winner_id: str
+    run_id: str
+    pro_id: str
+    org_id: str
+    title: str
+    mechanism: str
+    pro_facing_concept: str
+    manager_rationale: str
+    actions: list[str]
+    created_at: datetime
+    status: Literal["todo", "done"]
+    note: str
+    updated_at: datetime | None
+    alternatives: list[CallAlternative] = []
+
+
+class CallUpdate(BaseModel):
+    status: Literal["todo", "done"]
+    note: str = ""
+
+
 class FollowUpBranch(BaseModel):
     action: str = Field(min_length=1)  # "stop" or ONE concrete next touch (seed, not copy)
-    channel: Literal["sms", "email", "none"] = "none"
+    channel: Literal["sms", "email", "call", "none"] = "none"
 
 
 class FollowUpPlan(BaseModel):
