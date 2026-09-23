@@ -30,7 +30,15 @@ from .conftest import (
     rank_json,
     reactions_json,
 )
-from .test_pipeline import GOOD, GREAT, LOSE, rounds, set_loop_config
+from .test_pipeline import (
+    GOOD,
+    GREAT,
+    LOSE,
+    _heartbeat_spy,
+    _owned_state,
+    rounds,
+    set_loop_config,
+)
 
 TIED_RANKING = rank_json(("c1", 0.90), ("c2", 0.88), ("c3", 0.20), tie=True, tie_reason="same")
 
@@ -305,3 +313,31 @@ def test_a_configured_ranker_model_is_the_one_used() -> None:
     pricing = make_pricing(settings_with(MODEL_RANKER="claude-sonnet-5"))
     assert pricing.model_for("rank") == "claude-sonnet-5"
     assert pricing.model_for("fast") == "claude-haiku-4-5"  # the other tiers are untouched
+
+
+async def test_concurrent_screens_renew_the_lease_through_their_own_stacks(
+    db_engine, db_session_factory, deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    """The concurrent screen path is what deps.heartbeat_lock exists for.
+
+    Each stack owns its paid-call session, but both heartbeat on the ONE job
+    session, which is strictly one-statement-at-a-time. rendezvous=True proves
+    the two screens genuinely overlap in time, so the renewals recorded here
+    come from two live tasks and not from a sequential fallback.
+    """
+    gateway = ScreenProbe(rendezvous=True)
+    use_gateway(deps, gateway)
+    gateway.responses["screen"] = reactions_json(GOOD)
+    deps.llm_stacks = stack_factory(db_engine, db_session_factory, gateway)
+    await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=1)
+    await _owned_state(deps, seeded_job)
+    beats = _heartbeat_spy(monkeypatch)
+
+    await run_job(seeded_job.id, deps)
+
+    assert gateway.peak_screens_in_flight == MAX_CONCURRENT_SCREEN_STACKS
+    assert gateway.completed_screens == 3  # every finalist screened to the end
+    # _react heartbeats before each paid attempt, on the concurrent path too.
+    assert len(beats) >= gateway.calls_for("screen")
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "win"

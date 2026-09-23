@@ -23,6 +23,7 @@ const SETTING_LABELS: [string, string][] = [
   ["MAX_ROUNDS", "Max rounds per Pro"],
   ["MAX_NO_IMPROVE", "Dry mechanisms before stopping"],
   ["PATIENCE", "Refine attempts per mechanism"],
+  ["KEEP_DELTA_REACTION", "Min improvement to keep (panel reaction)"],
   ["KEEP_DELTA_PP", "Min improvement to keep (pp)"],
   ["WIN_THRESHOLD_PP", "Stop-early reduction (pp)"],
   ["CANDIDATE_COUNT", "Ideas per round"],

@@ -168,11 +168,31 @@ class OrgBrief(BaseModel):
         return normalized if normalized in {"sms", "email", "call"} else None
 
     def calibration_cell(self) -> str | None:
-        # ponytail: calibration cards are keyed `segment|plan|tenure` in v1
-        # vocabulary; org-context-v2 has no segment and different tenure bands,
-        # so no cell matches and scoring falls back to the global baseline.
-        # Rebuild the calibration cards against v2 cells to restore per-cell
-        # baselines.
+        """Disabled: the live tenure vocabulary can never match the cards.
+
+        The cards key on `segment|plan|tenure` with tenure values
+        "0-3m" / "4-12m" / "13-36m" / "37m+". The live org-context-v2 flow
+        (see the `CASE` on `oi.tenure_mo` in
+        n8n/waypoint-context-snowflake-v1.json) emits
+        "under_1y" / "1_2y" / "2_4y" / "over_4y" instead. The two vocabularies
+        do not overlap, so composing a key here would always miss and silently
+        fall back to the global baseline anyway — indistinguishable from this
+        `None`, but looking fixed when it isn't.
+
+        ponytail: reconcile the vocabulary at the flow, not by translating in
+        Python here — there is no exact mapping ("under_1y" spans both "0-3m"
+        and "4-12m", whose baselines differ materially). Revisit once the flow
+        emits the cards' bands directly.
+
+        Whoever restores this must also revisit `KEEP_DELTA_PP` (0.6) and
+        `MIN_REDUCTION_FLOOR_PP` (1.0): both are fixed pp constants tuned
+        against the single global baseline. At r=4.8, 23 of the 166 cells have
+        two reaction steps worth less than 0.6pp (minimum 0.044pp, cell
+        `1D|max|37m+`), and 11 of the 166 cells cannot reach the 1.0pp floor
+        at all even with a perfect 7/7/7 panel. Restoring per-cell baselines
+        without re-tuning both constants reproduces the exact silent-failure
+        class this change set removed.
+        """
         return None
 
 
@@ -297,7 +317,20 @@ class N8NContextClient:
             headers={"authorization": f"Bearer {token}"},
         )
 
-    async def _post_chunk(self, chunk: list[str]) -> httpx.Response:
+    async def _post_chunk(
+        self, chunk: list[str], on_retry: Callable[[], Awaitable[None]] | None = None
+    ) -> httpx.Response:
+        """One chunk, with the retry budget. `on_retry` runs immediately before
+        each RE-attempt (never before the first), in the same shape as
+        FleetSlots.acquire's on_wait.
+
+        Why it exists: a read timeout is an httpx.HTTPError, so a stalled flow
+        costs the FULL budget — 3 x the timeout plus backoff — and nothing
+        heartbeats around this call (it runs before any stage handler), so the
+        degraded case outlives the worker's lease and the job gets worked
+        twice. The renewal goes here rather than the timeout coming down: the
+        flow legitimately runs 10-15 minutes per call under load.
+        """
         failure = "no attempt made"
         for attempt in range(self.attempts):
             if attempt:
@@ -305,6 +338,10 @@ class N8NContextClient:
                 log.warning("n8n context retry %d for %d ids in %.0fs: %s",
                             attempt, len(chunk), delay, failure)
                 await asyncio.sleep(delay)
+                if on_retry is not None:
+                    # After the backoff, so the lease is at its freshest going
+                    # into another full-timeout attempt.
+                    await on_retry()
             try:
                 async with self._semaphore:
                     # Sent as generic "id"s: the flow owns classifying/routing
@@ -319,7 +356,9 @@ class N8NContextClient:
             return response
         raise ContextUnavailable(f"{failure} (after {self.attempts} attempts)")
 
-    async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+    async def fetch(
+        self, pro_ids: list[str], on_retry: Callable[[], Awaitable[None]] | None = None
+    ) -> OrgContextBatch:
         # Identifiers may be org or pro ids, even mixed; the flow validates
         # and routes them.
         organizations: list[OrgBrief] = []
@@ -336,7 +375,7 @@ class N8NContextClient:
         )
         for start in range(0, len(pro_ids), self.batch_size):
             chunk = pro_ids[start : start + self.batch_size]
-            response = await self._post_chunk(chunk)
+            response = await self._post_chunk(chunk, on_retry)
             if response.status_code == 202:
                 raise ContextConfigurationError(
                     "N8N_CONTEXT_URL returned asynchronous 202 Accepted; "

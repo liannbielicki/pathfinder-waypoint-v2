@@ -202,6 +202,7 @@ def evolve_prompt(
     evidence: str,
     count: int = 1,
     warm_start_mechanism: str | None = None,
+    attempts_left: int | None = None,
 ) -> str:
     # A warm start adds ONE candidate to the batch — it never replaces one and
     # it gets no other privilege: it is critiqued, ranked, and persona-screened
@@ -225,14 +226,24 @@ competes on equal terms and wins nothing automatically.
         else "Every idea in the batch must use a mechanism distinct from the others in this batch."
     )
     if mode == "refine":
+        budget = ""
+        if attempts_left is not None:
+            budget = (
+                "\nThis is your LAST attempt on this mechanism — the next round "
+                "abandons it for an untried one. Make this refinement count: change "
+                "something substantive, not the wording.\n"
+                if attempts_left <= 1
+                else f"\nYou have {attempts_left} more attempts on this mechanism "
+                "before it is abandoned for an untried one.\n"
+            )
         directive = f"""Mode: REFINE. EVERY idea must be a distinct execution variant of the same
-current mechanism. Keep the mechanism label exactly, but vary the concept,
-timing, framing, or specificity based on the round history. Do not introduce a
+current mechanism. Keep the same mechanism, but vary the concept, timing,
+framing, or specificity based on the round history. Do not introduce a
 different mechanism in this batch.
 
 Current selected idea (refine this mechanism):
 {best_json}
-"""
+{budget}"""
     elif mode == "cold":
         forbidden = ", ".join(tried_mechanisms)
         refill_guard = (

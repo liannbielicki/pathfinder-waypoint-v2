@@ -1,16 +1,30 @@
+import asyncio
 import json
 from decimal import Decimal
+from functools import partial
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from waypoint import queue as queue_module
 from waypoint.calls import BudgetExhausted
 from waypoint.llm import RateLimitExhausted
-from waypoint.models import PENDING_AUDIENCE_QUERY
+from waypoint.models import PENDING_AUDIENCE_QUERY, Recommendation
 from waypoint.n8n import ContextConfigurationError, OrgContextBatch
 from waypoint.personas import PanelItem, PanelSelection
-from waypoint.pipeline import _reaction_cache_key, finalize_run, run_job
+from waypoint.pipeline import (
+    JSON_CALL_ATTEMPTS,
+    LeaseLost,
+    PipelineFailure,
+    PipelineState,
+    _dedupe_ideas,
+    _heartbeat,
+    _reaction_cache_key,
+    _valid_json_call,
+    finalize_run,
+    run_job,
+)
 from waypoint.prompts import UNTRUSTED_END
 from waypoint.queue import claim_job, enqueue, set_kill
 from waypoint.tables import (
@@ -363,7 +377,7 @@ async def test_win_stays_then_loss_shifts_and_forbids_tried_mechanisms(
 async def test_keep_delta_rejects_a_small_improvement(deps: FakeDeps, seeded_job) -> None:
     deps.gateway.responses["screen"] = [
         reactions_json(BETTER),  # r1 win: 2.40pp
-        reactions_json(NEAR_MISS),  # r2: 2.68pp, +0.28 under the 0.5 delta → lose
+        reactions_json(NEAR_MISS),  # r2: 2.68pp, +0.28 under the 0.6 delta → lose
         reactions_json(LOSE),
     ]
     await run_job(seeded_job.id, deps)
@@ -520,11 +534,66 @@ async def test_consent_ask_idea_is_suppressed_deterministically(
     assert suppressed.critics["block_kind"] == "consent_ask"
 
 
-async def test_generation_failure_fails_the_run_honestly(deps: FakeDeps, seeded_job) -> None:
-    deps.gateway.fail_stage("evolve")
-    await run_job(seeded_job.id, deps)
-    assert await run_status(deps.db, seeded_job.run_id) == "failed"
+async def test_generation_failure_mid_loop_keeps_the_existing_champion(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """Regression: 713346 won 2.4pp at round 3, then the next round's generation
+    returned bad JSON three times and the Pro was recorded as
+    'failed - no result recorded', discarding the win."""
+    # One idea per round so the generation prompts map 1:1 to rounds, and a win
+    # threshold nothing can clear so the loop keeps going into the bad round.
+    await set_loop_config(
+        deps, seeded_job.run_id, CANDIDATE_COUNT=1, WIN_THRESHOLD_PP=99.0, MAX_ROUNDS=4
+    )
+    deps.gateway.responses["evolve"] = [idea_json("invoice_delivery", 1), "not json at all"]
+    deps.gateway.responses["screen"] = [reactions_json(BETTER)]  # round 1 wins 2.40pp
+    await run_job(seeded_job.id, deps)  # must not raise
+
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert "failure" not in job.checkpoint  # no PipelineFailure escaped the loop
+    assert job.checkpoint["evolve"]["stop"].startswith("generation_unavailable")
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "winner"  # the round-1 champion shipped
+    champion = await deps.db.get(CandidateRow, winner.candidate_id)
+    assert champion is not None and champion.round == 1
+
+
+async def test_generation_failure_with_no_champion_records_no_action(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """Nothing was ever won: the Pro still must not vanish — _stage_score
+    records no_action rather than the job failing."""
+    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS]  # single entry -> always invalid
+    await run_job(seeded_job.id, deps)  # must not raise
+    assert deps.gateway.calls_for("evolve") == 3  # JSON_CALL_ATTEMPTS, then give up
     assert await candidate_count(deps.db, seeded_job.run_id) == 0
+    assert await run_status(deps.db, seeded_job.run_id) == "no_action"
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "no_action"
+    # NOT "no_round_cleared_screen": nothing was ever generated, so nothing was
+    # ever screened. The row must not claim we looked and found nothing.
+    assert winner.rationale == "no_round_was_ever_generated"
+
+
+async def test_no_action_after_a_screened_round_is_not_a_generation_failure(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """The sibling of the test above: rounds really were generated and screened
+    and none cleared the bar. The two endings must stay distinguishable on the
+    WinnerRow alone — a caller reading it never sees the evolve stop reason."""
+    deps.gateway.responses["screen"] = [reactions_json(LOSE)]
+    await run_job(seeded_job.id, deps)
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "no_action"
+    assert winner.rationale == "no_round_cleared_screen"
+    assert await rounds(deps.db, seeded_job.run_id)  # rounds were in fact screened
 
 
 async def test_unhandled_crash_records_reason_and_requeues(deps: FakeDeps, seeded_job) -> None:
@@ -572,6 +641,61 @@ async def test_rate_limit_failure_is_labeled_for_attribution(
     assert "evolve_rate_limited" in job.checkpoint["failure"]["reason"]
 
 
+async def test_rate_limited_generation_fails_loudly_instead_of_shipping(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """The champion-preserving catch must NOT swallow a 429: a rate limit means
+    MAX_LLM_IN_FLIGHT is too high for the tier — an operator signal that must
+    stay loud, unlike a model returning bad JSON."""
+    # Round 1 wins, so there IS a champion to ship; the loop is still running
+    # when the 429 lands, which is exactly the path the new catch guards.
+    await set_loop_config(
+        deps, seeded_job.run_id, CANDIDATE_COUNT=1, WIN_THRESHOLD_PP=99.0, MAX_ROUNDS=4
+    )
+    deps.gateway.responses["evolve"] = [
+        idea_json("invoice_delivery", 1),
+        RateLimitExhausted("injected 429 storm"),
+    ]
+    deps.gateway.responses["screen"] = [reactions_json(BETTER)]
+    await run_job(seeded_job.id, deps)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert "evolve_rate_limited" in job.checkpoint["failure"]["reason"]
+    assert job.status == "failed"
+    # No tidy no_action/winner papering over the misconfiguration.
+    assert (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalars().first() is None
+
+
+async def test_rate_limited_refill_fails_loudly_instead_of_being_absorbed(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """The bounded-refill catch (`except PipelineFailure: break`) must not
+    swallow a 429 either: if the primary batch dedupes down below `count` and
+    a refill then hits a rate-limit storm, that storm must still fail the job
+    loudly, not get folded into a quiet generation_unavailable."""
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=2)
+    # Two ideas sharing a mechanism collapse to one after dedupe, so
+    # _generate_batch is one idea short of `count` and must refill.
+    duplicate_mechanism_batch = json.dumps(
+        [json.loads(idea_json("invoice_delivery", 1)), json.loads(idea_json("invoice_delivery", 2))]
+    )
+    deps.gateway.responses["evolve"] = [
+        duplicate_mechanism_batch,
+        RateLimitExhausted("injected 429 storm on refill"),
+    ]
+    await run_job(seeded_job.id, deps)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert "evolve_rate_limited" in job.checkpoint["failure"]["reason"]
+    assert job.status == "failed"
+    # No tidy no_action/winner papering over the misconfiguration.
+    assert (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalars().first() is None
+
+
 # A model returning valid JSON that OMITS a required field (the prod
 # `evolve_failed: 1 validation error for Recommendation actions` incident).
 IDEA_MISSING_ACTIONS = json.dumps(
@@ -601,16 +725,6 @@ async def test_evolve_retries_model_output_missing_a_required_field(
     await run_job(seeded_job.id, deps)
     assert await run_status(deps.db, seeded_job.run_id) == "complete"
     assert deps.gateway.calls_for("evolve") == 2  # bad output → exactly one retry, then win
-
-
-async def test_evolve_fails_closed_after_repeated_invalid_output(
-    deps: FakeDeps, seeded_job
-) -> None:
-    deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS]  # single entry → always invalid
-    await run_job(seeded_job.id, deps)
-    assert await run_status(deps.db, seeded_job.run_id) == "failed"
-    assert deps.gateway.calls_for("evolve") == 3  # JSON_CALL_ATTEMPTS, then give up
-    assert await candidate_count(deps.db, seeded_job.run_id) == 0
 
 
 async def test_malformed_reactions_are_unavailable_not_a_crash(
@@ -744,7 +858,7 @@ async def test_context_configuration_error_fails_without_requeue(
     deps: FakeDeps, seeded_job
 ) -> None:
     class MisconfiguredContext:
-        async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+        async def fetch(self, pro_ids: list[str], on_retry=None) -> OrgContextBatch:
             raise ContextConfigurationError("async webhook cannot return rows")
 
     deps.context = MisconfiguredContext()
@@ -1253,3 +1367,252 @@ async def test_feature_block_shared_by_generate_critic_rank(deps: FakeDeps, seed
 async def test_feasibility_hints_off_by_default_in_context(deps: FakeDeps, seeded_job) -> None:
     await run_job(seeded_job.id, deps)
     assert all("reachable on" not in p for p in deps.gateway.prompts_for("evolve"))
+
+
+def _idea(mechanism: str, concept: str = "") -> Recommendation:
+    return Recommendation(
+        title="t",
+        mechanism=mechanism,
+        actions=["a"],
+        pro_facing_concept=concept or f"concept for {mechanism}",
+        manager_rationale="r",
+        channel="sms",
+    )
+
+
+def test_refine_keeps_ideas_whose_mechanism_label_was_reworded() -> None:
+    """Regression: the model rewords its label, so an exact-match filter threw
+    the entire paid batch away and fell through to shift-mode refills."""
+    batch = [
+        _idea("Simplify payment collection workflow to lower barriers and billing confidence"),
+        _idea("Streamline payment collection to reduce friction"),
+        _idea("Make collecting payment effortless for this Pro"),
+    ]
+    kept = _dedupe_ideas(batch, 3, mode="refine")
+    assert len(kept) == 3
+
+
+def test_refine_still_deduplicates_identical_concepts() -> None:
+    batch = [
+        _idea("payment collection", concept="Store the card once, charge every time"),
+        _idea("payment collection reworded", concept="store the card once, charge every time"),
+        _idea("payment collection again", concept="Send a reminder the day after the job"),
+    ]
+    kept = _dedupe_ideas(batch, 3, mode="refine")
+    assert len(kept) == 2, "same concept in different words is one candidate, not two"
+
+
+def test_shift_still_forbids_already_tried_mechanisms() -> None:
+    batch = [_idea("payment collection"), _idea("online booking adoption")]
+    kept = _dedupe_ideas(
+        batch, 3, mode="shift", forbidden_mechanisms=["Payment Collection"]
+    )
+    assert [i.mechanism for i in kept] == ["online booking adoption"]
+
+
+# --- lease renewal during a round -------------------------------------------
+# Three retry layers multiply around every paid call (JSON_CALL_ATTEMPTS x
+# retry_rate_limit x the SDK's own retries) while _guard only heartbeats
+# BETWEEN rounds, so a single stage could outlive the lease, get the job
+# re-claimed, and be paid for twice. Every paid attempt now renews it.
+
+
+def _heartbeat_spy(monkeypatch, *, alive_for: int | None = None) -> list[str]:
+    """Record every lease renewal, optionally losing the lease after N of them."""
+    beats: list[str] = []
+    real = queue_module.heartbeat_job
+
+    async def spy(session, job_id, worker_id, lease_seconds=600):
+        beats.append(job_id)
+        if alive_for is not None and len(beats) > alive_for:
+            return False
+        return await real(session, job_id, worker_id, lease_seconds)
+
+    monkeypatch.setattr(queue_module, "heartbeat_job", spy)
+    return beats
+
+
+async def _owned_state(deps: FakeDeps, seeded_job) -> PipelineState:
+    job = await claim_job(deps.db, "worker-owner", lease_seconds=60)
+    assert job is not None
+    await deps.db.commit()
+    deps.worker_id = "worker-owner"
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    return PipelineState(job=job, run=run, pro_id=seeded_job.pro_id)
+
+
+def _never_valid(text: str) -> object:
+    raise ValueError("unparseable output")
+
+
+async def _json_call(state: PipelineState, deps: FakeDeps):
+    return await _valid_json_call(
+        state,
+        deps,
+        base_key=f"{state.run.id}:{state.pro_id}:probe",
+        tier="fast",
+        prompt="prompt",
+        run_id=state.run.id,
+        pro_id=state.pro_id,
+        stage="evolve",
+        system="system",
+        parse=_never_valid,
+    )
+
+
+async def test_every_paid_json_attempt_renews_the_lease(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    state = await _owned_state(deps, seeded_job)
+    beats = _heartbeat_spy(monkeypatch)
+
+    with pytest.raises(PipelineFailure):
+        await _json_call(state, deps)
+
+    # One renewal per paid attempt, not one for the whole re-ask budget.
+    assert deps.gateway.calls_for("evolve") == JSON_CALL_ATTEMPTS
+    assert len(beats) == JSON_CALL_ATTEMPTS
+
+
+async def test_a_mid_call_lease_loss_stops_the_spend_and_propagates(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    state = await _owned_state(deps, seeded_job)
+    # The first renewal succeeds; a second worker takes the job before the
+    # re-ask. LeaseLost must escape _valid_json_call's broad failure handling —
+    # swallowing it into a PipelineFailure would keep this worker paying for a
+    # job it no longer owns.
+    beats = _heartbeat_spy(monkeypatch, alive_for=1)
+
+    with pytest.raises(LeaseLost):
+        await _json_call(state, deps)
+
+    assert len(beats) == 2
+    assert deps.gateway.calls_for("evolve") == 1  # no further paid attempt
+
+
+async def test_a_mid_round_lease_loss_never_fails_the_job(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    await _owned_state(deps, seeded_job)
+    _heartbeat_spy(monkeypatch, alive_for=1)
+
+    await run_job(seeded_job.id, deps)
+
+    # The new owner resumes from the durable checkpoint: this worker must not
+    # burn an attempt, fail the job, or terminalize the run on its way out.
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.status not in ("failed", "done")
+    assert await run_status(deps.db, seeded_job.run_id) not in ("failed", "complete")
+
+
+async def test_workers_without_an_id_still_run_without_heartbeating(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    # Tests and the non-worker paths run with worker_id None: there is no lease
+    # to renew, so heartbeating must be skipped rather than crash.
+    beats = _heartbeat_spy(monkeypatch)
+    assert deps.worker_id is None
+
+    await run_job(seeded_job.id, deps)
+
+    assert beats == []
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+
+
+async def test_an_owned_run_renews_the_lease_before_every_paid_call(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    # The persona screen path (_react) does not go through _valid_json_call, so
+    # it carries its own renewal; without it the count falls short of the paid
+    # calls and a long screen would silently lapse the lease.
+    await _owned_state(deps, seeded_job)
+    beats = _heartbeat_spy(monkeypatch)
+
+    await run_job(seeded_job.id, deps)
+
+    assert await run_status(deps.db, seeded_job.run_id) == "complete"
+    assert len(beats) >= deps.gateway.call_count
+    # run_job wires the slot-queue heartbeat too, so a call parked waiting for
+    # a fleet slot renews the lease as well as one in flight.
+    assert deps.llm.on_wait is not None
+    assert deps.context.on_retry is not None  # and the context flow's retries
+
+
+async def test_concurrent_heartbeats_never_race_the_one_job_session(
+    deps: FakeDeps, seeded_job
+) -> None:
+    # What deps.heartbeat_lock exists for. Concurrent screen stacks each own
+    # their paid-call session, but _heartbeat always runs on the ONE job
+    # session, and an AsyncSession is strictly one-statement-at-a-time:
+    # unserialized renewals raise mid-round and kill a job that is fine.
+    state = await _owned_state(deps, seeded_job)
+
+    await asyncio.gather(*[_heartbeat(state, deps) for _ in range(8)])
+
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.worker_id == "worker-owner"
+
+
+async def test_a_starved_slot_wait_renews_the_lease(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    # The wait for a fleet slot is unfair and unbounded, and it sits INSIDE
+    # MeteredLLM.complete — i.e. after _valid_json_call's heartbeat. A call
+    # parked in that queue would otherwise burn lease time no one renews.
+    state = await _owned_state(deps, seeded_job)
+    beats = _heartbeat_spy(monkeypatch)
+    polls = 0
+
+    async def starved(on_wait=None) -> int:
+        nonlocal polls
+        while polls < 3:  # three trips round the poll loop, then a slot frees
+            polls += 1
+            if on_wait is not None:
+                await on_wait()
+        return 0
+
+    monkeypatch.setattr(deps.llm.slots, "acquire", starved)
+    deps.llm.on_wait = partial(_heartbeat, state, deps)
+
+    with pytest.raises(PipelineFailure):
+        await _json_call(state, deps)
+
+    # One per paid attempt (3) plus one per poll iteration of the first
+    # attempt's wait (3): the queue no longer eats lease time silently.
+    assert polls == 3
+    assert len(beats) == JSON_CALL_ATTEMPTS + 3
+
+
+async def test_a_lease_lost_while_queued_for_a_slot_is_not_relabelled(
+    deps: FakeDeps, seeded_job, monkeypatch
+) -> None:
+    # LeaseLost now reaches _valid_json_call from INSIDE complete(). Its blanket
+    # "any other failure is an honest job failure" arm must not swallow it into
+    # a PipelineFailure — that would keep this worker paying for a job a second
+    # worker already owns.
+    state = await _owned_state(deps, seeded_job)
+    # alive_for=1, NOT 0: the attempt's own top-of-attempt heartbeat (which sits
+    # OUTSIDE the try) must succeed, so that the beat which loses the lease is
+    # the slot-wait one raising from inside complete(). With 0 the lease is lost
+    # before complete() is ever entered and this test proves nothing.
+    _heartbeat_spy(monkeypatch, alive_for=1)
+    waited = False
+
+    async def starved(on_wait=None) -> int:
+        nonlocal waited
+        assert on_wait is not None
+        waited = True
+        await on_wait()
+        raise AssertionError("unreachable: the heartbeat above lost the lease")
+
+    monkeypatch.setattr(deps.llm.slots, "acquire", starved)
+    deps.llm.on_wait = partial(_heartbeat, state, deps)
+
+    with pytest.raises(LeaseLost):
+        await _json_call(state, deps)
+
+    assert waited  # the slot queue really was the thing that lost the lease
+    assert deps.gateway.calls_for("evolve") == 0  # never reached the provider

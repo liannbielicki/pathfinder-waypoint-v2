@@ -69,13 +69,14 @@ describe("RunStatus", () => {
     const settings = screen.getByRole("region", { name: /run settings/i });
     for (const label of [
       /max rounds per pro/i, /dry mechanisms before stopping/i,
-      /refine attempts per mechanism/i, /min improvement to keep/i,
+      /refine attempts per mechanism/i, /min improvement to keep \(panel reaction\)/i,
+      /min improvement to keep \(pp\)/i,
       /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
       expect(within(settings).getByText(label)).toBeInTheDocument();
     }
     expect(within(settings).getByText("10")).toBeInTheDocument();
-    expect(within(settings).getByText("0.5")).toBeInTheDocument();
+    expect(within(settings).getByText("0.6")).toBeInTheDocument();
     expect(within(settings).getByText("0.05")).toBeInTheDocument();
     // Audit view, never an editor: no inputs inside the snapshot.
     expect(within(settings).queryAllByRole("textbox")).toEqual([]);

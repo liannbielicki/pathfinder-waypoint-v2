@@ -296,6 +296,7 @@ class FakeLLM:
 class FakeContext:
     def __init__(self) -> None:
         self.unavailable = False
+        self.on_retry = None
         self.fetches: list[list[str]] = []
         self.audience_query_version: str | None = None
         self.starts: list[tuple[str, str, str]] = []
@@ -303,7 +304,10 @@ class FakeContext:
             (FIXTURES / "n8n_context.json").read_text()
         )
 
-    async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+    async def fetch(self, pro_ids: list[str], on_retry=None) -> OrgContextBatch:
+        # on_retry is the lease heartbeat the real client calls between its
+        # retries; the fake never retries, so it only records that it was wired.
+        self.on_retry = on_retry
         self.fetches.append(pro_ids)
         if self.unavailable:
             raise ContextUnavailable("injected outage")
@@ -336,7 +340,8 @@ class CrashableStore(PostgresStore):
 class NoFleetSlots:
     """No-op stand-in for the fleet limiter; tests don't exercise the cap."""
 
-    async def acquire(self) -> int:
+    async def acquire(self, on_wait=None) -> int:
+        # Never waits, so on_wait (the caller's lease heartbeat) never fires.
         return 0
 
     async def release(self, slot: int) -> None:

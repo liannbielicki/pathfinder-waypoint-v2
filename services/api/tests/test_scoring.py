@@ -38,6 +38,18 @@ def test_calibration_rejects_missing_artifact(tmp_path: Path) -> None:
         load_calibration(tmp_path / "absent.json")
 
 
+def test_one_persona_point_on_the_held_out_panel_is_about_half_a_pp() -> None:
+    """Documents the lattice of the 5-persona held-out final panel, which
+    decides nothing (the 3-persona screen panel decides wins and is what the
+    keep bar is calibrated against; see test_loop.py's ONE_STEP_PP table).
+    CALIBRATION is the module-level constant already defined at the top of
+    this file."""
+    base = score_candidate([5.0] * 5, "missing-cell", CALIBRATION).reduction_pp
+    nudged = score_candidate([5.0, 5.0, 5.0, 5.0, 6.0], "missing-cell", CALIBRATION).reduction_pp
+    assert base is not None and nudged is not None
+    assert 0.4 < nudged - base < 0.7
+
+
 def test_score_reproduces_the_audited_fixture() -> None:
     score = score_candidate(reactions=[6.0], cell=CELL, calibration=CALIBRATION)
     assert score.reduction_pp == pytest.approx(9.532340011069316)
@@ -103,3 +115,11 @@ def test_score_serializes_for_persistence() -> None:
     assert payload["calibration_version"] == "22cc4a1c89354327"
     assert isinstance(payload["reduction_pp"], float)
     assert isinstance(CandidateScore.model_validate(payload), CandidateScore)
+
+
+def test_an_unmapped_cell_still_falls_back_to_global() -> None:
+    """Safety property: a tenure band we cannot map degrades exactly as today.
+    CALIBRATION is the module-level constant at the top of this file."""
+    score = score_candidate([5.0] * 5, "9Z|nonexistent|99m", CALIBRATION)
+    assert score.baseline_confidence == "global"
+    assert score.reduction_pp is not None

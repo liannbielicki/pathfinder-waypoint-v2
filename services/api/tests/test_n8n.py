@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
@@ -406,3 +407,41 @@ async def test_unrequested_rows_keep_their_own_uuid(httpx_mock: HTTPXMock) -> No
     httpx_mock.add_response(json=[row])
     batch = await make_client().fetch(["pro_7f8a05b2ec024c078bbeccfa9000abfb"])
     assert batch.organizations[0].org_uuid == "11111111-2222-3333-4444-555555555555"
+
+
+def test_calibration_cell_is_always_none() -> None:
+    """Pinned: the live tenure vocabulary never overlaps the cards' bands, so
+    composing a key would always miss. Disabled until the vocabularies are
+    reconciled at the flow — see calibration_cell()'s docstring."""
+    brief = OrgBrief(org_uuid="p", segment="1A", plan_tier="basic", tenure_band="0-3m")
+    assert brief.calibration_cell() is None
+
+
+async def test_each_context_retry_renews_the_callers_lease(httpx_mock: HTTPXMock) -> None:
+    # A read timeout is an httpx.HTTPError, so a stalled flow costs the FULL
+    # retry budget — 3 x N8N_TIMEOUT_SECONDS plus backoff, past the 1800s
+    # lease — and nothing heartbeats around this call: it runs in run_job
+    # before any stage handler. The hook renews the lease between attempts
+    # rather than shrinking a budget the flow legitimately needs.
+    beats: list[int] = []
+
+    async def on_retry() -> None:
+        beats.append(len(httpx_mock.get_requests()))
+
+    httpx_mock.add_exception(httpx.ReadTimeout("flow still running"))
+    httpx_mock.add_exception(httpx.ReadTimeout("flow still running"))
+    httpx_mock.add_response(json=_rows())
+
+    batch = await make_client().fetch(["pro_1"], on_retry)
+
+    assert len(batch.organizations) == 2
+    # One renewal before each RE-attempt, none before the first.
+    assert beats == [1, 2]
+
+
+async def test_the_context_retry_hook_is_optional(httpx_mock: HTTPXMock) -> None:
+    # Every other caller (and every other test) passes nothing.
+    httpx_mock.add_exception(httpx.ReadTimeout("flow still running"))
+    httpx_mock.add_response(json=_rows())
+    batch = await make_client().fetch(["pro_1"])
+    assert len(batch.organizations) == 2

@@ -7,6 +7,7 @@ from waypoint.prompts import (
     UNTRUSTED_END,
     UNTRUSTED_START,
     critic_prompt,
+    evolve_prompt,
     fenced_context,
     generator_prompt,
 )
@@ -257,3 +258,50 @@ def test_channel_directive_call_and_choice() -> None:
     assert "most likely" not in channel_directive(["sms"])  # single channel: nothing to choose
     assert "call" in _CHANNEL_FRAMING
     assert '"call"' not in channel_directive(["sms", "email"])  # not allowed unless in the run
+
+
+def test_refine_prompt_states_the_remaining_attempt_budget() -> None:
+    prompt = evolve_prompt(
+        "org context",
+        mode="refine",
+        best_json='{"mechanism": "payment collection"}',
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms"],
+        journey_window="churn_risk_open",
+        evidence="none",
+        count=3,
+        attempts_left=1,
+    )
+    assert "last attempt" in prompt.lower()
+
+
+def test_refine_prompt_states_a_multi_attempt_budget() -> None:
+    prompt = evolve_prompt(
+        "org context",
+        mode="refine",
+        best_json='{"mechanism": "payment collection"}',
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms"],
+        journey_window="churn_risk_open",
+        evidence="none",
+        count=3,
+        attempts_left=2,
+    )
+    assert "2 more attempts" in prompt
+
+
+def test_refine_prompt_omits_the_budget_when_unknown() -> None:
+    prompt = evolve_prompt(
+        "org context",
+        mode="refine",
+        best_json="{}",
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["sms"],
+        journey_window="churn_risk_open",
+        evidence="none",
+        count=3,
+    )
+    assert "attempt" not in prompt.lower().split("mode: refine")[1][:400]

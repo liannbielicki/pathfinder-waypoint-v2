@@ -162,3 +162,22 @@ async def test_replayed_state_matches_the_ledger_counters(deps: FakeDeps, seeded
     assert all(r.outcome == "lose" for r in ledger[1:])
     state = replay(ledger, DEFAULT_LOOP_CONFIG)
     assert state.best_score == pytest.approx(float(ledger[0].score_pp), abs=1e-3)
+
+
+async def test_replayed_state_carries_the_champion_reaction_from_the_ledger(
+    deps: FakeDeps, seeded_job
+) -> None:
+    """End-to-end replay parity for the win rule's primary input. `evolve_rounds`
+    has no mean_reaction column and gets no migration, so the live round writes
+    it into the ranking JSON and replay reads it back — otherwise a resumed run
+    would judge its next challenger on the pp fallback while the original judged
+    it on the reaction lattice."""
+    deps.gateway.responses["screen"] = [
+        reactions_json(FIRST_WIN),
+        reactions_json(LOSE),
+    ]
+    await run_job(seeded_job.id, deps)
+    ledger = await rounds(deps.db, seeded_job.run_id)
+    assert ledger[0].outcome == "win"
+    assert ledger[0].ranking["mean_reaction"] == pytest.approx(FIRST_WIN)
+    assert replay(ledger, DEFAULT_LOOP_CONFIG).best_reaction == pytest.approx(FIRST_WIN)

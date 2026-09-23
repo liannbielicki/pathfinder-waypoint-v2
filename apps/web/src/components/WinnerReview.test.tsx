@@ -371,6 +371,23 @@ describe("WinnerReview", () => {
     expect(screen.getByText("champion_final_missing")).toBeInTheDocument();
   });
 
+  it("does not call a generation failure a no-action verdict", () => {
+    // No candidates at all: the loop never produced a round. This must read as
+    // inconclusive, never as "a successful decision".
+    render(
+      <WinnerReview
+        run={{
+          ...noActionRun([]),
+          winners: [{ id: "w", pro_id: "pro_1", kind: "no_action", candidate_id: null, rationale: "no_round_was_ever_generated", evidence: {} }],
+        }}
+        onHandoff={vi.fn()}
+        handingOff={false}
+      />,
+    );
+    expect(screen.getByText(/inconclusive: no idea was ever generated/i)).toBeInTheDocument();
+    expect(screen.queryByText(/successful decision/i)).not.toBeInTheDocument();
+  });
+
   it("surfaces unevaluated rounds as partial evidence", () => {
     const unavailable = { ...WINNER_RUN.candidates[0], id: "c9", round: 2, status: "discarded", score: {} };
     render(

@@ -11,14 +11,16 @@ const DECISION_LABEL: Record<string, string> = {
 
 // Every per-round number here comes from the cheap 3-persona SCREENING panel,
 // never the held-out final: a "win" only means it beat the incumbent screen
-// estimate by KEEP_DELTA_PP. Label it as the screen result it is.
+// estimate on the panel-reaction bar (KEEP_DELTA_REACTION) and by KEEP_DELTA_PP.
+// Label it as the screen result it is.
 const OUTCOME_LABEL: Record<string, string> = {
   win: "screen win",
   lose: "screen lose",
 };
 
-// Best = last kept win. Wins only land when they beat best + KEEP_DELTA_PP,
-// so the max win score is the current best; losing rounds never count.
+// Best = last kept win. A win must still beat best + KEEP_DELTA_PP in pp (the
+// reaction bar is the other half of the AND), so the max win score is the
+// current best; losing rounds never count.
 const bestOf = (rounds: EvolveRound[]) =>
   rounds.reduce<number | null>(
     (best, r) =>

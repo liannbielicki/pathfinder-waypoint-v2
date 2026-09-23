@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     # for *_rate_limited job failures — the value where those stop is the safe
     # ceiling.
     MAX_LLM_IN_FLIGHT: int = Field(default=4, ge=1)
+    # Hard ceiling on ONE provider HTTP attempt. The Anthropic SDK's own
+    # default is a 600s read timeout, and three retry layers multiply around
+    # every call (JSON_CALL_ATTEMPTS x retry_rate_limit x the SDK's own
+    # max_retries), so the default let a single logical generation outlive the
+    # worker's lease and get the job re-claimed and double-paid.
+    # ponytail: one flat value for every stage, not a per-call budget derived
+    # from max_tokens. The largest batch the pipeline can ask for is
+    # _batch_max_tokens(MAX_CANDIDATE_COUNT + 1) = 13,200 tokens, which at a
+    # slow generation rate could approach 300s; the normal operating point is
+    # CANDIDATE_COUNT = 3 (+1 warm start) ~ 4,800 tokens, comfortably clear.
+    # Named ceiling: raising CANDIDATE_COUNT toward MAX_CANDIDATE_COUNT makes
+    # 300s a REAL cap that will start timing out big batches — raise this with
+    # it, or size the timeout from max_tokens at that point.
+    LLM_TIMEOUT_SECONDS: float = Field(default=300.0, gt=0)
     KILL_SWITCH: bool = False
     # Independent V3 learning-loop kill switch: stops checkpoint resolution
     # and outcome-driven learning without stopping run processing.

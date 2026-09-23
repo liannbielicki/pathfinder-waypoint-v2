@@ -43,7 +43,9 @@ REPORT = Path(__file__).parents[3] / "docs" / "verification" / "launch-report.md
 class SyntheticContext(FakeContext):
     """Serves a brief for any pro id, mirroring the recorded fixture profile."""
 
-    async def fetch(self, pro_ids: list[str]) -> OrgContextBatch:
+    async def fetch(self, pro_ids: list[str], on_retry=None) -> OrgContextBatch:
+        # on_retry is the lease heartbeat run_job passes positionally; this
+        # fake never retries, so it is accepted and ignored.
         return OrgContextBatch(
             contract_version=CONTRACT_VERSION,
             organizations=[

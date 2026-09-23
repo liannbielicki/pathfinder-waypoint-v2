@@ -39,6 +39,7 @@ from waypoint.items import resolve_item
 from waypoint.llm import Pricing, RateLimitExhausted, extract_json, worst_case_cost
 from waypoint.loop import (
     MAX_CANDIDATE_COUNT,
+    SCREEN_PANEL_SIZE,
     LoopConfig,
     apply_round,
     is_win,
@@ -130,7 +131,9 @@ class PipelineFailure(Exception):
 
 
 class ContextLike(Protocol):
-    async def fetch(self, pro_ids: list[str]) -> Any: ...
+    async def fetch(
+        self, pro_ids: list[str], on_retry: Callable[[], Awaitable[None]] | None = None
+    ) -> Any: ...
 
 
 class StagingContextLike(Protocol):
@@ -264,6 +267,10 @@ class PipelineDeps:
     cta_feasibility_hints: bool = False
     worker_id: str | None = None  # set by the worker; None disables heartbeats
     lease_seconds: int = 600
+    # Heartbeats now fire DURING a round, including from the two concurrent
+    # screen stacks, which share this one job session. An AsyncSession is
+    # strictly one-statement-at-a-time, so the renewal is serialized here.
+    heartbeat_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Independent (MeteredLLM, cache session) stacks for concurrent paid calls —
     # advisory-lock connections and sessions are never shared across tasks. None
     # means "screen sequentially"; the worker wires the factory.
@@ -281,12 +288,28 @@ class PipelineState:
 
 
 async def _heartbeat(state: PipelineState, deps: PipelineDeps) -> None:
-    """Extend the lease before paid work; abort if another worker owns the job."""
+    """Extend the lease before paid work; abort if another worker owns the job.
+
+    Serialized and committed on the spot, both of which matter now that this
+    also runs DURING a round rather than only between rounds:
+      - concurrent screen stacks (_screen_finalists) heartbeat from two tasks
+        that share this one session, and a session runs one statement at a time;
+      - heartbeat_job is a bare UPDATE ... RETURNING. Left uncommitted, the
+        renewal is invisible to every other worker until the round's next
+        commit — which is precisely the multi-minute paid call we are trying to
+        survive — and it would hold a row lock on the job for all of it.
+
+    Every call site therefore has to sit on a transaction boundary: never add a
+    _heartbeat between a multi-row add and its atomic commit (the round's
+    candidate rows + ledger row being the one that matters).
+    """
     if deps.worker_id is None:
         return
-    alive = await queue.heartbeat_job(
-        deps.store.session, state.job.id, deps.worker_id, deps.lease_seconds
-    )
+    async with deps.heartbeat_lock:
+        alive = await queue.heartbeat_job(
+            deps.store.session, state.job.id, deps.worker_id, deps.lease_seconds
+        )
+        await deps.store.session.commit()
     if not alive:
         raise LeaseLost(state.job.id)
 
@@ -383,6 +406,11 @@ async def _react(
     by_id: dict[str, float] | None = None
     for attempt in range(JSON_CALL_ATTEMPTS):
         attempt_key = call_key if attempt == 0 else f"{call_key}:retry{attempt + 1}"
+        # The persona screen never goes through _valid_json_call, and _guard
+        # only runs between rounds — so without this, three attempts each
+        # allowed to run to LLM_TIMEOUT_SECONDS outlive the lease and hand the
+        # job to a second worker mid-screen. LeaseLost propagates on purpose.
+        await _heartbeat(state, deps)
         result = await llm.complete(
             call_key=attempt_key,
             tier=tier,
@@ -487,6 +515,7 @@ MAX_CONCURRENT_SCREEN_STACKS = 2
 
 
 async def _valid_json_call(
+    state: PipelineState,
     deps: PipelineDeps,
     *,
     base_key: str,
@@ -503,6 +532,12 @@ async def _valid_json_call(
     last: Exception | None = None
     for attempt in range(JSON_CALL_ATTEMPTS):
         call_key = base_key if attempt == 0 else f"{base_key}:retry{attempt}"
+        # Renew before every PAID attempt, not just once per round: each
+        # attempt may run to LLM_TIMEOUT_SECONDS and retry_rate_limit can back
+        # off inside it, so the re-ask budget alone can outlast the lease.
+        # A LeaseLost here must propagate — another worker owns the job and
+        # this one must stop spending immediately.
+        await _heartbeat(state, deps)
         try:
             result = await deps.llm.complete(
                 call_key=call_key,
@@ -519,6 +554,12 @@ async def _valid_json_call(
                 temperature=temperature if attempt == 0 else None,
             )
         except BudgetExhausted:
+            raise
+        except LeaseLost:
+            # Reachable from INSIDE complete(): the slot-queue heartbeat
+            # (MeteredLLM.on_wait) fires while waiting for a fleet slot. It
+            # means another worker owns the job — never relabel it a stage
+            # failure, and never re-ask.
             raise
         except RateLimitExhausted as error:
             # Distinct label so a 429 storm is attributable: MAX_LLM_IN_FLIGHT is
@@ -625,18 +666,20 @@ def _dedupe_ideas(
     count: int,
     *,
     mode: str,
-    current_mechanism: str | None = None,
     keep: str | None = None,
     forbidden_mechanisms: list[str] | None = None,
 ) -> list[Recommendation]:
     """Deduplicate mechanisms during exploration and concepts during refinement."""
     held: dict[str, Recommendation] = {}
-    current_key = mechanism_key(current_mechanism or "")
+    # No refine-mode mechanism filter: in refine mode we INSTRUCTED the model to
+    # keep the mechanism, so its ideas are refinements by construction. Matching
+    # its free-text label against the champion's exact-dropped whole paid
+    # batches (the model rewords the label every round) and fell through to
+    # shift-mode refills, so refinement never actually ran. Concept-level dedupe
+    # below is what keeps a refine batch honest.
     forbidden = {mechanism_key(item) for item in (forbidden_mechanisms or [])}
     for idea in ideas:
         idea_key = mechanism_key(idea.mechanism)
-        if mode == "refine" and idea_key != current_key:
-            continue
         if mode != "refine" and idea_key in forbidden:
             continue
         key = (
@@ -704,7 +747,14 @@ def _prompt_builder(
     count and forbidden list (and never a warm start: it is already in the
     batch)."""
 
-    def build(mode: str, ask: int, forbidden: list[str], warm: str | None = None) -> str:
+    def build(
+        mode: str,
+        ask: int,
+        forbidden: list[str],
+        warm: str | None = None,
+        *,
+        attempts_left: int | None = None,
+    ) -> str:
         return evolve_prompt(
             org_context,
             mode=mode,
@@ -716,6 +766,7 @@ def _prompt_builder(
             evidence=evidence,
             count=ask,
             warm_start_mechanism=warm,
+            attempts_left=attempts_left,
         )
 
     return build
@@ -731,7 +782,6 @@ async def _generate_batch(
     build_prompt: Callable[..., str],
     tried: list[str],
     mode: str,
-    current_mechanism: str | None,
     warm: str | None = None,
 ) -> list[Recommendation]:
     """One batched generation call, then bounded refills for whatever the
@@ -745,6 +795,7 @@ async def _generate_batch(
 
     async def generate(base_key: str, ask: int, text: str) -> list[Recommendation]:
         batch: list[Recommendation] = await _valid_json_call(
+            state,
             deps,
             base_key=base_key,
             tier=_run_tier(state.run),
@@ -762,7 +813,6 @@ async def _generate_batch(
         await generate(f"{key}:generate", count, prompt),
         count,
         mode=mode,
-        current_mechanism=current_mechanism,
         keep=warm,
         forbidden_mechanisms=tried,
     )
@@ -780,13 +830,21 @@ async def _generate_batch(
                 missing,
                 build_prompt(mode, missing, forbidden, warm if warm_missing else None),
             )
-        except PipelineFailure:
+        except PipelineFailure as error:
+            if "_rate_limited" in error.reason:
+                # Same contract as the round loop's catch (see run_job): a 429
+                # storm is an operator signal (MAX_LLM_IN_FLIGHT too high for
+                # the tier), not an ordinary model failure, and must stay loud
+                # even when it happens on a refill rather than the primary
+                # batch. Bounded-refill tolerance below is only for genuine
+                # failures — it must not double as cover for a misconfigured
+                # concurrency limit.
+                raise
             break
         ideas = _dedupe_ideas(
             [*ideas, *more],
             count,
             mode=mode,
-            current_mechanism=current_mechanism,
             keep=warm,
             forbidden_mechanisms=tried,
         )
@@ -854,6 +912,7 @@ async def _verdicts_for_batch(
         # grounding gate (legacy incident class) — _valid_json_call raises
         # PipelineFailure after retries, it never returns an empty verdict set.
         reviewed = await _valid_json_call(
+            state,
             deps,
             base_key=f"{key}:critic",
             tier=_run_tier(state.run),
@@ -915,6 +974,7 @@ async def _rank_batch(
     ids. Raises PipelineFailure when the model cannot produce a valid ranking."""
     tokens = [token for token, _ in candidates]
     decision: RankerDecision = await _valid_json_call(
+        state,
         deps,
         base_key=f"{key}:rank",
         tier=_ranker_tier(deps.llm.pricing, state.run),
@@ -1019,6 +1079,9 @@ async def _screen_finalists(
 
         async def screen_in_own_stack(token: str, index: int) -> _ScreenOutcome:
             async with stack_slots, stacks() as (llm, cache_session):
+                # Each stack has its OWN MeteredLLM, so each needs the slot-wait
+                # heartbeat wired; _heartbeat serializes on deps.heartbeat_lock.
+                llm.on_wait = partial(_heartbeat, state, deps)
                 return await screen(
                     idea=ideas[index],
                     token=token,
@@ -1123,22 +1186,50 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 else:
                     warm_mechanism = match.mechanism
         batch_count = count + (1 if warm_mechanism else 0)
-        prompt = build_prompt(mode, count, tried, warm_mechanism)
+        attempts_left = (
+            max(config.patience - lstate.tries_on_current, 1) if mode == "refine" else None
+        )
+        prompt = build_prompt(mode, count, tried, warm_mechanism, attempts_left=attempts_left)
         await _reserve_round_worst_case(
             state, deps, _round_worst_case(state, deps, prompt, batch_count)
         )
-        ideas = await _generate_batch(
-            state,
-            deps,
-            key=key,
-            count=batch_count,
-            prompt=prompt,
-            build_prompt=build_prompt,
-            tried=tried,
-            mode=mode,
-            current_mechanism=lstate.current_mechanism,
-            warm=warm_mechanism,
-        )
+        try:
+            ideas = await _generate_batch(
+                state,
+                deps,
+                key=key,
+                count=batch_count,
+                prompt=prompt,
+                build_prompt=build_prompt,
+                tried=tried,
+                mode=mode,
+                warm=warm_mechanism,
+            )
+        except PipelineFailure as error:
+            if "_rate_limited" in error.reason:
+                # ponytail: the string marker is the whole raise/catch contract;
+                # RateLimited(PipelineFailure) if the reason format ever moves.
+                # A 429 storm is an OPERATOR signal, not a model failure: it
+                # means MAX_LLM_IN_FLIGHT is too high for the model tier (see
+                # _valid_json_call, which builds this reason precisely so the
+                # cause stays attributable). Swallowing it into a tidy
+                # no_action would hide an infrastructure misconfiguration
+                # behind a normal-looking result, so it stays loud and fails
+                # the job as before. Matched on the marker, not the full
+                # "evolve_rate_limited": the stage prefix varies and any other
+                # stage must behave the same way.
+                raise
+            # Generation is unavailable this round. Rounds already won are
+            # durable and paid for — ending the loop here ships the champion
+            # through the normal final/score stages, where a Pro with no
+            # champion still records an honest no_action. Failing the whole job
+            # instead discarded finished work (pro 713346 lost a 2.4pp winner).
+            # BudgetExhausted and LeaseLost are NOT PipelineFailure subclasses
+            # (both derive straight from Exception) so they still propagate to
+            # their own handlers in run_job. `reason` is the loop's own walrus
+            # variable, so assigning it here is what the return below reports.
+            reason = f"generation_unavailable: {error.reason}"
+            break
         if warm_mechanism is not None and warm_evidence is not None:
             in_batch = any(
                 mechanism_key(idea.mechanism) == mechanism_key(warm_mechanism)
@@ -1215,7 +1306,10 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         panel: PanelSelection | None = None
         if finalists:
             try:
-                panel, cards = await _panel_for(state, deps, brief, 3)
+                # The loop's win bar is measured on THIS panel's lattice — see
+                # loop.SCREEN_PANEL_SIZE and is_win. The seat count and the bar
+                # must move together, so they read the same constant.
+                panel, cards = await _panel_for(state, deps, brief, SCREEN_PANEL_SIZE)
             except InsufficientPanelFit as error:
                 await _abstain_pro(state, deps, state.pro_id, f"low panel fit: {error}")
                 return {"rounds": lstate.round, "stop": "panel_unavailable"}
@@ -1232,6 +1326,10 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
 
         scored = [(s, s.score.reduction_pp) for s in screens if s.score is not None]
         score_pp: float | None = None
+        # The win bar lives on the screen panel's mean, not on pp (see
+        # loop.is_win), and `evolve_rounds` has no column for it — so it rides
+        # in the ranking JSON.
+        mean_reaction: float | None = None
         if not rankable:
             outcome, challenger = "suppressed", 0  # a loss, no persona spend
         elif not scored:
@@ -1246,7 +1344,23 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                 scored, key=lambda pair: pair[1] if pair[1] is not None else float("-inf")
             )
             challenger = best_screen.index
-            outcome = "win" if is_win(lstate, score_pp, config, MIN_REDUCTION_FLOOR_PP) else "lose"
+            mean_reaction = best_screen.score.mean_reaction if best_screen.score else None
+            outcome = (
+                "win"
+                if is_win(
+                    lstate,
+                    score_pp,
+                    config,
+                    MIN_REDUCTION_FLOOR_PP,
+                    mean_reaction,
+                    # ACTUALLY seated, not SCREEN_PANEL_SIZE: select_panel
+                    # degrades on a thin persona pool rather than raising, and
+                    # a shorter panel has a coarser lattice that the bar must
+                    # rise to meet.
+                    panel_size=len(panel.items) if panel is not None else None,
+                )
+                else "lose"
+            )
             if best_screen.token != finalists[0][0]:
                 selection_reason = "screen_selected_ranker_non_top"
 
@@ -1297,6 +1411,8 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             score_pp=score_pp,
             outcome=outcome,
             config=config,
+            mode=mode,
+            mean_reaction=mean_reaction,
             # The batch's other mechanisms were generated, critiqued and ranked
             # this round; forbid them next round instead of re-buying them.
             also_tried=[i.mechanism for index, i in enumerate(ideas) if index != challenger],
@@ -1323,6 +1439,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
                     screens=screens,
                     ranking_failure=ranking_failure,
                     warm_start=warm_evidence,
+                    mean_reaction=mean_reaction,
                 ),
             )
         )
@@ -1348,6 +1465,7 @@ def _ranking_evidence(
     screens: list[_ScreenOutcome],
     ranking_failure: str | None,
     warm_start: dict[str, Any] | None = None,
+    mean_reaction: float | None = None,
 ) -> dict[str, Any]:
     """The round decision's audit trail: who was ranked, in what order, why the
     challenger was chosen, and what failed on the way."""
@@ -1372,6 +1490,12 @@ def _ranking_evidence(
         "screen_model": screen_model,
         "candidate_ids": {token: candidate_ids[index] for token, index in tokens.items()},
         "generated_mechanisms": [idea.mechanism for idea in ideas],
+        # The challenger's screening-panel mean. The win rule compares on it
+        # (loop.is_win), and replay has nowhere else to read it from: the ledger
+        # table persists score_pp only and a migration is not on the table. It
+        # is evidence about this round's decision, so the audit trail is its
+        # honest home rather than a smuggled-in state column.
+        "mean_reaction": mean_reaction,
     }
     if decision is not None:
         evidence["order"].sort(key=lambda item: item["rank"])
@@ -1537,17 +1661,29 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     champion = await _champion_for(state, deps, config)
     final = champion.score.get("final") if champion is not None else None
     if champion is None or final is None:
-        # Two different endings, recorded distinctly: no round ever won the
-        # screen (an honest "not worth touching") vs a champion that never got
-        # its held-out final check (an incomplete run, not a conclusion).
+        # Three different endings, recorded distinctly: no round ever won the
+        # screen (an honest "not worth touching"), no round was ever generated
+        # at all (we could not look — nothing was screened), or a champion that
+        # never got its held-out final check (an incomplete run, not a
+        # conclusion).
+        rationale = "champion_final_missing"
+        if champion is None:
+            # An unavailable generation ends the loop before any round is
+            # committed. "no_round_cleared_screen" is a positive claim that
+            # ideas were generated, screened, and none cleared the bar — a
+            # claim this row must never make when zero ideas were ever seen.
+            # The WinnerRow is the whole point of the champion-preserving
+            # break, so it has to be readable on its own: the evolve stop
+            # reason lives in the job checkpoint, which a caller reading only
+            # the winner never sees.
+            ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
+            rationale = "no_round_cleared_screen" if ledger else "no_round_was_ever_generated"
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
                 kind="no_action",
-                rationale=(
-                    "no_round_cleared_screen" if champion is None else "champion_final_missing"
-                ),
+                rationale=rationale,
             )
         )
         await deps.store.session.commit()
@@ -1664,6 +1800,7 @@ async def _attach_follow_up(
         return
     try:
         plan_json = await _valid_json_call(
+            state,
             deps,
             base_key=f"{state.run.id}:{state.pro_id}:wargame",
             tier=_run_tier(state.run),
@@ -1839,6 +1976,13 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
     run_id = run.id  # plain strings survive session rollbacks; ORM instances expire
     state = PipelineState(job=job, run=run, pro_id=job.pro_id)
 
+    # A paid call waits for a fleet slot before it is made, in an unfair
+    # unbounded poll loop — that wait is lease time like any other, so it
+    # heartbeats too. Set here, where `state` first exists; deps.llm is built
+    # per job, so this never leaks across jobs.
+    heartbeat = partial(_heartbeat, state, deps)
+    deps.llm.on_wait = heartbeat
+
     resumed = any(stage in job.checkpoint for stage in (*STAGES, "staging_context"))
     await store.set_run_status(run_id, "resumed" if resumed else "running")
 
@@ -1906,7 +2050,13 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
                     )
                 return
         else:
-            batch = await deps.context.fetch([state.pro_id])
+            batch = await deps.context.fetch([state.pro_id], heartbeat)
+    except LeaseLost:
+        # The context flow's retry budget outlasted our lease and a new owner
+        # took the job. Same contract as a stage handler's LeaseLost: leave the
+        # durable checkpoint alone and let the new owner resume from it.
+        await store.session.rollback()
+        return
     except ContextConfigurationError as error:
         # A 202 async webhook (or another endpoint-contract mismatch) cannot
         # heal on retry. Fail this Pro once instead of rapidly retriggering n8n

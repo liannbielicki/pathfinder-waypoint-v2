@@ -66,7 +66,17 @@ class FleetSlots:
         self.max_slots = max_slots if max_slots is not None else MAX_IN_FLIGHT_LLM_CALLS
         self.poll_seconds = poll_seconds
 
-    async def acquire(self) -> int:
+    async def acquire(self, on_wait: Callable[[], Awaitable[None]] | None = None) -> int:
+        """Take a fleet slot, waiting for one if the fleet is saturated.
+
+        `on_wait` runs once per poll iteration — i.e. only while actually
+        waiting, never on the fast path. This poll loop is UNFAIR and UNBOUNDED:
+        slots go to whoever polls at the right moment, so a starved waiter can
+        sit here for as long as holders keep holding. The caller heartbeats
+        through this hook, because a lease that lapses in the queue is
+        indistinguishable from one that lapses mid-call — the job gets
+        re-claimed and paid for twice either way.
+        """
         while True:
             for slot in range(self.max_slots):
                 got = (
@@ -78,6 +88,8 @@ class FleetSlots:
                 await self.connection.commit()
                 if got:
                     return slot
+            if on_wait is not None:
+                await on_wait()
             await asyncio.sleep(self.poll_seconds)
 
     async def release(self, slot: int) -> None:
@@ -177,6 +189,10 @@ class MeteredLLM:
     pricing: Pricing
     reserve: Callable[[str, Decimal], Awaitable[bool]]  # (run_id, amount)
     reconcile: Callable[[str, Decimal, Decimal], Awaitable[None]]  # (run_id, reserved, actual)
+    # Called once per slot-queue poll while this call waits for a fleet slot.
+    # The pipeline wires it to its lease heartbeat; optional so every other
+    # construction (and every test) is unaffected.
+    on_wait: Callable[[], Awaitable[None]] | None = None
 
     async def complete(
         self,
@@ -234,7 +250,7 @@ class MeteredLLM:
             await self.records.session.commit()
         else:  # pending from a crashed attempt: its reservation is already durable
             worst = row.reserved_usd
-        slot = await self.slots.acquire()
+        slot = await self.slots.acquire(self.on_wait)
         try:
             result = await self.gateway.complete(
                 tier,

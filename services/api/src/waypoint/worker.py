@@ -166,6 +166,31 @@ def make_persona_source(settings: Settings) -> Callable[[str], Awaitable[list[Pe
     return get_personas
 
 
+def make_anthropic(settings: Settings) -> AsyncAnthropic:
+    """The one provider client. The app owns retry and timeout; the SDK owns
+    neither.
+
+    max_retries=0 — the SDK defaults to 2, which retries 429s INVISIBLY
+    underneath llm.retry_rate_limit. That is not just latency: retry_rate_limit
+    exists to raise an attributable RateLimitExhausted, which the pipeline turns
+    into a loud `*_rate_limited` job failure precisely because a 429 storm is
+    the operator signal that MAX_LLM_IN_FLIGHT is too high for the model tier.
+    Hidden SDK retries both multiply the wall time of every attempt by 3 and
+    delay that signal by up to 3x per attempt.
+
+    timeout — the SDK's default read timeout is 600s, so one logical call could
+    run far past LEASE_SECONDS, lapse the lease mid-call, and let a second
+    worker claim the job and pay for it again. See Settings.LLM_TIMEOUT_SECONDS
+    for the sizing and its ceiling. Connect stays on a short fuse: a provider we
+    cannot even reach should fail fast, not eat the whole budget.
+    """
+    return AsyncAnthropic(
+        api_key=settings.LLM_API_KEY.get_secret_value(),
+        max_retries=0,
+        timeout=httpx.Timeout(settings.LLM_TIMEOUT_SECONDS, connect=10.0),
+    )
+
+
 def make_pricing(settings: Settings) -> Pricing:
     """Tier → model. The ranker gets its own tier; empty MODEL_RANKER means
     "share the fast model" (Pricing still validates it against the price table)."""
@@ -366,7 +391,7 @@ async def main() -> None:
         pool_size=settings.WORKER_COUNT * 9 + 2,
     )
     factory = make_session_factory(engine)
-    anthropic = AsyncAnthropic(api_key=settings.LLM_API_KEY.get_secret_value())
+    anthropic = make_anthropic(settings)
     pricing = make_pricing(settings)
     llm_stacks = make_llm_stacks(
         engine=engine,

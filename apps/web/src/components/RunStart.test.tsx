@@ -6,7 +6,7 @@ import { RunStart } from "./RunStart";
 const FLEET_SETTINGS = {
   loop_defaults: {
     MAX_ROUNDS: 10, MAX_NO_IMPROVE: 3, PATIENCE: 1,
-    KEEP_DELTA_PP: 0.5, WIN_THRESHOLD_PP: 15,
+    KEEP_DELTA_PP: 0.6, KEEP_DELTA_REACTION: 0.4, WIN_THRESHOLD_PP: 15,
     CANDIDATE_COUNT: 3, TIE_MARGIN: 0.05, WARM_START_THRESHOLD: 0.75,
   },
   max_in_flight_llm_calls: 7,
@@ -124,7 +124,8 @@ describe("RunStart", () => {
     for (const label of [
       /pro ids/i, /audience run/i, /channel: sms/i, /channel: email/i, /channel: call/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
-      /refine attempts per mechanism/i, /min improvement to keep/i,
+      /refine attempts per mechanism/i, /min improvement to keep \(panel reaction\)/i,
+      /min improvement to keep \(pp\)/i,
       /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();

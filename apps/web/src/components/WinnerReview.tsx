@@ -111,6 +111,13 @@ function noActionEnding(
       `${label} won the screen, but the held-out final panel could not produce a ` +
       "calibrated estimate. This is missing evidence, not a verdict on the idea."];
   }
+  if (rationale === "no_round_was_ever_generated") {
+    // Distinct from "nothing cleared the bar": the loop ended before a single
+    // round was generated, so no idea was ever put in front of a panel.
+    return ["Inconclusive: no idea was ever generated.",
+      "Idea generation was unavailable, so the loop stopped before any round " +
+      "reached a panel. Nothing was evaluated — this is not a no-action verdict."];
+  }
   if (champion) {
     return ["Rejected at the final check.",
       `${label} cleared the screen but failed the held-out final — it needed ` +

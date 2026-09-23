@@ -402,7 +402,8 @@ async def test_loop_config_defaults_snapshot_onto_the_run(
         "MAX_ROUNDS": 10,
         "MAX_NO_IMPROVE": 3,
         "PATIENCE": 1,
-        "KEEP_DELTA_PP": 0.5,
+        "KEEP_DELTA_PP": 0.6,
+        "KEEP_DELTA_REACTION": 0.4,
         "WIN_THRESHOLD_PP": 15.0,
         "CANDIDATE_COUNT": 3,
         "TIE_MARGIN": 0.05,
@@ -445,7 +446,7 @@ async def test_confirmed_override_snapshots_and_updates_persisted_defaults(
     created = (await auth_client.post("/api/runs", json=body)).json()
     assert created["loop_config"]["MAX_ROUNDS"] == 4
     assert created["loop_config"]["PATIENCE"] == 2
-    assert created["loop_config"]["KEEP_DELTA_PP"] == 0.5  # untouched default
+    assert created["loop_config"]["KEEP_DELTA_PP"] == 0.6  # untouched default
     fleet = await db_session.get(FleetControlRow, 1)
     assert fleet is not None
     await db_session.refresh(fleet)
