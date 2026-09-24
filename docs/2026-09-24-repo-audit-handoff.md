@@ -315,6 +315,8 @@ Rules: move, don't delete. Every archived doc gets a header naming what supersed
 
 ## 6. Open questions — resolve in Phase A
 
+> Tracked in `TODOS.md` — the one backlog. This section keeps the detail and evidence.
+
 Answered 2026-09-24: Railway staging deploys **V4-Improvements**. Repo-vs-live n8n diff is done (§2.4).
 The old synchronous `waypoint/context-v1` flow no longer exists live. The uncommitted V2 `RunStart.tsx`
 is already on V4 — discard it.

@@ -1,6 +1,7 @@
 # Pathfinder Waypoint — agent orientation
 
-Read this first, then `docs/REPO-MAP.md`. Keep both files identical on `main` and `V4-Improvements`.
+Read this first, then `docs/REPO-MAP.md`. `TODOS.md` is the one backlog — add work there, not in
+handoffs. Keep all three files identical on `main` and `V4-Improvements`.
 
 ## Where the code is
 
