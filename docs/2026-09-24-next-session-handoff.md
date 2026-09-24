@@ -5,7 +5,7 @@ prior context**. Read "Gotchas" before touching anything — several of them cos
 the previous session real time.
 
 **Branch:** `V4-Improvements` · **Worktree:** `.claude/worktrees/pathfinder-waypoint-v4`
-**Last commit:** `580c668` (pushed to `origin/V4-Improvements`)
+**Code commit:** `580c668` · this doc is updated separately; see `git log` for the tip.
 
 ```bash
 cd services/api && .venv/bin/python -m pytest -q        # 804 passed, 2 deselected
@@ -35,7 +35,7 @@ production run `4e7cb9fd` and fixed in `580c668`.
 | — | Jobs stalled and were reaped with no recorded reason | **Fixed** — not yet exercised at load |
 
 Live verification (Task 7) has since run. **Read §1.5 before planning anything** —
-it confirms three fixes and surfaces three new issues.
+it confirms three fixes and surfaces four new issues.
 
 The full diagnosis for each lives in `580c668`'s commit message. The plan and
 its evidence are at
@@ -102,7 +102,7 @@ distinct mechanisms across 15 rounds (`visibility_into_usage_pattern` →
 `self_serve_customer_conversion_enablement`). The baseline produced three
 rewordings of a single payment lever. SHIFT is working.
 
-### Three new issues this run surfaced
+### Four new issues this run surfaced
 
 **A. `MAX_NO_IMPROVE=5` is too loose to fire — the rounds barely dropped.**
 Replaying `553067`'s exact 15 rounds through the shipped loop code: `dry`
@@ -140,6 +140,47 @@ optimistic, the loop is optimising against a biased estimate and the shipped
 number is the more pessimistic one. Worth checking whether the two panels draw
 from different persona pools or whether the 5-panel's backfilled seats drag the
 mean down. Not urgent, but it undermines confidence in the screen estimate.
+
+**D. The `PATIENCE` label is wrong (open decision).**
+
+A mechanism can visibly run 4–5 consecutive rounds even at `PATIENCE=2`, which
+looks like the loop fix failing. **It is not.** `PATIENCE` counts *consecutive
+non-improving* attempts, and a **win resets the counter to zero**. Replay of
+`227626` through the shipped code:
+
+```
+r3  recurring_revenue  shift   win    tries 2 -> 0
+r4  recurring_revenue  refine  lose   tries 0 -> 1
+r5  recurring_revenue  refine  win    tries 1 -> 0   <- reset
+r6  recurring_revenue  refine  lose   tries 0 -> 1
+r7  recurring_revenue  refine  lose   tries 1 -> 2   <- shifts next
+```
+
+Five rounds on one mechanism, never more than two failures back to back. The
+rule is: **keep refining while it keeps winning; two losses in a row and it is
+abandoned.**
+
+The win-reset (`tries_on_current=0` in `apply_round`'s win branch) exists at
+`5443e39` and **predates this work** — the loop fix only changed how the counter
+increments on a *loss*.
+
+**The defect is the UI label.** Both `RunStart.tsx:24` and `RunStatus.tsx:25`
+call it *"Refine attempts per mechanism"*, with help text *"Tries a mechanism
+gets before the loop shifts to a new one."* Both promise a hard cap of 2 total.
+An operator reading that will conclude the loop is broken when it is not.
+
+**Undecided — the user was asked and has not chosen:**
+- *Fix the label only* (recommended). Abandoning a mechanism that just improved
+  is perverse, and a win requires a genuine two-step gain so it cannot churn
+  indefinitely. Text-only, zero risk.
+- *Add a hard total cap per mechanism* — what the label currently promises.
+  Would have cut `recurring_revenue` from 5 rounds to 2 on `227626`. Tightens
+  the round budget at the cost of dropping ideas mid-improvement.
+
+Note this is the real lever on rounds-per-Pro — `recurring_revenue` took 5 of 13
+rounds on `227626`, and `billing_confidence` + `task_completion` took 8 of 15 on
+`553067`. `MAX_NO_IMPROVE` (issue A) is the coarser second dial: it counts how
+many mechanisms have gone dry, and stops the Pro at 5.
 
 ### A prediction that was wrong
 
