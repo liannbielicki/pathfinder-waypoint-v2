@@ -1,105 +1,89 @@
-# Design follow-ups
+# TODOS
 
-- [ ] **Responsive run-setup refinement**
-  - **Why:** The first release keeps the existing single-column flow, but the
-    loop controls, confirmation inputs, fleet safety setting, and run inputs may
-    become dense on narrow screens.
-  - **Pros:** Produces intentional tablet/mobile hierarchy from real control
-    density and operator usage instead of guessing during backend delivery.
-  - **Cons:** Requires a later viewport review and may change the form layout.
-  - **Context:** Revisit after the loop controls ship and usage data shows which
-    fields operators need most often. Preserve keyboard order and 44px targets.
-  - **Depends on / blocked by:** The first loop-control UI must exist so density
-    can be measured against the real content.
+**The one backlog for this repo.** Handoffs and plans link here instead of keeping their own lists.
+Ordered by priority within each section. Every item names its evidence; re-check before acting.
+Last reviewed 2026-09-24 against `V4-Improvements` @ d8df7d5.
 
-- [ ] **Product design system**
-  - **Why:** The app has shared CSS variables and component patterns but no
-    `DESIGN.md` defining typography, spacing, component vocabulary, or state
-    rules across screens.
-  - **Pros:** Gives future features a durable visual reference and reduces
-    accidental drift between operator surfaces.
-  - **Cons:** It is broader than this loop and creates no immediate value for
-    the first implementation.
-  - **Context:** Start when multiple Pathfinder screens need coordinated visual
-    decisions; document the existing vocabulary before introducing new tokens.
-  - **Depends on / blocked by:** Agreement on product-wide visual direction and
-    enough screens to make the system representative.
+Detail lives in: `docs/2026-09-24-next-session-handoff.md` (loop work, "§" refs below),
+`docs/2026-09-24-repo-audit-handoff.md` (repo audit), and the brief on `feature/channel-selection`.
 
-- [ ] **Stable recommendation attribution across LCM and Iterable**
-  - **Why:** The minimum slice can join outcomes with `pro_uuid`, `org_uuid`,
-    channel, theme/idea, and timestamps, but a stable recommendation ID is the
-    reliable way to learn which exact Waypoint recommendation caused an outcome.
-  - **Pros:** Enables exact touch-level attribution, safer retries, and clearer
-    learning from multiple nearby touches.
-  - **Cons:** Requires an integration contract and may require LCM to preserve
-    Waypoint metadata through drafting and Iterable delivery.
-  - **Context:** The current handoff has a durable Waypoint idempotency key, but
-    the external attribution path is not settled. Start by agreeing on the ID
-    carried Waypoint -> LCM -> Iterable -> outcome ingestion and its retention.
-  - **Depends on / blocked by:** LCM support for preserving the identifier and
-    confirmation of the Iterable readback fields.
-  - **Status:** the LCM handoff now sends the winner ID as `row_id` in each
-    Pathfinder Intake batch row (was: `recommendation_id` in the old per-winner
-    payload); `POST /api/outcomes` accepts it back under either spelling
-    (`recommendation_id` or `row_id`) to key inbound touch outcomes. Note:
-    `journey_window` and `follow_up` are no longer forwarded to LCM at all —
-    the intake row shape is fixed to `pro_uuid`/`theme`/`theme_category`/
-    `org_id`/`row_id`; both remain stored (`run.journey_window`,
-    `winner.evidence["follow_up"]`) and readable via the API. The remaining
-    gap is entirely external: LCM must echo `row_id` through drafting and
-    Iterable delivery so it round-trips on the outcome event, and extending
-    the intake contract to carry `journey_window`/`follow_up` is pending
-    confirmation with Allison.
+---
 
-- [ ] **Canonical Amplitude active-use event contract**
-  - **Why:** The primary outcome is binary return-to-app and continued use, but
-    the exact Amplitude event or event set and horizon rules are not yet named.
-  - **Pros:** Makes 7/14/30/90-day outcomes reproducible and prevents the
-    implementation from choosing a weak feature-specific proxy.
-  - **Cons:** Requires product/data-owner agreement before the outcome adapter
-    can be finalized.
-  - **Context:** Amplitude is authoritative for app engagement and `pro_uuid`
-    is the person-level join key. Document the canonical event names, required
-    identity fields, timezone handling, and what counts as positive usage at
-    each horizon.
-  - **Depends on / blocked by:** Access to the Amplitude event catalog and the
-    owner of the retention measurement definition.
-  - **Status:** The ingestion side is ready and waiting: `POST /api/outcomes`
-    and the `returned_7d/14d/30d/90d` horizon fields on `TouchOutcomeRow`
-    already exist. No outcome source posts to that endpoint yet, so the
-    evidence store stays empty and generation runs with the honest "no
-    evidence" block until the event contract lands.
+## Now — correctness and cost
 
-- [ ] **V3: fit the loop's own parameters from observed outcomes**
-  - **Why:** Today the loop *reads* history and never *fits* to it. Evidence
-    enters as prompt text (`evidence.evidence_block`) and as a seeded mechanism
-    (`warmstart.retrieve`), so a model decides what to do with the numbers. The
-    machinery's own tuning surface stays whatever a human typed:
-    `WARM_START_THRESHOLD` (0.75), `DEFAULT_SIMILARITY_WEIGHTS` (segment /
-    lifecycle_stage / churn_risk_state at 2.0, every other field 1.0),
-    `TIE_MARGIN`, and the ranker rubric. These are operating defaults, not
-    proven values, and no observed outcome can currently move any of them.
-  - **What fitting means here:** measure, then move the knob. Compare return
-    rates of warm starts bucketed by similarity score to find where the
-    threshold actually earns its keep; compare per-field match against return
-    rates to reweight `DEFAULT_SIMILARITY_WEIGHTS` (a shared `vertical` may
-    transfer better than `lifecycle_stage` — the current weights are a guess);
-    compare cold-start versus warm-start outcomes to confirm warm starts help
-    at all. Semi-automatic first: the system proposes new values with the
-    supporting counts and a human approves. Keep the scorer behind
-    `warmstart.retrieve`'s interface so a fitted version replaces its body
-    without touching the pipeline.
-  - **Pros:** Turns real 7/14/30/90-day return behavior into better selection
-    quality and lower evaluation spend, instead of leaving the whole tuning
-    surface frozen at launch guesses.
-  - **Cons:** Needs meaningful attributable volume before any fit is honest — a
-    fit on thin data is worse than the default it replaces. It also gives up a
-    real V2 property: today bad evidence degrades output gracefully (worse
-    ideas), whereas a wrongly fitted threshold mistunes selection silently.
-  - **Context:** Deliberately out of V2 scope. V2 compounds through prompts and
-    mechanism seeding only, and that is the honest claim to make about it.
-    Before changing any default, record cold-start versus warm-start outcomes,
-    ranker choices, persona calls, cost, and downstream return-to-app behavior.
-  - **Depends on / blocked by:** Canonical Amplitude active-use contract, a
-    settled outcome-attribution anchor (see above), and enough attributable
-    volume for those comparisons to mean anything.
+- [ ] **Stop population evidence being narrated as one Pro's history.** A shipped LCM handoff said
+  "SMS showed strong returns FOR THIS PRO (82/121…)"; those numbers come from `pattern_summaries()`,
+  which has no `pro_id`. Three causes: the GROUNDING rule (`prompts.py:277`) bans only *invented*
+  values, not misattributed ones; the evidence block says "similar pros" only at its top; and block kind
+  `per_pro_data` sits in `SUPPRESSING_BLOCK_KINDS` (`pipeline.py:615`) but no prompt defines it, so the
+  critic can never emit it. Fix all three; add a test that fails if the kind goes unwired.
+- [ ] **Find out why the critic suppresses so many rounds.** Run `acc26e53`: Pro `475567` lost 6 of 10
+  rounds to the critic, each paid for (generation + critic) and never panel-scored. Count
+  `CandidateRow.critics["block_kind"]` for that run; one dominant kind means a prompt fix or an
+  over-strict gate. Biggest visible cost lever. (§1.5 B, §4.3)
+- [ ] **Next run: set `MAX_NO_IMPROVE=3`.** Operator setting on the start form, no code. At 5 it never
+  trips inside the round cap; replay shows 3 stops `553067` at round 13 instead of 15. Confirm at least
+  one Pro ends on `no_improve_exhausted`. (§1.5 A, §4.3)
+- [ ] **Decide the `PATIENCE` label.** The UI says "Refine attempts per mechanism" (`RunStart.tsx`,
+  `RunStatus.tsx`), implying a hard cap; the code counts *consecutive losses* and resets on a win.
+  Recommended: fix the label text only. Alternative: add a real per-mechanism cap. **Needs Jake.** (§1.5 D)
+- [ ] **Fix `MissingGreenlet` under load.** 6 of 200 jobs fail at evolve under 4-worker concurrency and
+  only succeed on retry. Also fix the false assertion message "a live lease was double-claimed"
+  (`tests/test_load.py:123`) — it sent the last session down the wrong path. Repro:
+  `pytest tests/test_load.py -m load -q`. (§4.2)
+- [ ] **Close the CI gap.** Add a separate, visible `pytest -m load` job and extend `mypy` to `tests/`
+  (non-strict). (§4.1)
+
+## Channel selection — branch `feature/channel-selection`
+
+One feature; the brief on that branch has the evidence. Headline facts:
+- [ ] **The consent gate has never blocked anything.** Neither context flow emits `sms_consent_state` or
+  `email_consent_state`, and `call` has no consent key at all (`feasibility.py:28`). Source DNC/opt-out
+  from Salesforce `account` (`sms_opt_out__c`, `dnc_phone__c`, `dnc_email__c`) and mirror LCM's Iterable
+  SMS rule. Consent must bypass promotion, like the contact `pro_uuid` does.
+- [ ] **RECO never reaches Staging runs.** Check whether the active promotion bundle maps
+  `RECOMMENDED_ACTION → suggested_channel`; if not, that alone explains "RECO unavailable". Then switch to
+  the org-grain table `channel_recommendations_org` with probabilities.
+- [ ] **Pick the channel once per Pro, before the loop** (from the consent-filtered set, RECO as the
+  basis), so rounds stay comparable. **Needs Jake's sign-off on pinning.**
+
+## Context, repo, and docs hygiene
+
+- [ ] **Run form defaults to Standard context** (`RunStart.tsx:57`) though real runs use Staging.
+  Flip the default? **Needs Jake.**
+- [ ] **Refresh `n8n/` from live**: fix the Workbench flow's webhook path (`context-async-v1` →
+  `context-v1`), sync the Standard flow's `Merge` node, delete `waypoint-variable-audit-context-v1.json`
+  (no live counterpart), decide the untracked `…-by-org-uuid-v1.json`.
+- [ ] **Remove the dead `N8N_CONTEXT_URL_STAGING` setting** (`settings.py:18`, `.env.example`, three tests).
+- [ ] **Ask whether anything still calls the active `pathfinder-audience-boundary` flow**; retire it if not.
+- [ ] **Docs Phase C**: archive superseded specs (the 2026-09-17 per-run-context-source and
+  railway-context-workbench designs still describe `N8N_CONTEXT_URL_STAGING`), write
+  `docs/ARCHITECTURE.md`, remove the duplicated README workbench section, refresh `HUMAN-TASKS.md`'s
+  stale launch status. (Audit handoff §5)
+
+## Measurement quality
+
+- [ ] **Screen panel looks optimistic.** Final 5-panel scores ~half the 3-panel screen for 3 of 4 Pros
+  (`553067` 4.9 → 3.0 pp). Check whether the panels draw from different pools or backfill drags the mean. (§1.5 C)
+- [ ] **Persona fit is `1.00` for everyone, and per-Pro churn baselines are off.** Likely one root cause:
+  the flow's tenure vocabulary (`under_1y`…) never matches the cards (`0-3m`…), so fit collapses to
+  `{segment}` and `calibration_cell()` stays disabled. Fix at the n8n flow, then re-tune `KEEP_DELTA_PP`
+  and `MIN_REDUCTION_FLOOR_PP`. Verify against a live `persona-cards` payload first. (§4.4, §7)
+- [ ] **V3 outcome gaps**: `unsubscribed` has no writer (STOP arrives via `smsReceived`); the Iterable
+  cursor runs ~24h behind because winner-less control batches get deferred; the return-event definition
+  (`Loaded a Screen` / `Loaded a Page`) still lacks formal data-owner sign-off.
+
+## Later — blocked on outcome volume
+
+- [ ] **Fit the loop's own knobs from observed outcomes.** `WARM_START_THRESHOLD` (0.75),
+  `DEFAULT_SIMILARITY_WEIGHTS`, `TIE_MARGIN`, and the ranker rubric are launch guesses nothing can move.
+  Compare warm-start return rates by similarity bucket, reweight fields by match-vs-return, and confirm
+  warm starts beat cold starts at all. Semi-automatic: propose values with counts; a human approves.
+  If bounded Postgres/Python retrieval later misses latency at production size, revisit retrieval then.
+  Needs enough attributable volume first — a fit on thin data is worse than the default.
+
+## Small
+
+- [ ] `_panel_for`'s `size` is typed `Any`, not `Literal[3, 5]`.
+- [ ] Enforce `N8N_TIMEOUT_SECONDS` (settings, default 900) < `LEASE_SECONDS` (`worker.py:49`, 1800); only an operator override can break it today.
+- [ ] `_screen_finalists` raises `failures.exceptions[0]` arbitrarily; a `LeaseLost` can get buried.

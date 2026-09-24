@@ -246,6 +246,8 @@ should build:
 
 ## 4. Open work
 
+> Tracked in `TODOS.md` — the one backlog. This section keeps the detail and evidence.
+
 **Recommended order after Task 7** (the subsection numbers are stable labels,
 not the order to work in):
 
