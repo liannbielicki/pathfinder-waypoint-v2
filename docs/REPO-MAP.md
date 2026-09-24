@@ -1,10 +1,11 @@
 # Repo map
 
-Durable orientation for anyone (human or AI) opening this repo. Identical on `main` and
+Durable orientation for anyone (human or AI) opening this repo. Kept identical on `main` and
 `V4-Improvements`. **Last verified: 2026-09-24.** Update it in the same commit as any change it describes.
 
-For the dated audit behind this map — evidence, Snowflake findings, the open channel-selection
-work — read `docs/2026-09-24-repo-audit-handoff.md`.
+For the dated audit behind this map — evidence and the executed cleanup — read
+`docs/2026-09-24-repo-audit-handoff.md`. Channel-selection findings live on branch
+`feature/channel-selection` (`docs/2026-09-24-channel-selection-analysis.md`).
 
 ---
 
@@ -18,8 +19,8 @@ work — read `docs/2026-09-24-repo-audit-handoff.md`.
 | `origin/feat/feature-catalog-v2` | Liann's | Catalog work not on main or V4. Not ours to change. |
 | `origin/V3-Improvements` | merged, stale | Fully contained in main + V4. Kept on the remote by choice. |
 
-**Known conflict:** channel selection was built twice — on main (`fb92bba`, Liann) and on V4 (`ebb2b86`
-and follow-ups, Jake). Merging main into V4 will conflict in `RunStart.tsx`, `feasibility.py`,
+**Known conflict:** channel selection was built twice, both by Liann — on V4 (`ebb2b86` and follow-ups,
+~Sep 15) and on main (`fb92bba`, Sep 22). Merging main into V4 will conflict in `RunStart.tsx`, `feasibility.py`,
 `handoff.py`, `models.py`, `prompts.py`. Default resolution: keep V4's behavior.
 
 ### Archive tags (deleted branches — restore with `git checkout -b <name> <tag>`)
@@ -92,7 +93,7 @@ The run form defaults to Standard (`RunStart.tsx`) even though Staging is the re
 ## Docs layout
 
 - `CLAUDE.md` + this file: orientation. Keep both short and current.
-- `docs/2026-09-24-repo-audit-handoff.md`: dated audit, evidence, and the next work queue.
+- `docs/2026-09-24-repo-audit-handoff.md`: dated audit, evidence, and the executed cleanup.
 - `docs/superpowers/{specs,plans}/`: dated design/plan pairs. **Some are superseded** — e.g. the
   2026-09-17 per-run-context-source and railway-context-workbench specs still describe
   `N8N_CONTEXT_URL_STAGING`. Check the audit handoff §5.2 before trusting one.

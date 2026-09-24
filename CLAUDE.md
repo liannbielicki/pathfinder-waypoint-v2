@@ -1,6 +1,6 @@
 # Pathfinder Waypoint — agent orientation
 
-Read this first, then `docs/REPO-MAP.md`. Both files are identical on `main` and `V4-Improvements`.
+Read this first, then `docs/REPO-MAP.md`. Keep both files identical on `main` and `V4-Improvements`.
 
 ## Where the code is
 

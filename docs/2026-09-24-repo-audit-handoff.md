@@ -1,7 +1,7 @@
 # Waypoint — repo audit & cleanup handoff
 
 **Audience:** an AI agent starting cold on this repo. Read this whole file before touching anything.
-**Written:** 2026-09-24, from branch `channel-selection-consent` (cut from `V4-Improvements` @ d8df7d5).
+**Written:** 2026-09-24 on `V4-Improvements` @ d8df7d5 (branch renamed to `docs/v4-orientation`).
 **Owner:** Jake Fassora. Ask him before any step marked **ASK**.
 
 Every claim below is tagged:
@@ -23,7 +23,7 @@ superseded docs, `docs/ARCHITECTURE.md`) is still to do.
 1. **Phase A — Freeze the facts.** Resolve the [unknown]s in §6 that the cleanup depends on.
 2. **Phase B — Get off V2.** ~~One final docs-only push to `V2-Improvements`, then move the working base (§4).~~ Done.
 3. **Phase C — Clean docs.** Inventory, archive, correct, and write the missing knowledge base (§5).
-4. **Phase D — Channel-selection work** resumes only after A–C (§7). Do not start it early.
+4. **Phase D — Channel-selection work** lives on `feature/channel-selection`; start it after A–C.
 
 Ground rules for all phases:
 - Never push to `main`. Never force-push anything. Never skip hooks.
@@ -91,7 +91,7 @@ Consequences an agent must internalize:
 - Three things bypass promotion on purpose: `firmographics.segment/industry` (Context Layer),
   `core_saas_plan`, and the contact `pro_uuid` from the `waypoint_contact_pro` row
   (`staging_context.py:_contact_pro`). That "authoritative bypass" pattern is the precedent for any
-  field that must never depend on a human remembering to promote it — e.g. consent/DNC (§7).
+  field that must never depend on a human remembering to promote it — e.g. consent/DNC (see `feature/channel-selection`).
 - `N8N_CONTEXT_URL_STAGING` is **dead**. Staging uses `N8N_CONTEXT_URL_WORKBENCH`
   (`worker.py:415`, commit `10cd4b5 fix: share async context flow across workbench and waypoint`).
   The setting still exists in `settings.py:18`, `.env.example`, and three tests.
@@ -100,8 +100,8 @@ Consequences an agent must internalize:
 ### 2.3 Standard context path (the fallback)
 
 **[verified]** `N8NContextClient.fetch` → synchronous POST to `N8N_CONTEXT_URL`, expects a 200 JSON
-array; a 202 raises `ContextConfigurationError` (`n8n.py:378–382`). Rows are projected through the
-closed `ALLOWED_FIELDS` allowlist (`n8n.py:34`). Repo copy of that flow:
+array; a 202 raises `ContextConfigurationError` (`n8n.py:379–382`). Rows are projected through the
+closed `ALLOWED_FIELDS` allowlist (`n8n.py:35`). Repo copy of that flow:
 `n8n/waypoint-context-snowflake-v1.json`, webhook path `pathfinder-org-context`. It contains an
 Iterable `Get a user` node keyed on `pro_uuid` whose response Waypoint discards.
 
@@ -116,7 +116,7 @@ workflows from many teams; these six are Waypoint's.
 | Waypoint Context_URL_Workbench (`uagiNmDAitRAHHRv`) | yes | `waypoint/context-v1` | **Staging context (real runs) + Workbench** — async 202 + callback | `n8n/waypoint-variable-audit-context-async-v1.json` | Only the webhook node differs: repo says path `waypoint/context-async-v1`. All queries identical. |
 | Waypoint Context_URL (`64Cuwv6v20ANg5Yo`) | yes | `pathfinder-org-context` | **Standard context (fallback)** — synchronous | `n8n/waypoint-context-snowflake-v1.json` | Only the `Merge` node's parameters differ. |
 | Waypoint - Snowflake pull (`hen9aPWGv5lC2FqE`) | yes | `pathfinder-audience-boundary` | audience pull; last updated 2026-08-10 | **none** | Nothing in the repo references this path. **ASK** whether anything still calls it. |
-| waypoint-morning-batch (`ibHXuZUPOA4zZxnh`) | no | schedules | daily test/control batch: Salesforce DNC SQL + Iterable per-user SMS eligibility check | **none** | Contains the best consent logic anywhere — see §3 and §7. Its code cites `scripts/pick_ios_batch.py` and `scripts/n8n/pick_batches.js`, which are **not in this repo**. |
+| waypoint-morning-batch (`ibHXuZUPOA4zZxnh`) | no | schedules | daily test/control batch: Salesforce DNC SQL + Iterable per-user SMS eligibility check | **none** | Contains the best consent logic anywhere — see the channel-selection brief on `feature/channel-selection`. Its code cites `scripts/pick_ios_batch.py` and `scripts/n8n/pick_batches.js`, which are **not in this repo**. |
 | Pathfinder Waypoint — outcome ingestion (`OWgWr0nsAza0iFPo`) | no | schedules | Iterable/Amplitude outcome polling | `docs/n8n/outcome-ingestion.workflow.json` | 9 of 16 nodes differ. Inactive — outcome polling now lives in the app (`amplitude_source.py`, `iterable_source.py`, `outcomes.py`). **[likely superseded]** |
 | Waypoint_Context_URL_Staging (`sZUPpk7F69pRits9`) | no | random uuid | the old `N8N_CONTEXT_URL_STAGING` flow | **none** | Dead, matching the dead setting. |
 
@@ -130,48 +130,17 @@ check. The live `waypoint-morning-batch` is the more complete version of the sam
 
 ---
 
-## 3. Snowflake facts established 2026-09-24 **[verified]** (`snow sql -c hcp`)
+## 3. Snowflake facts
 
-Keep these; they took a while to find.
-
-- `production.reco.channel_recommendations` — **pro grain**, 406,565 rows / 65,746 orgs, refreshed daily.
-  `recommended_action` values: `sms` 221,762 · `email` 103,174 · `call` 81,628 · `suppress_all` 1.
-  Lowercase — already what `OrgBrief.suggested_outreach_channel()` (`n8n.py:164`) accepts.
-  Also has `p_sms/p_email/p_call`, fatigue tiers, and boolean `email_optout_suppressed`.
-- `production.reco.channel_recommendations_org` — **org grain**, exactly 1 row/org, daily
-  (72 distinct days in `_ORG_HIST` over 72 calendar days). `org_best_channel`, `union_p_*`,
-  per-channel contact pro. Distribution differs sharply from the pro table
-  (org: email 47 / call 36 / sms 17 %; pro: sms 55 / email 25 / call 20 %).
-  **Trap:** its `email_contact_optout` is a continuous rate, not a flag.
-- The live async flow's RECO query uses the **pro** table via the founding admin and emits only
-  `RECOMMENDED_ACTION` (no probabilities, no opt-out flag).
-- RECO respects email opt-out only: `call` recommended into DNC orgs 5,645 rows; `sms` to SMS
-  opted-out Pros 1,185 rows; `email` to email-suppressed Pros 0.
-- DNC/opt-out, best source found: **Salesforce account**, keyed by org —
-  `hcp_integrations.housecallpro_salesforce.account` joined on `org_id__c` (= `organization_id`),
-  344,042 orgs. `sms_opt_out__c` (boolean) = TRUE for 24,645 orgs. `dnc_phone__c` / `dnc_email__c`
-  are **free-text** fields (values like `Do Not Call`, `DO NOT CALL`, `DNC`, and stray phone numbers):
-  ~176 phone-DNC and 92 email-DNC orgs. The live `waypoint-morning-batch` flow matches with
-  `ilike '%do%'`, which misses the `DNC` spelling — normalize properly. It also reads
-  `opportunity.phone__c`, contact-level `hasoptedoutofemail`, and `analytics.main.global_email_unsubscribes`.
-- The **send-time SMS rule** the LCM team uses, copied into `waypoint-morning-batch`'s `Pick batches`
-  node and labeled "LCM parity (featureProjection.js gate:dnc_suppressed)": an Iterable user is
-  SMS-eligible only if `dataFields.dnc_flag` is empty, `phoneNumber` is present,
-  `receivedSMSDisclaimer === true`, and none of `unsubscribedChannelIds` / `unsubscribedMessageTypeIds`
-  are SMS channels or message types (ids from Iterable `GET /api/channels` and `/api/messageTypes`).
-  The source of truth is `featureProjection.js` in the LCM codebase (Allison), not this repo.
-- Warming-program DNC flags, broader but not a contract:
-  `marts.staging.int__warming_exclusion_flags.dnc_orgs_flag` (transient staging table, 5,053 / 72,222 orgs) and
-  `marts.sales.snap_daily_warming_eligibility.dnc_orgs_flag` (daily snapshot). They disagree on 197 orgs.
-- Pro-level SMS opt-out: `analytics.main.fact_iterable_sms_transaction.has_opted_out` (by `pro_uuid`;
-  covers only Pros Iterable has texted).
-- **Neither context flow emits any consent or DNC field.** `sms_consent_state` was removed 2026-08-19
-  (it measured the Pro's *customers'* consent); `email_consent_state` never had a source. So the
-  consent gate `feasibility.gate_pro` has never blocked anything in production.
+Moved: the Snowflake findings (RECO grain, consent/DNC sources, LCM's SMS rule) lives on branch `feature/channel-selection` in `docs/2026-09-24-channel-selection-analysis.md` (addendum §A1).
 
 ---
 
 ## 4. Branches, worktrees, stashes — full inventory and cleanup plan
+
+> **Historical.** §4.1–§4.6 are the pre-cleanup inventory and plan, kept as the audit trail. The
+> plan was executed on 2026-09-24 — see §4.7. For the **current** branches, tags, and worktrees, read
+> `docs/REPO-MAP.md`.
 
 Everything in this section was **[verified]** on 2026-09-24 with `git fetch`, `git branch --merged`,
 `git cherry`, `git worktree list --porcelain`, `git stash list`, and `git -C <worktree> status` for
@@ -185,12 +154,14 @@ every worktree.
 | `V4-Improvements` @ d8df7d5 | **The working base. Railway staging deploys it [owner].** 1 behind / 47 ahead of main. Every push redeploys staging. |
 | `origin/feat/feature-catalog-v2` | **Liann's**, 6 catalog commits not on main or V4. Not ours — leave it. |
 | `V2-Improvements` | Frozen archive after one final docs-only push (§4.5). Never merges to main. |
-| `channel-selection-consent` | This handoff + Phase D work. Cut from V4. |
+| `docs/v4-orientation` | This handoff, `CLAUDE.md`, `docs/REPO-MAP.md`. Merge into V4. |
+| `feature/channel-selection` | Channel-selection brief; the feature work starts here. |
 
 Local `main` is 2 behind `origin/main`: fast-forward it.
 
-**Divergence hazard:** channel selection was implemented **twice**: on main by Liann (`fb92bba`) and on
-V4 by Jake (`ebb2b86`, then `3ae840c`, `d77656d`, `cde7de5`, `8087581`, `ad1ed88`). `git cherry` finds no
+**Divergence hazard:** channel selection was implemented **twice, both times by Liann**: on V4 around
+Sep 15 (`ebb2b86`, then `3ae840c`, `d77656d`, `cde7de5`, `8087581`, `ad1ed88`) and on main on Sep 22
+(`fb92bba`). `git cherry` finds no
 patch-equivalent of `fb92bba` on V4. Both touch `RunStart.tsx`, `feasibility.py`, `handoff.py`,
 `models.py`, `prompts.py`, so merging main into V4 **will conflict**. Keep V4's behavior unless Jake says
 otherwise; note `fb92bba` makes LCM handoff skip call winners, which V4 already handles with the calls panel.
@@ -222,7 +193,7 @@ Existing tag `v3-learning-loop` is merged into main; keep it.
 |---|---|---|---|
 | `~/projects/pathfinder-waypoint-v2` (primary) | `V2-Improvements` | `TODOS.md` (+2 backlog items **not** on V4 or main), `RunStart.tsx` (1 line, already on V4 via `5399293`), untracked `docs/context-workbench-attempt-project-brief.md` | Move the 2 TODOs to V4's `TODOS.md`; discard `RunStart.tsx`; archive the brief (§4.5). Then switch the primary to `main` (see note). |
 | `.claude/worktrees/pathfinder-waypoint-v4` | `V4-Improvements` | untracked `n8n/waypoint-variable-audit-context-by-org-uuid-v1.json` (no live counterpart) | **Jake's active worktree — do not touch.** Archive that file (§4.5) only with his OK. |
-| `.claude/worktrees/channel-selection-consent` | `channel-selection-consent` | this doc | keep |
+| `.claude/worktrees/docs-v4-orientation` | `docs/v4-orientation` | this doc | keep until merged |
 | `.claude/worktrees/pathfinder-waypoint-v5` | `v5` | clean | remove after tagging |
 | `.claude/worktrees/ecstatic-roentgen-ebf15d` | `claude/ecstatic-roentgen-ebf15d` | untracked `docs/specs/waypoint-learning-loop.md` (Aug 26 "Building a loop that can learn" build spec, 506 lines) | archive the spec (§4.5), then remove |
 | `.claude/worktrees/laughing-hugle-41a57d` | `claude/laughing-hugle-41a57d` | clean | remove |
@@ -275,17 +246,17 @@ Push once. After that, V2 is read-only.
   `archive/stash-codex-v4-workbench-2026-09-16`.
 - `V2-Improvements` final push `8a7db57`: `ARCHIVED.md`, the workbench failure review, the learning-loop
   spec (plus `1be55b0`). Frozen.
-- The primary checkout's 2 unlanded TODOs moved to `TODOS.md` on `channel-selection-consent` (V4-bound);
+- The primary checkout's 2 unlanded TODOs moved to `TODOS.md` on `docs/v4-orientation` (V4-bound);
   its `RunStart.tsx` change discarded (already on V4).
 - Worktrees removed: v5, laughing-hugle, hotfix-panel-handoff-sms, setup-page-ui-changes, v3-learning-loop,
   ecstatic-roentgen (spec archived first), closed-loop-learning-sync, `~/projects/pathfinder-waypoint-v3-outcome-pollers`;
-  4 `/tmp` entries pruned. Remaining: primary, `pathfinder-waypoint-v4` (Jake's), `channel-selection-consent`.
+  4 `/tmp` entries pruned. Remaining: primary, `pathfinder-waypoint-v4` (Jake's), `docs-v4-orientation`, `channel-selection`.
 - Local branches deleted (13): `V3-Improvements-pre-rebase`, `backup/V2-local-pre-reset`,
   `claude/closed-loop-learning-sync-da17ff`, `claude/setup-page-ui-changes-34dcc5`, `fable/production-build`,
   `feature/compounding-evolve-loop`, `fix/lcm-intake-contract`, `worktree-hotfix-panel-handoff-sms`,
   `V3-Improvements`, `v5`, `claude/ecstatic-roentgen-ebf15d`, `claude/laughing-hugle-41a57d`,
   `claude/quizzical-driscoll-f977d9`. Remaining local: `main`, `V4-Improvements`, `V2-Improvements`,
-  `channel-selection-consent`.
+  `docs/v4-orientation`, `feature/channel-selection`, and `docs/repo-map` (the PR #9 branch).
 - Stash dropped (tagged first).
 - Local `main` fast-forwarded to `origin/main`; the primary checkout is now on `main`.
 - Not done, by choice: `origin/V3-Improvements` stays; the untracked
@@ -299,7 +270,7 @@ Push once. After that, V2 is read-only.
 
 - Root: `README.md`, `FRONTEND.md`, `TODOS.md`. **No `CLAUDE.md`, no `ARCHITECTURE.md`.**
 - `docs/`: `HUMAN-TASKS.md`, `environment.md`, `context-workbench-partner-handoff.md`,
-  `2026-09-24-next-session-handoff.md`, `2026-09-24-channel-selection-analysis.md`, this file.
+  `2026-09-24-next-session-handoff.md`, this file.
 - `docs/superpowers/plans/` (18) and `docs/superpowers/specs/` (15) — dated design/plan pairs from 2026-08-07 to 2026-09-23.
 - `docs/context-layer/`, `docs/knowledge/`, `docs/n8n/`, `docs/plans/`, `docs/research/`,
   `docs/specs/`, `docs/verification/`.
@@ -317,14 +288,13 @@ Push once. After that, V2 is read-only.
 | `docs/HUMAN-TASKS.md` | Env section is current; "Launch status" is from `fable/production-build` (88 tests; the suite is now ~800). |
 | `README.md` | "Local Context Layer Workbench" section appears **twice** (≈L91 and ≈L194); says "The V3 branch includes…". |
 | `docs/superpowers/plans/2026-09-23-loop-reliability-and-scoring.md` §2A–2D | Premises wrong: assumes RECO value format is the problem (it isn't), that audience SQL is the DNC filter (it isn't), and that fixing `NEGATIVE_CONSENT` matters (no field feeds it). |
-| `docs/2026-09-24-channel-selection-analysis.md` | Written before §2 was known. Its §4 recommends mapping Iterable consent in the **Standard** flow — the fallback. Corrected banner added; §7 here supersedes it. |
 | `n8n/waypoint-variable-audit-context-async-v1.json` | Webhook path drifted from live (§2.4). |
 
 ### 5.3 Target structure (proposal — **ASK** before moving files)
 
 ```
 CLAUDE.md                 ← NEW. Short. Points at ARCHITECTURE.md; lists commands, rules, vocabulary (§1).
-docs/ARCHITECTURE.md      ← NEW. The living "how it works inside and out". Built from §2–§3 of this file.
+docs/ARCHITECTURE.md      ← NEW. The living "how it works inside and out". Built from §2 of this file and REPO-MAP.
 docs/runbooks/            ← env/Railway/n8n operations (HUMAN-TASKS env section, environment.md)
 docs/n8n/                 ← one README mapping every flow → path → env var → role → live status
 docs/decisions/           ← specs/plans that describe CURRENT behavior
@@ -345,8 +315,6 @@ Rules: move, don't delete. Every archived doc gets a header naming what supersed
 
 ## 6. Open questions — resolve in Phase A
 
-| # | Question | Blocks | How to answer |
-|---|---|---|---|
 Answered 2026-09-24: Railway staging deploys **V4-Improvements**. Repo-vs-live n8n diff is done (§2.4).
 The old synchronous `waypoint/context-v1` flow no longer exists live. The uncommitted V2 `RunStart.tsx`
 is already on V4 — discard it.
@@ -354,58 +322,23 @@ is already on V4 — discard it.
 | # | Question | Blocks | How to answer |
 |---|---|---|---|
 | 4 | Should the run form default to Staging? | §2.1 | **ASK** |
-| 6 | Does the active promotion bundle map `RECOMMENDED_ACTION → suggested_channel`? | §7 | Query the promotion table in the staging Postgres (`RAILWAY_WAYPOINT_STAGING` is in the vault), or the workbench UI. If the rule is missing, that alone explains "RECO unavailable" on every staging run. |
-| 7 | Is Salesforce account DNC plus LCM's Iterable rule (§3) the right consent definition, or is there something more canonical? | §7 | **ASK** Jake; get `featureProjection.js` from the LCM team |
 | 8 | Delete remote `origin/V3-Improvements` (fully contained in main + V4)? | §4.2 | **ASK** — it is Liann's repo |
 | 9 | Does anything still call the active `pathfinder-audience-boundary` flow? | §2.4 | **ASK** |
 | 10 | Should the repo n8n copies be refreshed from live and the dead ones archived? | §5 | **ASK**; the drift is small (one webhook path, one Merge node) |
 
 ---
 
-## 7. Phase D — channel selection (do not start before A–C)
+## 7. Phase D — channel selection
 
-Owner's intent **[owner]**:
-- DNC, SMS opt-out, and email opt-out are applied **first** and are hard: never send a Pro something on
-  a channel they can't or won't receive.
-- RECO is the **basis** for the choice among what remains.
-- If several channels remain open, give the model the open set **plus** RECO's preferred channel, and
-  let the model decide.
-
-Refinement recommended by the previous agent, **ASK** before adopting: let the model decide **once per
-Pro, before the loop**, then pin that channel for every round. Reason [verified]: loop identity is
-`mechanism_key()` = slug of the label text only (`loop.py:183`); channel isn't part of it, but
-`channel_directive()` (`prompts.py:32`) reshapes the idea heavily per channel. Re-picking per round makes
-rounds incomparable. Cost: the loop can't discover "this theme only works by email".
-
-Constraints that follow from §2:
-- Real runs are Staging, so the data has to come through the **async workbench flow** and survive
-  `compile_staging_brief`. Consent/DNC must **not** depend on a promotion rule — follow the authoritative
-  bypass precedent (`_contact_pro`, firmographics) so a missed promotion can't silently disable a
-  safety gate.
-- RECO should come from the org-grain table with probabilities, not the bare pro-grain string.
-- Consent should match what the sender enforces. The best prior art is the live (inactive)
-  `waypoint-morning-batch` flow (§2.4): Salesforce account DNC / SMS opt-out in SQL, plus LCM's
-  per-user Iterable SMS rule (§3). The stranded `pathfinder-daily-audience-dnc.json` guesses different
-  Iterable field names (`emailSendDnc`, `smsSendDnc`) and says to confirm them against a real response
-  — prefer the morning-batch/LCM definitions.
-- The async workbench flow has no Iterable node, so an Iterable check on the Staging path means adding
-  one to that flow, or calling Iterable from Waypoint.
-- `call` has no consent key in `CONSENT_FIELD` (`feasibility.py:28`) and always fails open.
-- Downstream gate ordering is already right: `infeasible_channel` precedes the RECO-override check
-  (`pipeline.py:884`), and the RECO rule is guarded by `suggested_channel in channels`.
-
-Independent bug, fix regardless **[verified]**: a shipped handoff said "SMS showed strong returns FOR
-THIS PRO (82/121…)" — population numbers from `pattern_summaries()` (no `pro_id`) narrated as one Pro's
-history. Causes: the GROUNDING rule (`prompts.py:277`) bans only *invented* values, not misattributed
-ones; the evidence block is labeled population-wide only at its top; and block kind `"per_pro_data"`
-is listed in `SUPPRESSING_BLOCK_KINDS` (`pipeline.py:615`) but defined nowhere else in the repo — the
-critic is never told it exists. Fix all three and add a test that fails if the kind goes unwired.
+Moved: owner intent, constraints, and the §2D attribution bug lives on branch `feature/channel-selection` in `docs/2026-09-24-channel-selection-analysis.md` (addendum §A2). Start that work in its own worktree.
 
 ---
 
-## 8. What the previous session left behind
+## 8. State left behind
 
-- Branch `channel-selection-consent` + worktree `.claude/worktrees/channel-selection-consent`, cut from
-  V4 @ d8df7d5. Uncommitted: this file and `docs/2026-09-24-channel-selection-analysis.md`.
-- No code changed. No commits. Nothing pushed.
-- `.claude/worktrees/pathfinder-waypoint-v4` is Jake's active worktree for other work — **do not touch it.**
+- `docs/v4-orientation` (worktree `.claude/worktrees/docs-v4-orientation`): one docs commit on top of
+  V4 — this file, `CLAUDE.md`, `docs/REPO-MAP.md`, 2 TODOs, `.gitignore`. Fast-forwards into V4.
+- `feature/channel-selection` (worktree `.claude/worktrees/channel-selection`): one docs commit on top of V4 — the
+  channel-selection brief. No code yet.
+- PR #9 (`docs/repo-map` → `main`): orientation docs for main.
+- `.claude/worktrees/pathfinder-waypoint-v4` is Jake's — **do not touch it.**
