@@ -27,12 +27,15 @@ production run `4e7cb9fd` and fixed in `580c668`.
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | The loop never changed approach — patience never advanced, every Pro burned to its round cap | **Fixed** |
-| 2 | The win bar sat below the measurement's resolution — the smallest possible improvement always won | **Fixed** |
+| 1 | The loop never changed approach — patience never advanced, every Pro burned to its round cap | **Fixed** — verified live, but see §1.5 |
+| 2 | The win bar sat below the measurement's resolution — the smallest possible improvement always won | **Fixed** — verified live |
 | 3 | Early-stop threshold unreachable | Out of scope (settable in the UI) |
 | 4 | Every Pro scored on the global churn baseline | **Deliberately still disabled** — see §4.4 |
-| 5 | One bad LLM response destroyed a Pro's finished work | **Fixed** |
-| — | Jobs stalled and were reaped with no recorded reason | **Fixed** |
+| 5 | One bad LLM response destroyed a Pro's finished work | **Fixed** — verified live |
+| — | Jobs stalled and were reaped with no recorded reason | **Fixed** — not yet exercised at load |
+
+Live verification (Task 7) has since run. **Read §1.5 before planning anything** —
+it confirms three fixes and surfaces three new issues.
 
 The full diagnosis for each lives in `580c668`'s commit message. The plan and
 its evidence are at
@@ -52,6 +55,100 @@ its evidence are at
 - **The lease is renewed inside the round** — per paid attempt, per slot-queue
   poll, and between context-flow retries. `LLM_TIMEOUT_SECONDS` (300s) and
   `max_retries=0` bound each call.
+
+---
+
+## 1.5 Task 7 results — run `acc26e53895e463dac6e22e73a3da541` (2026-09-24)
+
+Same audience lineage as the baseline (`workbench:promotion-d1a0d4e84f97318b`),
+`MAX_ROUNDS=15`, `MAX_NO_IMPROVE=5`, `PATIENCE=2`, `KEEP_DELTA_REACTION=0.4`,
+`KEEP_DELTA_PP=0.2`. Cost `$2.59`.
+
+| Metric | Baseline `4e7cb9fd` | Predicted | **Actual** |
+|---|---|---|---|
+| Run status | `degraded` | complete | **`complete`** ✅ |
+| Pros decided | 3 of 4 (1 failed, no result) | 4 of 4 | **4 of 4** ✅ |
+| Verdicts | 2 winner / 1 no-action | more no-action | **4 winner / 0 no-action** ❌ prediction wrong |
+| Rounds used | 12, 14 of 15 | materially fewer | **15, 13, 10, 9** ⚠️ barely moved |
+| Candidates per round | 3 rewordings of one lever | distinct levers | **8 distinct mechanisms on `553067`** ✅ |
+| `baseline confidence` | `global` | still `global` | **`global`** ✅ (issue 4 still off) |
+| RECO | unavailable | unavailable | **unavailable on all 4** — §4.5 still blocked |
+| Persona `fit` | 1.00 everywhere | — | **1.00 on all 20 seats** — §7 still true |
+
+### Confirmed fixed
+
+**Issue 5.** Four of four Pros decided, run `complete` rather than `degraded`.
+Per *decided* Pro the run was also cheaper: `$0.65` vs `$0.72`.
+
+**Issue 2 — with two concrete proofs.** Every observed pp value lands exactly on
+the 3-panel lattice, and two rounds were rejected that the old bar would have
+accepted:
+
+- `553067` r7: `task_completion_coaching` scored **4.1 pp against a 3.3 pp
+  champion**. That is a 0.8 pp delta — it would have **won** under the old
+  `KEEP_DELTA_PP=0.6`. It is one lattice step (mean 5.67 vs 5.33), correctly
+  rejected.
+- `464057` r4: **2.4 pp against a 1.4 pp champion** — a 1.0 pp delta, also one
+  step (5.00 vs 4.67), correctly rejected.
+
+Both wins that *were* accepted (`553067` r8, `227626` r5) are exactly two steps.
+The gate behaves as designed.
+
+**Issue 1 — the mechanism churn is real.** `553067` cycled through eight
+distinct mechanisms across 15 rounds (`visibility_into_usage_pattern` →
+`billing_confidence_reinforcement` → `job_completion_velocity_benchmark` →
+`task_completion_coaching` → `mobile-field-first-activation` →
+`payment_completion_momentum` → `competitive_speed_positioning` →
+`self_serve_customer_conversion_enablement`). The baseline produced three
+rewordings of a single payment lever. SHIFT is working.
+
+### Three new issues this run surfaced
+
+**A. `MAX_NO_IMPROVE=5` is too loose to fire — the rounds barely dropped.**
+Replaying `553067`'s exact 15 rounds through the shipped loop code: `dry`
+reaches **4** and the run ends on `round_cap`. Before this work `dry` was
+permanently 0, so the mechanism is now working — the setting just never trips
+inside the cap, because each win resets `dry` to 0.
+
+```
+MAX_NO_IMPROVE=5  -> round_cap at 15 (dry=4)   <- what ran
+MAX_NO_IMPROVE=4  -> no_improve_exhausted at 14
+MAX_NO_IMPROVE=3  -> no_improve_exhausted at 13
+```
+
+This is a **settings change, not a code change**. Try `MAX_NO_IMPROVE=3` on the
+next run. Rounds 9–15 on `553067` produced nothing better than round 8.
+
+**B. Suppression is high and is being paid for.** `475567` had **6 of 10 rounds
+suppressed** — never panel-evaluated. `553067` had 4 of 15. Suppressed rounds
+still pay for generation and the critic before being binned. Nobody has looked
+at *why* the critic is rejecting this much; the `critics.block_kind` column on
+`CandidateRow` holds the reason and is the place to start. This is the single
+biggest cost lever visible in the run.
+
+**C. The held-out final panel scores consistently lower than the screen.**
+
+| Pro | Screen (3-panel) | Final (5-panel) |
+|---|---|---|
+| `553067` | 4.9 pp | **3.0 pp** |
+| `227626` | 4.1 pp | **1.8 pp** |
+| `475567` | 2.4 pp | **1.2 pp** |
+| `464057` | 1.4 pp | 2.4 pp |
+
+Three of four drop by roughly half. If the screen panel is systematically
+optimistic, the loop is optimising against a biased estimate and the shipped
+number is the more pessimistic one. Worth checking whether the two panels draw
+from different persona pools or whether the 5-panel's backfilled seats drag the
+mean down. Not urgent, but it undermines confidence in the screen estimate.
+
+### A prediction that was wrong
+
+I told the user to expect **more `no_action`** from the tightened bar. The run
+produced **zero**. The reason: the tightened bar only governs *replacing* a
+champion. The **first** win is unchanged — it needs only to clear the
+`MIN_REDUCTION_FLOOR_PP` (1.0 pp) support floor. Every Pro won early (rounds 2,
+3, 2, 2), so every Pro shipped. Do not expect the reaction gate to change the
+winner/no-action ratio; it changes how often the champion is replaced.
 
 ---
 
@@ -106,9 +203,22 @@ should build:
 
 ---
 
-## 4. Open work, in recommended order
+## 4. Open work
 
-### 4.1 — Close the CI gap first (≈20 min)
+**Recommended order after Task 7** (the subsection numbers are stable labels,
+not the order to work in):
+
+1. **§4.3 first half** — set `MAX_NO_IMPROVE=3` and re-run. Free, and it
+   finishes the unproven half of issue 1.
+2. **§4.1** — close the CI gap. 20 minutes, and it protects everything after.
+3. **§4.3 second half** — the suppression rate. Biggest visible cost lever.
+4. **§4.5 `2D`** — a population-level claim shipped as per-Pro fact in a real
+   handoff. Correctness, independent of the channel work.
+5. **§4.5 `2A`/`2B`** — two Snowflake queries that unblock channel selection.
+6. **§4.2** — the `MissingGreenlet` under load.
+7. **§4.5 `2C`** and **§4.4** — real projects, both needing decisions first.
+
+### 4.1 — Close the CI gap (≈20 min)
 
 Smallest item, and it protects everything after it.
 
@@ -144,28 +254,21 @@ look for a path that bypasses that or shares a session across tasks.
 
 Reproduce: `cd services/api && .venv/bin/python -m pytest tests/test_load.py -m load -q`
 
-### 4.3 — Run Task 7, the live verification
+### 4.3 — Task 7 is DONE. Act on what it found (§1.5)
 
-**Nothing in `580c668` is proven on real data.** This is the cheapest way to
-de-risk everything else.
+Two follow-ups, in order:
 
-Same audience lineage as run `4e7cb9fd`: query `workbench:promotion-d1a0d4e84f97318b`,
-`MAX_ROUNDS=15`, `MAX_NO_IMPROVE=5`, `PATIENCE=3`.
+**Tune `MAX_NO_IMPROVE` to 3 and re-run.** Free — a settings change on the start
+form, no code. Rounds 9–15 on `553067` bought nothing; at `MAX_NO_IMPROVE=3` the
+loop would have stopped at round 13 on `no_improve_exhausted`. Confirm on the
+next run that at least one Pro stops for that reason rather than `round_cap`.
+That is the last unproven half of issue 1.
 
-| Metric | Baseline (`4e7cb9fd`) | Expect |
-|---|---|---|
-| Pros failing with no result | 1 of 4 | 0 |
-| Rounds used by winning Pros | 12, 14 of 15 | materially fewer |
-| Stop reasons | all `round_cap` | some `no_improve_exhausted` |
-| Candidates within a round | 3 rewordings of one lever | distinct levers after a shift |
-| `baseline confidence` | `global` | still `global` (issue 4 unfixed) |
-
-**Expect more `no_action` than before.** On a full 3-panel the effective bar is
-0.667 — at least two of three personas must each move a point. That is the
-intended tightening, not a regression. Say so before anyone reads the run as a
-failure.
-
-This spends real LLM budget. Confirm with the user before running.
+**Investigate the suppression rate.** `475567` lost 6 of 10 rounds to the critic
+without a single panel evaluation, and each one was paid for. Start from
+`CandidateRow.critics["block_kind"]` for that run and count the reasons. If one
+block kind dominates, it is either a prompt problem or a gate that is too
+strict — both cheap to fix, and it is the largest visible waste in the run.
 
 ### 4.4 — Issue 4: per-Pro churn baselines
 
