@@ -1,5 +1,6 @@
 import json
 
+from waypoint import catalog
 from waypoint.catalog import (
     CATALOG,
     _first_sentence,
@@ -118,7 +119,7 @@ def test_waypoint_context_uses_promoted_packet_without_legacy_catalog_dump():
 
     context = waypoint_context(brief, feasibility=False)
 
-    assert context == '{"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12},"verified_destination_keys":[]}'
+    assert context == '{"feature_topic_keys":[],"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12},"verified_destination_keys":[]}'
     assert "voip" not in context
 
 
@@ -129,6 +130,21 @@ def test_promoted_product_card_does_not_prove_entitlement():
     )
 
     assert available_feature_keys(brief) == set()
+
+
+def test_plan_compatible_card_is_a_topic_without_proving_access():
+    brief = _brief(curated_context={"v": {}, "pc": {
+        "card_on_file": {"e": "available", "v": "Store a customer's payment card."},
+        "service_agreements": {"e": "not_in_current_plan", "v": "Offer service plans."},
+        "sales_proposal": {"e": "unknown", "v": "Build proposals."},
+        "invented_product": {"e": "available"},
+    }})
+
+    assert catalog.feature_topic_keys(brief) == {"card_on_file"}
+    assert available_feature_keys(brief) == set()
+    context = json.loads(waypoint_context(brief, feasibility=False))
+    assert context["feature_topic_keys"] == ["card_on_file"]
+    assert context["verified_destination_keys"] == []
 
 
 def test_promoted_direct_feature_requires_attachment_and_plan_eligibility():
@@ -176,6 +192,7 @@ def test_context_lists_only_features_with_verified_destinations():
     })
 
     context = json.loads(waypoint_context(brief, feasibility=False))
+    assert "sales_proposal" in context["feature_topic_keys"]
     assert context["verified_destination_keys"] == ["online_booking"]
 
 

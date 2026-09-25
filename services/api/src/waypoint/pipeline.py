@@ -32,7 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue
 from waypoint.calls import BudgetExhausted, MeteredLLM
-from waypoint.catalog import available_feature_keys, resolve_cta, waypoint_context
+from waypoint.catalog import (
+    available_feature_keys,
+    feature_topic_keys,
+    resolve_cta,
+    waypoint_context,
+)
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
@@ -741,6 +746,8 @@ def _prompt_builder(
     channels: list[str],
     journey_window: str,
     evidence: str,
+    feature_topic_keys: list[str],
+    verified_destination_keys: list[str],
 ) -> Callable[..., str]:
     """(mode, count, forbidden mechanisms[, warm mechanism]) -> evolve prompt,
     with this round's context bound once — refills reuse it with a different
@@ -767,6 +774,8 @@ def _prompt_builder(
             count=ask,
             warm_start_mechanism=warm,
             attempts_left=attempts_left,
+            feature_topic_keys=feature_topic_keys,
+            verified_destination_keys=verified_destination_keys,
         )
 
     return build
@@ -879,6 +888,7 @@ async def _verdicts_for_batch(
     review: list[tuple[int, Recommendation]] = []
     suggested_channel = brief.suggested_outreach_channel()
     available_features = available_feature_keys(brief)
+    topic_features = feature_topic_keys(brief)
     for index, idea in enumerate(ideas):
         # CTA is product truth, never model-authored content. Attach it only
         # after a feature resolves through the verified catalog below.
@@ -909,14 +919,14 @@ async def _verdicts_for_batch(
                 "reason": "model-authored URL; only verified catalog destinations are allowed",
             }
         elif idea.feature_key:
-            cta = resolve_cta(idea.feature_key)
-            if idea.feature_key not in available_features or cta is None:
+            if idea.feature_key not in topic_features:
                 verdicts[index] = {
                     "block_kind": "infeasible_execution",
-                    "reason": f"feature {idea.feature_key!r} is unavailable or has no verified destination",
+                    "reason": f"feature {idea.feature_key!r} is not a plan-compatible product topic",
                 }
             else:
-                idea.cta = cta
+                if idea.feature_key in available_features:
+                    idea.cta = resolve_cta(idea.feature_key)
                 review.append((index, idea))
         else:
             review.append((index, idea))
@@ -1186,6 +1196,10 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             channels=channels,
             journey_window=state.run.journey_window,
             evidence=evidence,
+            feature_topic_keys=sorted(feature_topic_keys(brief)),
+            verified_destination_keys=sorted(
+                key for key in available_feature_keys(brief) if resolve_cta(key) is not None
+            ),
         )
         count = config.candidate_count
         tried = list(lstate.tried_mechanisms)

@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, model_validator
+from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 # The outreach channels Waypoint may recommend. Delivery is downstream (LCM /
 # a human caller); Waypoint only decides which one fits this Pro and idea.
@@ -93,6 +93,11 @@ class Recommendation(BaseModel):
     feature_key: str | None = None
     cta: dict[str, str] | None = None
     risk: str = ""
+
+    @field_validator("channel_override_reason", mode="before")
+    @classmethod
+    def null_override_means_no_override(cls, value: object) -> object:
+        return "" if value is None else value
 
 
 class RankedCandidate(BaseModel):

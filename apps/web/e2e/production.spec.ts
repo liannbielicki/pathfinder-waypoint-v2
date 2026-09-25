@@ -31,6 +31,7 @@ const CANDIDATE = (pro: string) => ({
 const MIXED_RUN = {
   id: "run-prod",
   status: "complete",
+  loop_config: { MAX_NO_IMPROVE: 1 },
   pro_ids: ["pro_a", "pro_b", "pro_c"],
   audience_query: "audience_v7",
   audience_run: "2026-08-06T18:00:00Z",
@@ -42,11 +43,11 @@ const MIXED_RUN = {
   stop_reason: null,
   created_at: "2026-08-06T18:00:00Z",
   stages: { context: {}, generate: {}, critics: {}, screen: {}, search: {}, final: {}, score: {}, measure: {}, ready: {} },
-  rounds: [],
+  rounds: [{ pro_id: "pro_b", round: 1, mechanism: "invoice_delivery", outcome: "lose", score_pp: 0.2 }],
   candidates: [CANDIDATE("pro_a")],
   winners: [
     { id: "win-a", pro_id: "pro_a", kind: "winner", candidate_id: "cand-pro_a", rationale: "Open AR is the signal.", evidence: { org_id: "org_a" } },
-    { id: "win-b", pro_id: "pro_b", kind: "no_action", candidate_id: null, rationale: "no_candidate_cleared_floor", evidence: {} },
+    { id: "win-b", pro_id: "pro_b", kind: "no_action", candidate_id: null, rationale: "no_round_cleared_screen", evidence: {} },
     { id: "win-c", pro_id: "pro_c", kind: "abstained", candidate_id: null, rationale: "low panel fit: panel of 3 needs more qualifying matches; only 2 available", evidence: {} },
   ],
   measurements: [

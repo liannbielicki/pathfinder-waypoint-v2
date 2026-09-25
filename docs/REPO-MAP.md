@@ -1,7 +1,8 @@
 # Repo map
 
 Durable orientation for anyone (human or AI) opening this repo. Lives on `V4-Improvements` and reaches
-`main` when V4 merges. **Last verified: 2026-09-24.** Update it in the same commit as any change it describes.
+`main` when V4 merges. **Environment map last verified: 2026-09-24; workflow updated per owner:
+2026-09-25.** Update it in the same commit as any change it describes.
 
 For the dated audit behind this map — evidence and the executed cleanup — read
 `docs/2026-09-24-repo-audit-handoff.md`. Channel-selection findings live on branch
@@ -16,9 +17,10 @@ For the dated audit behind this map — evidence and the executed cleanup — re
 | Railway **staging** | `V4-Improvements` | Test bed for the Context Layer + Context Workbench. Change, validate output, repeat. **[owner]** |
 | Railway **production** | `main` | Stable backup while V4 is validated. **[owner]** |
 
-**Workflow:** branch off V4 → PR into V4 → validate on staging → when the team decides V4 is ready,
-**V4 merges into main**. main is intentionally behind V4 (~47 commits) until then. That merge is a
-release decision, not cleanup — don't propose it.
+**Workflow (owner direction, 2026-09-25):** commit directly to V4 in its dedicated worktree → push
+to deploy staging → validate the output. Use a PR only when the team decides V4 is ready to merge
+into `main`. main is intentionally behind V4 (~47 commits) until then. That merge is a release
+decision, not cleanup — don't propose it.
 
 Other branches:
 
@@ -45,10 +47,9 @@ failure is main's test asserting main's call-directive wording — update it to 
 
 ### Worktrees
 
-Primary checkout `~/projects/pathfinder-waypoint-v2` stays on **`main`**. Feature work goes in
-worktrees under `.claude/worktrees/`, each on its own branch. Git won't check out one branch in two
-worktrees, so the primary can't sit on V4 while a worktree does. Remove a worktree when its branch
-merges.
+Primary checkout `~/projects/pathfinder-waypoint-v2` stays on **`main`**. V4 work uses its dedicated
+worktree under `.claude/worktrees/`; other concurrent branches use separate worktrees. Git won't
+check out one branch in two worktrees, so the primary can't sit on V4 while its worktree does.
 
 ---
 

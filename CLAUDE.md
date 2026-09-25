@@ -11,8 +11,9 @@ We are **testing on V4**. Two Railway environments, two branches:
 | **Railway staging** | `V4-Improvements` | The test bed: new Context Layer + Context Workbench. We change things here and validate the output. Every push to V4 redeploys staging. |
 | **Railway production** | `main` | The stable version, kept as the backup while V4 is validated. |
 
-**The workflow:** change on V4 (in a worktree, on a branch) → validate on staging → **when the team
-decides V4 is ready, V4 merges into main.** Until then main is *intentionally* behind V4.
+**The workflow (owner direction, 2026-09-25):** commit directly to `V4-Improvements` in its
+dedicated worktree → push to deploy Railway staging → validate the output. Use a PR only when the
+team decides V4 is ready to merge into `main`. Until then main is *intentionally* behind V4.
 
 Do **not** propose merging V4 into main, merging main into V4, or "cleaning up" the gap between them.
 That merge is the team's call at the end of testing, not a repo-hygiene task.
@@ -42,7 +43,8 @@ Always say which one you mean.
 
 ## Rules
 
-- Work on a branch off `V4-Improvements` and open a PR into V4. Never push to `main` or directly to V4.
+- Commit and push V4 changes directly to `V4-Improvements` after local checks. Each push redeploys staging.
+- Use a PR for the eventual V4 → `main` merge, not for routine V4 changes. Never push directly to `main`.
 - PRs: `gh`, repo `liannbielicki/pathfinder-waypoint-v2` (GitHub, not GitLab).
 - Never force-push. Never skip hooks.
 - Don't commit to a branch that is checked out in someone else's worktree — put changes on a new branch.

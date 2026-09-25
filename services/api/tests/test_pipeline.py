@@ -21,6 +21,7 @@ from waypoint.pipeline import (
     _dedupe_ideas,
     _heartbeat,
     _model_authored_url,
+    _parse_idea_batch,
     _reaction_cache_key,
     _valid_json_call,
     finalize_run,
@@ -65,6 +66,14 @@ def test_model_authored_product_link_cannot_hide_under_null_feature_key() -> Non
     assert _model_authored_url(idea)
     idea.actions = ["Open https://example.net/service-plans"]
     assert _model_authored_url(idea)
+
+
+def test_generated_null_channel_override_reason_is_no_override() -> None:
+    idea = json.loads(idea_json("invoice_delivery"))
+    idea["channel_override_reason"] = None
+    parsed = _parse_idea_batch(json.dumps([idea] * 3))
+    assert len(parsed) == 3
+    assert all(item.channel_override_reason == "" for item in parsed)
 
 
 async def run_status(session: AsyncSession, run_id: str) -> str:
@@ -1230,6 +1239,38 @@ async def test_null_feature_product_url_is_blocked_before_critic(
     assert candidate.critics["block_kind"] == "infeasible_execution"
     assert deps.gateway.calls_for("critics") == 0
     assert deps.gateway.calls_for("screen") == 0
+
+
+@pytest.mark.parametrize("eligibility,expected_block", [
+    ("available", "none"),
+    ("not_in_current_plan", "infeasible_execution"),
+])
+async def test_plan_compatible_product_topic_needs_no_cta(
+    deps: FakeDeps, seeded_job, eligibility: str, expected_block: str
+) -> None:
+    brief = deps.context.batch.organizations[0]
+    deps.context.batch.organizations[0] = brief.model_copy(update={
+        "feature_online_booking_state": None,
+        "curated_context": {"v": {}, "pc": {
+            "online_booking": {"e": eligibility, "v": "Let customers request jobs online."},
+        }},
+    })
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1, MAX_ROUNDS=1)
+    idea = json.loads(idea_json("online_booking_setup"))
+    idea["feature_key"] = "online_booking"
+    idea["channel_override_reason"] = None
+    idea["actions"] = ["Ask whether online booking setup would help"]
+    deps.gateway.responses["evolve"] = [json.dumps(idea)]
+
+    await run_job(seeded_job.id, deps)
+
+    candidate = (await deps.db.execute(
+        select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id)
+    )).scalars().first()
+    assert candidate is not None
+    assert candidate.critics["block_kind"] == expected_block
+    assert candidate.recommendation["cta"] is None
+    assert deps.gateway.calls_for("critics") == (1 if eligibility == "available" else 0)
 
 
 async def test_recently_failed_mechanism_is_suppressed(

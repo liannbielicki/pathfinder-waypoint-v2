@@ -210,6 +210,8 @@ def evolve_prompt(
     count: int = 1,
     warm_start_mechanism: str | None = None,
     attempts_left: int | None = None,
+    feature_topic_keys: list[str] | None = None,
+    verified_destination_keys: list[str] | None = None,
 ) -> str:
     # A warm start adds ONE candidate to the batch — it never replaces one and
     # it gets no other privilege: it is critiqued, ranked, and persona-screened
@@ -231,6 +233,25 @@ competes on equal terms and wins nothing automatically.
         "Every idea must keep the same mechanism and differ in its execution."
         if mode == "refine"
         else "Every idea in the batch must use a mechanism distinct from the others in this batch."
+    )
+    destination_menu = ""
+    if feature_topic_keys is not None:
+        topics = ", ".join(feature_topic_keys) or "none"
+        destinations = ", ".join(verified_destination_keys or []) or "none"
+        destination_menu = f"""Grounded product topics for this Pro: {topics}.
+Verified product destinations for this Pro: {destinations}.
+Only use a topic key as feature_key. In promoted context, a topic card confirms
+plan compatibility only; it does not prove attachment or access. Do not supply
+a link without a verified destination; claim access only when an attached state proves it.
+Otherwise frame the touch as a setup or discovery question, without telling the Pro
+to open a product screen. If topics are none, use
+feature_key=null and a concrete non-feature action.
+
+"""
+    feature_rule = (
+        "Only set feature_key to a key in feature_topic_keys when a product is part of the idea."
+        if feature_topic_keys is not None else
+        "Only set feature_key to a key in verified_destination_keys when a product destination is part of the idea."
     )
     if mode == "refine":
         budget = ""
@@ -314,13 +335,14 @@ churn-reduction metric; higher is better). Do not repeat a prior concept;
 REFINE must change the execution, not just the wording:
 {history_json}
 
-Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
+{destination_menu}Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
 manager_rationale, channel, channel_override_reason, feature_key, risk.
+Set channel_override_reason to "" when there is no supported channel override;
+never use null for this string field.
 Product cards in pc are reference material, not evidence that this Pro owns or
 can open a feature. In standard context, plan_eligibility=unverified means the
 plan was not independently checked; never claim confirmed plan access.
-Only set feature_key to a key in verified_destination_keys when a product destination
-is part of the idea; otherwise use null only for a concrete non-feature action or
+{feature_rule} Otherwise use null only for a concrete non-feature action or
 call agenda that can be executed from the stated context. Do not write a URL or
 tell the Pro to open a feature when feature_key is null. Waypoint attaches
 the catalog CTA after generation. Keep each string concise and actions to 1-3
@@ -423,6 +445,11 @@ for each idea into exactly one block_kind:
     Fields listed as conflicts are unknown, and pc feature cards alone do not
     prove attachment or access. A null feature_key cannot justify a feature
     link or an instruction to open an unverified product screen.
+    A feature_topic_keys entry is a product topic; a promoted topic confirms plan compatibility only
+    and does not prove attachment. Standard context may have attachment evidence but unverified plan eligibility.
+    If a topic lacks a verified destination, a grounded setup or discovery question
+    is allowed. Without an attached state, claims of existing access or instructions
+    to open a product screen are not grounded; never invent a link.
   - "consent_ask" (HARD BLOCK): the idea's touch opens by (or consists of)
     asking the Pro for SMS/messaging consent, opt-in, or permission to contact
     them. Consent is handled upstream; a consent request is not a retention idea.

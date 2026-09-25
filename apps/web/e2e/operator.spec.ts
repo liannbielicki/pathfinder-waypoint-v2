@@ -137,13 +137,15 @@ test("no-action renders as a legitimate outcome", async ({ page }) => {
       json: {
         ...RUN_BASE,
         status: "no_action",
-        winners: [{ id: "w1", pro_id: "pro_1", kind: "no_action", candidate_id: null, rationale: "no_candidate_cleared_floor", evidence: {} }],
+        loop_config: { MAX_NO_IMPROVE: 1 },
+        rounds: [{ pro_id: "pro_1", round: 1, mechanism: "invoice_delivery", outcome: "lose", score_pp: 0.2 }],
+        winners: [{ id: "w1", pro_id: "pro_1", kind: "no_action", candidate_id: null, rationale: "no_round_cleared_screen", evidence: {} }],
       },
     }),
   );
   await page.goto("/runs/run-e2e");
   await expect(page.getByRole("status")).toHaveText(/no action/);
-  await expect(page.getByText(/legitimate outcome/i)).toBeVisible();
+  await expect(page.getByText(/no supported action from this search/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /create lcm handoff/i })).toBeDisabled();
 });
 
