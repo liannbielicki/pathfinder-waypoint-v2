@@ -136,7 +136,7 @@ def _compile_values(
     rows: list[Mapping[str, Any]],
     context_values: Mapping[str, Any],
     bundle: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[Mapping[str, Any]], dict[str, int]]:
+) -> tuple[dict[str, Any], list[Mapping[str, Any]], dict[str, int], list[str]]:
     rules = bundle.get("rules")
     if not isinstance(rules, list):
         raise TypeError("promotion rules were not an array")
@@ -186,10 +186,12 @@ def _compile_values(
 
     values: dict[str, Any] = {}
     conflicts = 0
+    conflict_keys: list[str] = []
     for canonical, found in candidates.items():
         first = found[0]
         if any(value != first for value in found[1:]):
             conflicts += 1
+            conflict_keys.append(canonical)
             continue
         values[canonical] = first
 
@@ -205,6 +207,7 @@ def _compile_values(
             "ambiguous": ambiguous,
             "conflicts": conflicts,
         },
+        sorted(conflict_keys),
     )
 
 
@@ -226,7 +229,7 @@ def compile_staging_brief(
 
     firmographics = _authoritative_firmographics(context_layer_result)
     runtime_bundle = _without_authoritative_rules(bundle)
-    values, matched_rules, counts = _compile_values(
+    values, matched_rules, counts, conflict_keys = _compile_values(
         rows, context_layer_values(context_layer_result), runtime_bundle
     )
     if not values:
@@ -268,6 +271,8 @@ def compile_staging_brief(
     if core_plan is not None:
         authoritative["core_saas_plan"] = core_plan
     curated_context["v"] = dict(sorted({**compiled_values, **authoritative}.items()))
+    if conflict_keys:
+        curated_context["conflicts"] = conflict_keys
     return OrgBrief(
         org_uuid=organization_id,
         org_id=organization_id,

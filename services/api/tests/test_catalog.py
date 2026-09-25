@@ -1,3 +1,5 @@
+import json
+
 from waypoint.catalog import (
     CATALOG,
     _first_sentence,
@@ -56,6 +58,24 @@ def test_feature_context_resolves_union_and_marks_top_unused():
     assert "voip (state: attached_unused" in block  # state passed verbatim
 
 
+def test_unattached_legacy_feature_has_no_direct_destination():
+    brief = _brief(
+        feature_service_agreements_state="not_attached",
+        feature_online_booking_state="attached_unused",
+    )
+
+    assert available_feature_keys(brief) == {"online_booking"}
+    context = json.loads(waypoint_context(brief, feasibility=False).splitlines()[0])
+    assert "service_agreements" not in context["verified_destination_keys"]
+    assert context["plan_eligibility"] == "unverified"
+
+
+def test_unrecognized_attached_state_does_not_authorize_destination():
+    brief = _brief(feature_online_booking_state="attached_unverified")
+    assert "online_booking" not in available_feature_keys(brief)
+    assert "online_booking" not in json.loads(waypoint_context(brief, feasibility=False).splitlines()[0])["verified_destination_keys"]
+
+
 def test_feature_context_empty_when_no_features():
     assert feature_context(_brief(), feasibility=False) == ""
 
@@ -98,14 +118,65 @@ def test_waypoint_context_uses_promoted_packet_without_legacy_catalog_dump():
 
     context = waypoint_context(brief, feasibility=False)
 
-    assert context == '{"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12}}'
+    assert context == '{"pc":{"jobs":{"a":"Jobs","v":"Manage job workflows."}},"v":{"jobs_created_t28":12},"verified_destination_keys":[]}'
     assert "voip" not in context
 
 
-def test_promoted_product_context_keys_are_available_for_cta_resolution():
-    brief = _brief(curated_context={"v": {}, "pc": {"online_booking": {"v": "unused"}}})
+def test_promoted_product_card_does_not_prove_entitlement():
+    brief = _brief(
+        feature_voip_state="attached_unused",
+        curated_context={"v": {}, "pc": {"online_booking": {"e": "available"}}},
+    )
 
-    assert "online_booking" in available_feature_keys(brief)
+    assert available_feature_keys(brief) == set()
+
+
+def test_promoted_direct_feature_requires_attachment_and_plan_eligibility():
+    base = {"v": {}, "pc": {"online_booking": {"e": "available"}}}
+    brief = _brief(feature_online_booking_state="attached_unused", curated_context=base)
+    assert available_feature_keys(brief) == {"online_booking"}
+    assert json.loads(waypoint_context(brief, feasibility=False))["verified_destination_keys"] == [
+        "online_booking"
+    ]
+
+    for card in ({"e": "unknown"}, {"e": "not_in_current_plan"}, None):
+        context = {"v": {}, "pc": {"online_booking": card} if card else {}}
+        brief = _brief(feature_online_booking_state="attached_unused", curated_context=context)
+        assert available_feature_keys(brief) == set()
+
+
+def test_promoted_paid_feature_needs_explicit_plan_eligibility():
+    brief = _brief(
+        top_unused_paid_feature="online_booking",
+        curated_context={"v": {}, "pc": {"online_booking": {"e": "available"}}},
+    )
+    assert available_feature_keys(brief) == {"online_booking"}
+
+
+def test_feature_explicitly_outside_current_plan_cannot_get_direct_cta():
+    brief = _brief(feature_online_booking_state="attached_unused", curated_context={
+        "v": {"core_saas_plan": "Core SaaS Basic"},
+        "pc": {
+            "service_agreements": {"e": "not_in_current_plan"},
+            "online_booking": {"e": "available"},
+        },
+    })
+
+    assert available_feature_keys(brief) == {"online_booking"}
+
+
+def test_context_lists_only_features_with_verified_destinations():
+    brief = _brief(feature_online_booking_state="attached_unused", curated_context={
+        "v": {},
+        "pc": {
+            "service_agreements": {"e": "not_in_current_plan"},
+            "sales_proposal": {"e": "available"},
+            "online_booking": {"e": "available"},
+        },
+    })
+
+    context = json.loads(waypoint_context(brief, feasibility=False))
+    assert context["verified_destination_keys"] == ["online_booking"]
 
 
 def test_waypoint_context_keeps_legacy_behavior_without_active_promotion():
@@ -113,5 +184,8 @@ def test_waypoint_context_keeps_legacy_behavior_without_active_promotion():
 
     context = waypoint_context(brief, feasibility=False)
 
-    assert brief.model_dump_json() in context
+    facts = json.loads(context.splitlines()[0])
+    assert facts["known"]["feature_voip_state"] == "attached_unused"
+    assert "invoices_sent_28d_band" in facts["unknown"]
+    assert "invoices_sent_28d_band" not in facts["known"]
     assert "voip (state: attached_unused" in context

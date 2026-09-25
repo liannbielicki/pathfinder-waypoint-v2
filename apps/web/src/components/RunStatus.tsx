@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import { PENDING_AUDIENCE_QUERY, TERMINAL_STATES, type RunDetail } from "@/lib/api";
+import { decisionKind } from "@/lib/decision";
 
 const PIPELINE_STAGES = ["context", "evolve", "final", "score", "measure", "ready"];
 
@@ -15,13 +16,13 @@ const NEXT_ACTION: Record<string, string> = {
   stopped: "The run was stopped. Start a new run when ready.",
   complete: "Review the winner and create the LCM handoff below.",
   abstained: "The system abstained rather than fabricate evidence. No handoff.",
-  no_action: "No action is the recommendation. No handoff will be sent.",
+  no_action: "Review each Pro’s decision below. No handoff for no-action or inconclusive results.",
 };
 
 // Plain-language labels for the immutable per-run loop snapshot (audit view).
 const SETTING_LABELS: [string, string][] = [
   ["MAX_ROUNDS", "Max rounds per Pro"],
-  ["MAX_NO_IMPROVE", "Dry mechanisms before stopping"],
+  ["MAX_NO_IMPROVE", "Scored losses or blocked rounds before stopping"],
   ["PATIENCE", "Refine attempts per mechanism"],
   ["KEEP_DELTA_REACTION", "Min improvement to keep (panel reaction)"],
   ["KEEP_DELTA_PP", "Min improvement to keep (pp)"],
@@ -44,10 +45,15 @@ export function RunStatus({
   const stages = run.stages ?? {};
   const loopConfig = (run.loop_config ?? {}) as Record<string, number>;
   const decided = run.winners.length;
+  const kinds = run.winners.map((w) => decisionKind(
+    w, run.rounds.filter((r) => r.pro_id === w.pro_id), run.candidates, loopConfig.MAX_NO_IMPROVE ?? 3,
+  ));
   const counts = {
-    winner: run.winners.filter((w) => w.kind === "winner").length,
-    no_action: run.winners.filter((w) => w.kind === "no_action").length,
-    abstained: run.winners.filter((w) => w.kind === "abstained").length,
+    winner: kinds.filter((k) => k === "winner").length,
+    no_action: kinds.filter((k) => k === "no_action").length,
+    final_rejected: kinds.filter((k) => k === "final_rejected").length,
+    inconclusive: kinds.filter((k) => k === "inconclusive").length,
+    other: kinds.filter((k) => k === "other").length,
   };
   const spentSomething = Number(run.cost_spent_usd) > 0;
 
@@ -71,7 +77,7 @@ export function RunStatus({
       <p>{NEXT_ACTION[run.status] ?? "Unknown state — treat as degraded."}</p>
       <p>
         {decided} of {run.pro_ids.length} Pros decided · {counts.winner} winner /{" "}
-        {counts.no_action} no-action / {counts.abstained} abstained
+        {counts.no_action} no-action / {counts.final_rejected} final rejected / {counts.inconclusive} inconclusive / {counts.other} other abstained
       </p>
 
       <h3>Stages</h3>

@@ -374,7 +374,7 @@ def test_win_resets_tries_and_dry_counters() -> None:
 
 
 @pytest.mark.parametrize("outcome", ["suppressed", "unavailable"])
-def test_non_scored_outcomes_consume_patience_like_losses(outcome: str) -> None:
+def test_non_scored_outcomes_do_not_count_as_scored_dry_mechanisms(outcome: str) -> None:
     state = apply_round(
         LoopState(),
         mechanism="invoices",
@@ -384,7 +384,9 @@ def test_non_scored_outcomes_consume_patience_like_losses(outcome: str) -> None:
         config=cfg(),
         mode="cold",
     )
-    assert state.dry_mechanisms == 1
+    assert state.dry_mechanisms == 0
+    assert state.blocked_rounds == (1 if outcome == "suppressed" else 0)
+    assert stop_reason(state, cfg()) == ("evaluation_unavailable" if outcome == "unavailable" else None)
     assert state.current_candidate_id is None
     assert state.current_mechanism is None
     assert next_mode(state, cfg()) == "shift"
@@ -409,7 +411,7 @@ def test_non_scored_round_preserves_the_actual_current_selection(outcome: str) -
     )
     assert state.current_candidate_id == "winner"
     assert state.current_mechanism == "invoices"
-    assert next_mode(state, cfg()) == "shift"
+    assert next_mode(state, cfg()) == "refine"
 
 
 def test_tried_mechanisms_accumulate_ordered_and_deduped() -> None:
@@ -443,6 +445,45 @@ def test_stop_on_win_threshold() -> None:
 
 def test_stop_on_dry_mechanisms() -> None:
     assert stop_reason(LoopState(dry_mechanisms=3), cfg()) == "no_improve_exhausted"
+
+
+def test_suppressed_rounds_use_separate_bounded_budget_and_replay() -> None:
+    config = cfg(max_no_improve=3, max_rounds=10)
+    rows = [Row(f"idea-{i}", f"c{i}", None, "suppressed") for i in range(3)]
+    state = replay(rows, config)
+    assert state.dry_mechanisms == 0
+    assert state.blocked_rounds == 3
+    assert stop_reason(state, config) == "blocked_budget_exhausted"
+
+
+def test_mixed_scored_and_blocked_rounds_keep_separate_counters() -> None:
+    config = cfg(max_no_improve=3, max_rounds=10)
+    state = replay([
+        Row("a", "c1", 0.2, "lose"),
+        Row("b", "c2", None, "suppressed"),
+        Row("c", "c3", 0.3, "lose"),
+    ], config)
+    assert state.dry_mechanisms == 2
+    assert state.blocked_rounds == 1
+    assert stop_reason(state, config) is None
+
+
+def test_blocked_refine_does_not_spend_scored_patience_on_replay() -> None:
+    config = cfg(patience=2, max_no_improve=2)
+    state = replay([
+        Row("a", "c1", 0.2, "lose", {"mode": "cold"}),
+        Row("b", "c2", None, "suppressed", {"mode": "refine"}),
+        Row("c", "c3", 0.3, "lose", {"mode": "refine"}),
+    ], config)
+    assert state.blocked_rounds == 1
+    assert state.dry_mechanisms == 1
+    assert stop_reason(state, config) is None
+
+
+def test_legacy_loss_without_numeric_score_is_unavailable_not_scored_dry() -> None:
+    state = replay([Row("a", "c1", None, "lose")], cfg())
+    assert state.dry_mechanisms == 0
+    assert stop_reason(state, cfg()) == "evaluation_unavailable"
 
 
 def test_stop_on_round_cap() -> None:

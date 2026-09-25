@@ -20,6 +20,7 @@ from waypoint.pipeline import (
     PipelineState,
     _dedupe_ideas,
     _heartbeat,
+    _model_authored_url,
     _reaction_cache_key,
     _valid_json_call,
     finalize_run,
@@ -53,6 +54,17 @@ from .conftest import (
 # Reaction → reduction_pp under the fixture calibration (3 identical reactions):
 # 4.0 → -0.92 · 4.6 → 1.19 · 5.0 → 2.40 · 5.1 → 2.68 · 5.3 → 3.22 · 6.0 → 4.87
 LOSE, FIRST_WIN, BETTER, NEAR_MISS, GOOD, GREAT = 4.0, 4.6, 5.0, 5.1, 5.3, 6.0
+
+
+def test_model_authored_product_link_cannot_hide_under_null_feature_key() -> None:
+    idea = Recommendation(
+        title="Review service plans", mechanism="service_plans", actions=["Open https://example.com/service-plans"],
+        pro_facing_concept="Review your service plans", manager_rationale="Ask about recurring work",
+        channel="call", feature_key=None,
+    )
+    assert _model_authored_url(idea)
+    idea.actions = ["Open https://example.net/service-plans"]
+    assert _model_authored_url(idea)
 
 
 async def run_status(session: AsyncSession, run_id: str) -> str:
@@ -372,6 +384,7 @@ async def test_win_stays_then_loss_shifts_and_forbids_tried_mechanisms(
     assert "Mode: REFINE" in prompts[1]  # after the win: stay
     assert "Mode: SHIFT" in prompts[2]  # after the loss: shift
     assert "invoice_delivery" in prompts[2]  # tried mechanism is forbidden
+    assert "Concept 2 the pro would experience." in prompts[2]  # past losing idea is visible
 
 
 async def test_keep_delta_rejects_a_small_improvement(deps: FakeDeps, seeded_job) -> None:
@@ -505,6 +518,28 @@ async def test_suppressed_round_spends_nothing_on_personas(deps: FakeDeps, seede
     assert len(suppressed) == 1
 
 
+async def test_all_blocked_rounds_end_inconclusive_without_a_panel_verdict(
+    deps: FakeDeps, seeded_job
+) -> None:
+    await set_loop_config(
+        deps, seeded_job.run_id, MAX_NO_IMPROVE=2, MAX_ROUNDS=5, CANDIDATE_COUNT=1
+    )
+    deps.gateway.responses["evolve"] = [idea_json("first"), idea_json("second")]
+    deps.gateway.responses["critics"] = [CRITIC_BLOCK, CRITIC_BLOCK]
+    await run_job(seeded_job.id, deps)
+
+    assert deps.gateway.calls_for("evolve") == 2
+    assert deps.gateway.calls_for("screen") == 0
+    assert [r.outcome for r in await rounds(deps.db, seeded_job.run_id)] == [
+        "suppressed", "suppressed"
+    ]
+    winner = (
+        await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
+    ).scalar_one()
+    assert winner.kind == "abstained"
+    assert winner.rationale == "inconclusive_no_screen"
+
+
 async def test_consent_ask_idea_is_suppressed_deterministically(
     deps: FakeDeps, seeded_job
 ) -> None:
@@ -561,23 +596,23 @@ async def test_generation_failure_mid_loop_keeps_the_existing_champion(
     assert champion is not None and champion.round == 1
 
 
-async def test_generation_failure_with_no_champion_records_no_action(
+async def test_generation_failure_with_no_champion_records_inconclusive(
     deps: FakeDeps, seeded_job
 ) -> None:
     """Nothing was ever won: the Pro still must not vanish — _stage_score
-    records no_action rather than the job failing."""
+    records an inconclusive abstention rather than the job failing."""
     deps.gateway.responses["evolve"] = [IDEA_MISSING_ACTIONS]  # single entry -> always invalid
     await run_job(seeded_job.id, deps)  # must not raise
     assert deps.gateway.calls_for("evolve") == 3  # JSON_CALL_ATTEMPTS, then give up
     assert await candidate_count(deps.db, seeded_job.run_id) == 0
-    assert await run_status(deps.db, seeded_job.run_id) == "no_action"
+    assert await run_status(deps.db, seeded_job.run_id) == "abstained"
     winner = (
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()
-    assert winner.kind == "no_action"
+    assert winner.kind == "abstained"
     # NOT "no_round_cleared_screen": nothing was ever generated, so nothing was
     # ever screened. The row must not claim we looked and found nothing.
-    assert winner.rationale == "no_round_was_ever_generated"
+    assert winner.rationale == "inconclusive_no_round_generated"
 
 
 async def test_no_action_after_a_screened_round_is_not_a_generation_failure(
@@ -734,8 +769,9 @@ async def test_malformed_reactions_are_unavailable_not_a_crash(
     deps.gateway.responses["screen"] = "not json at all"
     deps.gateway.responses["final"] = "not json at all"
     await run_job(seeded_job.id, deps)  # must not raise
-    assert await run_status(deps.db, seeded_job.run_id) == "no_action"
+    assert await run_status(deps.db, seeded_job.run_id) == "abstained"
     assert {r.outcome for r in await rounds(deps.db, seeded_job.run_id)} == {"unavailable"}
+    assert deps.gateway.calls_for("evolve") == 1
 
 
 async def test_out_of_range_reactions_are_unavailable_not_scores(
@@ -1120,7 +1156,8 @@ async def test_both_final_tiers_failing_abstains_with_both_reasons(
     winner = (
         await deps.db.execute(select(WinnerRow).where(WinnerRow.run_id == seeded_job.run_id))
     ).scalar_one()
-    assert winner.kind == "no_action"
+    assert winner.kind == "abstained"
+    assert winner.rationale.startswith("inconclusive_final_unavailable")
     # The winner-level rationale carries the real cause, not just the label
     # the incident was named after.
     assert "deep down" in winner.rationale
@@ -1172,6 +1209,25 @@ async def test_infeasible_channel_candidate_is_suppressed_without_panel(
     assert candidate is not None
     assert candidate.status == "suppressed"
     assert candidate.critics["block_kind"] == "infeasible_channel"
+    assert deps.gateway.calls_for("critics") == 0
+    assert deps.gateway.calls_for("screen") == 0
+
+
+async def test_null_feature_product_url_is_blocked_before_critic(
+    deps: FakeDeps, seeded_job
+) -> None:
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1, MAX_ROUNDS=1)
+    idea = json.loads(idea_json("service_plan_question"))
+    idea["feature_key"] = None
+    idea["actions"] = ["Open https://example.net/service-plans"]
+    deps.gateway.responses["evolve"] = [json.dumps(idea)]
+    await run_job(seeded_job.id, deps)
+    candidate = (
+        await deps.db.execute(select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id))
+    ).scalars().first()
+    assert candidate is not None
+    assert candidate.status == "suppressed"
+    assert candidate.critics["block_kind"] == "infeasible_execution"
     assert deps.gateway.calls_for("critics") == 0
     assert deps.gateway.calls_for("screen") == 0
 

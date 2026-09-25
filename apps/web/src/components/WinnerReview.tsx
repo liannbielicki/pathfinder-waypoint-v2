@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { Candidate, EvolveRound, RunDetail, Winner } from "@/lib/api";
+import { decisionKind, roundOutcomes } from "@/lib/decision";
 
 // The one place a calibrated estimate is formatted. null when the panel
 // produced no usable numbers (abstained, or never ran) — callers that only
@@ -118,10 +119,14 @@ function noActionEnding(
       "Idea generation was unavailable, so the loop stopped before any round " +
       "reached a panel. Nothing was evaluated — this is not a no-action verdict."];
   }
+  if (rationale.startsWith("inconclusive_")) {
+    return ["Inconclusive: search or evaluation incomplete.",
+      "The recorded evidence did not support a no-action decision. Review the round outcomes before retrying."];
+  }
   if (champion) {
     return ["Rejected at the final check.",
       `${label} cleared the screen but failed the held-out final — it needed ` +
-      "≥ 1.0 pp with a positive CI lower bound. The stronger panel did not " +
+      "≥ 1.0 pp with a positive CI lower bound. The held-out final panel did not " +
       "confirm the screen result."];
   }
   if (rounds > 0 && screened === 0) {
@@ -132,37 +137,47 @@ function noActionEnding(
   const cleared = screened > 0
     ? `None of the ${screened} screened round${screened === 1 ? "" : "s"} cleared`
     : "No evolve round cleared";
-  return ["Conclusion: not worth a touch.",
+  return ["No supported action from this search.",
     `${cleared} the 1.0 pp support floor on the screen panel, so the loop ` +
-    "stopped and recommended no action. This is a successful decision, not a failure."];
+    "stopped after its scored-loss budget. No action was recommended from this search."];
 }
 
 function NoActionCard({
   winner,
   proCandidates,
+  proRounds,
+  scoredLossBudget,
 }: {
   winner: Winner;
   proCandidates: Candidate[];
+  proRounds: EvolveRound[];
+  scoredLossBudget: number;
 }) {
-  const rounds = countRounds(proCandidates);
+  const rounds = proRounds.length || countRounds(proCandidates);
   const champion = proCandidates.find((c) => c.status === "champion");
   const finalScore = champion?.score?.final;
-  const { screened, suppressed, unevaluated } = roundBuckets(proCandidates);
-  const ending = noActionEnding(winner.rationale, champion, screened, rounds);
+  const buckets = roundBuckets(proCandidates);
+  const { scored, blocked, unavailable } = proRounds.length
+    ? roundOutcomes(proRounds)
+    : { scored: buckets.screened, blocked: buckets.suppressed, unavailable: buckets.unevaluated };
+  const screened = scored;
+  const kind = decisionKind(winner, proRounds, proCandidates, scoredLossBudget);
+  const ending = kind === "other"
+    ? ["Recorded outcome requires review.", "The stored rationale does not establish a scored no-action decision."]
+    : kind === "inconclusive" && screened > 0 && !champion
+    ? ["Inconclusive: search ended without a supported decision.",
+      "Some rounds were scored, but the evidence does not show a completed scored-loss search."]
+    : noActionEnding(winner.rationale, champion, screened, rounds);
   return (
     <div className="card">
-      <h4>No action for {winner.pro_id}</h4>
-      <p>No action is a legitimate outcome, not an error — Waypoint stopped on purpose.</p>
+      <h4>{kind === "final_rejected" ? "Final check rejected" : kind === "inconclusive" ? "Inconclusive" : kind === "other" ? "Recorded decision" : "No action"} for {winner.pro_id}</h4>
       <p>
         <strong>{ending[0]}</strong> {ending[1]}
       </p>
       {finalScore != null && <ScoreBlock score={finalScore} />}
-      {(suppressed > 0 || unevaluated > 0) && (
+      {(scored > 0 || blocked > 0 || unavailable > 0) && (
         <p>
-          {suppressed > 0 && `${suppressed} round${suppressed === 1 ? "" : "s"} critic-suppressed (never panel-evaluated)`}
-          {suppressed > 0 && unevaluated > 0 && "; "}
-          {unevaluated > 0 && `${unevaluated} round${unevaluated === 1 ? "" : "s"} could not be evaluated (panel unavailable)`}
-          {" — the evidence above is partial."}
+          {proCandidates.length} generated idea{proCandidates.length === 1 ? "" : "s"}; {scored} scored round{scored === 1 ? "" : "s"}; {blocked} blocked before evaluation; {unavailable} evaluation unavailable
         </p>
       )}
       <p>
@@ -180,21 +195,31 @@ function WinnerCard({
   rounds,
   proCandidates,
   proRounds,
+  scoredLossBudget,
 }: {
   winner: Winner;
   candidate?: Candidate;
   rounds: number;
   proCandidates: Candidate[];
   proRounds: EvolveRound[];
+  scoredLossBudget: number;
 }) {
   if (winner.kind === "no_action") {
-    return <NoActionCard winner={winner} proCandidates={proCandidates} />;
+    return <NoActionCard winner={winner} proCandidates={proCandidates} proRounds={proRounds} scoredLossBudget={scoredLossBudget} />;
   }
   if (winner.kind === "abstained") {
+    const { scored, blocked, unavailable } = proRounds.length
+      ? roundOutcomes(proRounds)
+      : (() => {
+        const b = roundBuckets(proCandidates);
+        return { scored: b.screened, blocked: b.suppressed, unavailable: b.unevaluated };
+      })();
     return (
       <div className="card">
-        <h4>Abstained for {winner.pro_id}</h4>
-        <p>{winner.rationale}</p>
+        <h4>{winner.rationale.startsWith("inconclusive_") ? "Inconclusive" : "Abstained"} for {winner.pro_id}</h4>
+        <p>No supported decision. No handoff will be sent.</p>
+        <p>{proCandidates.length} generated idea{proCandidates.length === 1 ? "" : "s"}; {scored} scored round{scored === 1 ? "" : "s"}; {blocked} blocked before evaluation; {unavailable} evaluation unavailable</p>
+        <p className="technical">{winner.rationale}</p>
         <Rounds rounds={rounds} />
       </div>
     );
@@ -334,7 +359,7 @@ export function WinnerReview({
   const keyOf = (w: Winner) =>
     w.kind === "winner"
       ? String((w.candidate_id && candidateById.get(w.candidate_id)?.recommendation?.channel) ?? "none")
-      : w.kind;
+      : decisionKind(w, run.rounds.filter((r) => r.pro_id === w.pro_id), candidatesByPro.get(w.pro_id) ?? [], run.loop_config?.MAX_NO_IMPROVE ?? 3);
   const counts = new Map<string, number>();
   for (const w of winners) counts.set(keyOf(w), (counts.get(keyOf(w)) ?? 0) + 1);
   const shown = filter === "all" ? winners : winners.filter((w) => keyOf(w) === filter);
@@ -363,9 +388,10 @@ export function WinnerReview({
           key={winner.id}
           winner={winner}
           candidate={winner.candidate_id ? candidateById.get(winner.candidate_id) : undefined}
-          rounds={countRounds(candidatesByPro.get(winner.pro_id) ?? [])}
+          rounds={run.rounds.filter((round) => round.pro_id === winner.pro_id).length || countRounds(candidatesByPro.get(winner.pro_id) ?? [])}
           proCandidates={candidatesByPro.get(winner.pro_id) ?? []}
           proRounds={run.rounds.filter((round) => round.pro_id === winner.pro_id)}
+          scoredLossBudget={run.loop_config?.MAX_NO_IMPROVE ?? 3}
         />
       ))}
 

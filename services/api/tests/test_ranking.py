@@ -451,7 +451,7 @@ async def test_invalid_rankings_are_re_asked_then_fail_the_round_honestly(
     ).scalars().all()
 
 
-async def test_a_ranking_failure_preserves_the_champion_and_a_later_round_wins(
+async def test_a_ranking_failure_preserves_the_champion_and_stops_before_another_paid_round(
     deps: FakeDeps, seeded_job
 ) -> None:
     bad = rank_json(("c1", 0.9), ("cX", 0.5), ("c3", 0.2))
@@ -479,7 +479,7 @@ async def test_a_ranking_failure_preserves_the_champion_and_a_later_round_wins(
     await set_loop_config(deps, seeded_job.run_id, MAX_ROUNDS=3, MAX_NO_IMPROVE=99)
     await run_job(seeded_job.id, deps)
     ledger = await rounds(deps.db, seeded_job.run_id)
-    assert [r.outcome for r in ledger] == ["win", "unavailable", "win"]
+    assert [r.outcome for r in ledger] == ["win", "unavailable"]
     assert ledger[1].candidate_id is not None  # the row still references a candidate
     champion = (
         await deps.db.execute(
@@ -488,8 +488,7 @@ async def test_a_ranking_failure_preserves_the_champion_and_a_later_round_wins(
             )
         )
     ).scalar_one()
-    assert champion.round == 3
-    assert champion.recommendation["mechanism"] == "payment_setup"
+    assert champion.round == 1
 
 
 async def test_the_ranker_call_is_deterministic(deps: FakeDeps, seeded_job) -> None:

@@ -218,7 +218,7 @@ describe("WinnerReview", () => {
     expect(screen.getByText(/evolve loop: 2 rounds/i)).toBeInTheDocument();
   });
 
-  it("renders no-action as a legitimate outcome, not an error", () => {
+  it("renders an unsupported historical no-action as inconclusive", () => {
     render(
       <WinnerReview
         run={{
@@ -230,7 +230,7 @@ describe("WinnerReview", () => {
         handingOff={false}
       />,
     );
-    expect(screen.getByRole("heading", { name: /no action/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /inconclusive/i })).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -248,7 +248,7 @@ describe("WinnerReview", () => {
     score: { screen: { reduction_pp: 0.2 } },
   });
 
-  it("explains no-action as 'not worth a touch' when no round ever won the screen", () => {
+  it("does not claim a completed search from historical candidate rows alone", () => {
     render(
       <WinnerReview
         run={noActionRun([loser("c1", 1), loser("c2", 2)])}
@@ -256,8 +256,7 @@ describe("WinnerReview", () => {
         handingOff={false}
       />,
     );
-    expect(screen.getByText(/not worth a touch/i)).toBeInTheDocument();
-    expect(screen.getByText(/successful decision, not a failure/i)).toBeInTheDocument();
+    expect(screen.getByText(/search ended without a supported decision/i)).toBeInTheDocument();
   });
 
   it("explains no-action as a final-check rejection when a champion existed", () => {
@@ -344,7 +343,7 @@ describe("WinnerReview", () => {
       />,
     );
     expect(screen.getByText(/inconclusive: no round was ever panel-evaluated/i)).toBeInTheDocument();
-    expect(screen.getByText(/critic-suppressed/)).toBeInTheDocument();
+    expect(screen.getByText(/2 blocked before evaluation/)).toBeInTheDocument();
     expect(screen.queryByText(/successful decision/i)).not.toBeInTheDocument();
   });
 
@@ -397,6 +396,19 @@ describe("WinnerReview", () => {
         handingOff={false}
       />,
     );
-    expect(screen.getByText(/could not be evaluated/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 evaluation unavailable/i)).toBeInTheDocument();
+  });
+
+  it("does not treat a scored loss mixed with a blocked attempt as exhausted search", () => {
+    render(<WinnerReview run={{
+      ...noActionRun([loser("c1", 1), loser("c2", 2)]),
+      winners: [{ id: "w", pro_id: "pro_1", kind: "no_action", candidate_id: null, rationale: "no_round_cleared_screen", evidence: {} }],
+      rounds: [
+        { pro_id: "pro_1", round: 1, mechanism: "m1", outcome: "lose", score_pp: 0.2 },
+        { pro_id: "pro_1", round: 2, mechanism: "m2", outcome: "suppressed", score_pp: null },
+      ],
+    }} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByRole("heading", { name: /inconclusive/i })).toBeVisible();
+    expect(screen.getByText(/1 scored round; 1 blocked before evaluation; 0 evaluation unavailable/)).toBeInTheDocument();
   });
 });

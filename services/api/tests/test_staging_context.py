@@ -601,7 +601,8 @@ async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
     ).fetch(["889901"])).organizations[0]
 
     assert brief.curated_context == {
-        "v": {"industry": "HVAC", "safe": 1, "segment": "1A"}
+        "v": {"industry": "HVAC", "safe": 1, "segment": "1A"},
+        "conflicts": ["collision"],
     }
 
 

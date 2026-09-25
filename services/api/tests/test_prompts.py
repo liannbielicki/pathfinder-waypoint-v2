@@ -24,7 +24,7 @@ RECOMMENDATION_FIXTURE = {
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "waypoint_v5"
+    assert PROMPT_VERSION == "waypoint_v7"
 
 
 def test_fenced_context_wraps_untrusted_input() -> None:
@@ -78,6 +78,47 @@ def test_critic_prompt_hard_blocks_consent_asks() -> None:
     assert "consent_ask" in prompt
 
 
+def test_evolve_and_critic_treat_missing_values_as_unknown_pro_facts() -> None:
+    context = '{"known":{"jobs_created_28d_band":"6_20"},"unknown":["invoices_sent_28d_band"]}'
+    generated = evolve_prompt(
+        context,
+        mode="cold",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["email"],
+        journey_window="churn_risk",
+        evidence="- service_plans via email: 4 sent, 7d return 2/3",
+    )
+    reviewed = critic_prompt(context, "[]")
+
+    for prompt in (generated, reviewed):
+        assert "unknown" in prompt.lower()
+        assert "zero" in prompt.lower()
+        assert "manager_rationale" in prompt
+        assert "other pros" in prompt.lower()
+    assert "question" in generated.lower()
+    assert "HARD BLOCK" in reviewed
+
+
+def test_evolve_uses_only_verified_destination_keys_for_feature_actions() -> None:
+    prompt = evolve_prompt(
+        '{"pc":{"sales_proposal":{},"online_booking":{}},'
+        '"verified_destination_keys":["online_booking"]}',
+        mode="cold",
+        best_json=None,
+        history_json="[]",
+        tried_mechanisms=[],
+        channels=["email"],
+        journey_window="churn_risk",
+        evidence="No historical outcome evidence is available.",
+    )
+
+    assert "Only set feature_key to a key in verified_destination_keys" in prompt
+    assert "reference material" in prompt
+    assert "Do not write a URL" in prompt
+
+
 def test_recommendation_is_structured_not_preformatted_prose() -> None:
     value = Recommendation.model_validate(RECOMMENDATION_FIXTURE)
     assert value.mechanism == "invoice_delivery"
@@ -112,6 +153,7 @@ def test_evolve_prompt_refines_the_current_mechanism() -> None:
     assert "invoice_delivery" in prompt  # the mechanism being refined
     assert BEST in prompt
     assert HISTORY in prompt
+    assert "Do not repeat a prior concept" in prompt
     assert "refine" in prompt.lower()
     # The two-layer + grounding rules survive in the evolve prompt too.
     assert "pro_facing_concept" in prompt

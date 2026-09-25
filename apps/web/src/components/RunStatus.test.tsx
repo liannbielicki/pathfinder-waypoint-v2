@@ -68,7 +68,7 @@ describe("RunStatus", () => {
     render(<RunStatus run={RUN_FIXTURE} onKill={vi.fn()} />);
     const settings = screen.getByRole("region", { name: /run settings/i });
     for (const label of [
-      /max rounds per pro/i, /dry mechanisms before stopping/i,
+      /max rounds per pro/i, /scored losses or blocked rounds before stopping/i,
       /refine attempts per mechanism/i, /min improvement to keep \(panel reaction\)/i,
       /min improvement to keep \(pp\)/i,
       /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
@@ -100,7 +100,17 @@ describe("RunStatus", () => {
     );
     expect(screen.getByText(/2 of 3 pros decided/i)).toBeVisible();
     expect(screen.getByText(/1 winner/i)).toBeVisible();
+    expect(screen.getByText(/1 other abstained/i)).toBeVisible();
+  });
+
+  it("counts a scored-loss no-action separately from incomplete decisions", () => {
+    render(<RunStatus run={{
+      ...RUN_FIXTURE,
+      winners: [{ ...WINNER, kind: "no_action", rationale: "no_round_cleared_screen" }],
+      rounds: [1, 2, 3].map((round) => ({ pro_id: "pro_1", round, mechanism: `m${round}`, outcome: "lose" as const, score_pp: 0.2 })),
+    }} onKill={vi.fn()} />);
     expect(screen.getByText(/1 no-action/i)).toBeVisible();
+    expect(screen.getByText(/0 inconclusive/i)).toBeVisible();
   });
 
   it("shows an agents-in-parallel pill only when agents are in flight", () => {

@@ -19,6 +19,7 @@ CATALOG_PATH = Path(__file__).parents[2] / "data" / "hcp_feature_catalog.csv"
 
 _STATE_PREFIX = "feature_"
 _STATE_SUFFIX = "_state"
+_ATTACHED_STATES = frozenset({"attached_active", "attached_unused", "attached_usage_unknown"})
 _CTA_COLUMNS = ("label", "url", "works_on", "notes")
 
 # works_on's real delivery channels. The CSV also uses this column for
@@ -117,16 +118,28 @@ def _state_features(brief: OrgBrief) -> dict[str, str]:
 
 
 def available_feature_keys(brief: OrgBrief) -> set[str]:
-    keys = set(_state_features(brief))
-    if brief.top_unused_paid_feature:
-        keys.add(brief.top_unused_paid_feature)
-    # Promoted Context Workbench payloads replace the legacy feature-state
-    # columns. Their product-context keys are equally authoritative inputs to
-    # the deterministic CTA resolver.
-    product_context = (brief.curated_context or {}).get("pc", {})
-    if isinstance(product_context, dict):
-        keys.update(str(key) for key in product_context)
-    return keys
+    states = _state_features(brief)
+    entitled = {key for key, state in states.items() if state in _ATTACHED_STATES}
+    if (
+        brief.top_unused_paid_feature
+        and (
+            brief.top_unused_paid_feature not in states
+            or states[brief.top_unused_paid_feature] in _ATTACHED_STATES
+        )
+    ):
+        entitled.add(brief.top_unused_paid_feature)
+    if brief.curated_context is None:
+        return entitled
+    # Promoted cards only establish plan compatibility, not attachment. A card
+    # filtered out for this plan must never be recovered from the state alone.
+    product_context = brief.curated_context.get("pc", {})
+    if not isinstance(product_context, dict):
+        return set()
+    return {
+        key for key in entitled
+        if isinstance(product_context.get(key), dict)
+        and product_context[key].get("e") == "available"
+    }
 
 
 def _feasibility_suffix(entry: CatalogEntry) -> str:
@@ -163,8 +176,24 @@ def feature_context(brief: OrgBrief, *, feasibility: bool) -> str:
 
 def waypoint_context(brief: OrgBrief, *, feasibility: bool) -> str:
     """Return promoted context when present, otherwise the legacy Waypoint brief."""
+    verified_destination_keys = sorted(
+        key for key in available_feature_keys(brief) if resolve_cta(key) is not None
+    )
     if brief.curated_context is not None:
-        return json.dumps(brief.curated_context, sort_keys=True, separators=(",", ":"))
-    context = brief.model_dump_json()
+        return json.dumps(
+            {**brief.curated_context, "verified_destination_keys": verified_destination_keys},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    known = brief.model_dump(mode="json", exclude_none=True, exclude={"curated_context"})
+    unknown = [
+        name for name in type(brief).model_fields
+        if name != "curated_context" and getattr(brief, name) is None
+    ]
+    context = json.dumps(
+        {"known": known, "unknown": unknown, "plan_eligibility": "unverified",
+         "verified_destination_keys": verified_destination_keys},
+        separators=(",", ":"),
+    )
     block = feature_context(brief, feasibility=feasibility)
     return f"{context}\n{block}" if block else context

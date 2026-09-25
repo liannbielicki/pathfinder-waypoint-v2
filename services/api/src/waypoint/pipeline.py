@@ -853,6 +853,14 @@ async def _generate_batch(
     return ideas
 
 
+def _model_authored_url(idea: Recommendation) -> bool:
+    text = " ".join([
+        idea.title, idea.mechanism, *idea.actions, idea.pro_facing_concept,
+        idea.manager_rationale, idea.channel_override_reason, idea.risk,
+    ])
+    return re.search(r"\b(?:https?://|www\.|(?:[a-z0-9-]+\.)+[a-z]{2,}\b)", text, re.IGNORECASE) is not None
+
+
 async def _verdicts_for_batch(
     state: PipelineState,
     deps: PipelineDeps,
@@ -894,6 +902,11 @@ async def _verdicts_for_batch(
             verdicts[index] = {
                 "block_kind": "channel_override_without_reason",
                 "reason": f"selected {idea.channel!r} instead of RECO {suggested_channel!r} without evidence",
+            }
+        elif _model_authored_url(idea):
+            verdicts[index] = {
+                "block_kind": "infeasible_execution",
+                "reason": "model-authored URL; only verified catalog destinations are allowed",
             }
         elif idea.feature_key:
             cta = resolve_cta(idea.feature_key)
@@ -1124,13 +1137,31 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     config = LoopConfig.from_mapping(state.run.loop_config or {})
     ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
     lstate = replay(ledger, config)
+    session = deps.store.session
+    prior_ids = [r.candidate_id for r in ledger if r.candidate_id]
+    prior_concepts: dict[str, str] = {}
+    if prior_ids:
+        rows = await session.execute(
+            select(CandidateRow.id, CandidateRow.recommendation).where(
+                CandidateRow.id.in_(prior_ids)
+            )
+        )
+        prior_concepts = {
+            candidate_id: recommendation.get("pro_facing_concept", "")
+            for candidate_id, recommendation in rows
+        }
     history = [
-        {"round": r.round, "mechanism": r.mechanism, "score_pp": r.score_pp, "outcome": r.outcome}
+        {
+            "round": r.round,
+            "mechanism": r.mechanism,
+            "concept": prior_concepts.get(r.candidate_id or "", ""),
+            "score_pp": r.score_pp,
+            "outcome": r.outcome,
+        }
         for r in ledger
     ]
     await _resolve_abandoned_calls(state, deps)
     cell = brief.calibration_cell() or ""
-    session = deps.store.session
     patterns = await pattern_summaries(session, state.run.journey_window, channels)
     evidence = evidence_block(patterns)
     failed = {mechanism_key(item) for item in await failed_mechanisms(session, state.pro_id)}
@@ -1346,8 +1377,8 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             challenger = best_screen.index
             mean_reaction = best_screen.score.mean_reaction if best_screen.score else None
             outcome = (
-                "win"
-                if is_win(
+                "unavailable" if score_pp is None else
+                "win" if is_win(
                     lstate,
                     score_pp,
                     config,
@@ -1445,7 +1476,13 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
         )
         await session.commit()  # candidates + ledger row land atomically
         history.append(
-            {"round": rnd, "mechanism": mechanism, "score_pp": score_pp, "outcome": outcome}
+            {
+                "round": rnd,
+                "mechanism": mechanism,
+                "concept": ideas[challenger].pro_facing_concept,
+                "score_pp": score_pp,
+                "outcome": outcome,
+            }
         )
 
     return {"rounds": lstate.round, "stop": reason, "best_score": lstate.best_score}
@@ -1661,28 +1698,27 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
     champion = await _champion_for(state, deps, config)
     final = champion.score.get("final") if champion is not None else None
     if champion is None or final is None:
-        # Three different endings, recorded distinctly: no round ever won the
-        # screen (an honest "not worth touching"), no round was ever generated
-        # at all (we could not look — nothing was screened), or a champion that
-        # never got its held-out final check (an incomplete run, not a
-        # conclusion).
-        rationale = "champion_final_missing"
+        kind = "abstained"
+        rationale = "inconclusive_final_missing"
         if champion is None:
-            # An unavailable generation ends the loop before any round is
-            # committed. "no_round_cleared_screen" is a positive claim that
-            # ideas were generated, screened, and none cleared the bar — a
-            # claim this row must never make when zero ideas were ever seen.
-            # The WinnerRow is the whole point of the champion-preserving
-            # break, so it has to be readable on its own: the evolve stop
-            # reason lives in the job checkpoint, which a caller reading only
-            # the winner never sees.
             ledger = await deps.store.rounds_for(state.run.id, state.pro_id)
-            rationale = "no_round_cleared_screen" if ledger else "no_round_was_ever_generated"
+            loop_state = replay(ledger, config)
+            numeric_screens = sum(row.score_pp is not None for row in ledger)
+            if not ledger:
+                rationale = "inconclusive_no_round_generated"
+            elif loop_state.evaluation_unavailable:
+                rationale = "inconclusive_evaluation_unavailable"
+            elif numeric_screens == 0:
+                rationale = "inconclusive_no_screen"
+            elif stop_reason(loop_state, config) == "no_improve_exhausted":
+                kind, rationale = "no_action", "no_round_cleared_screen"
+            else:
+                rationale = "inconclusive_search_incomplete"
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
-                kind="no_action",
+                kind=kind,
                 rationale=rationale,
             )
         )
@@ -1764,13 +1800,15 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
         # "all_candidates_abstained" alone reads as a panel judgment when the
         # evaluation may simply have failed — surface the recorded cause.
         abstain_reason = final.get("abstain_reason")
+        unavailable = final.get("abstained") or outcome.reason == "all_candidates_abstained"
         deps.store.session.add(
             WinnerRow(
                 run_id=state.run.id,
                 pro_id=state.pro_id,
-                kind="no_action",
+                kind="abstained" if unavailable else "no_action",
                 rationale=(
-                    f"{outcome.reason}: {abstain_reason}" if abstain_reason else outcome.reason
+                    f"inconclusive_final_unavailable: {abstain_reason or outcome.reason}"
+                    if unavailable else outcome.reason
                 ),
             )
         )

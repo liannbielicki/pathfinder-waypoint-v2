@@ -177,6 +177,8 @@ class LoopState:
     current_mechanism: str | None = None
     tries_on_current: int = 0
     dry_mechanisms: int = 0
+    blocked_rounds: int = 0
+    evaluation_unavailable: bool = False
     tried_mechanisms: tuple[str, ...] = ()
 
 
@@ -290,19 +292,17 @@ def apply_round(
         key = mechanism_key(name)
         if key and key not in tried:
             tried = (*tried, key)
+    if outcome == "lose" and score_pp is None:
+        outcome = "unavailable"  # legacy ledger rows without a usable screen
     if outcome in {"suppressed", "unavailable"}:
         # Nothing was selected this round. Preserve the actual current idea;
         # refining an arbitrary suppressed/unranked row corrupts live and replay
-        # state. The failed attempt still advances patience/dry bookkeeping.
-        tries = state.tries_on_current + 1 if state.current_mechanism is not None else 0
-        dry = state.dry_mechanisms + (
-            1 if state.current_mechanism is None or tries >= config.patience else 0
-        )
+        # state. Neither result is evidence that a scored mechanism went dry.
         return replace(
             state,
             round=state.round + 1,
-            tries_on_current=tries,
-            dry_mechanisms=dry,
+            blocked_rounds=state.blocked_rounds + (outcome == "suppressed"),
+            evaluation_unavailable=outcome == "unavailable",
             tried_mechanisms=tried,
         )
     if outcome == "win":
@@ -318,6 +318,7 @@ def apply_round(
             current_mechanism=mechanism,
             tries_on_current=0,
             dry_mechanisms=0,
+            evaluation_unavailable=False,
             tried_mechanisms=tried,
         )
     # The loop DECIDED this round's intent and told the model (see next_mode /
@@ -337,6 +338,7 @@ def apply_round(
         current_candidate_id=candidate_id,
         tries_on_current=tries,
         dry_mechanisms=dry,
+        evaluation_unavailable=False,
         tried_mechanisms=tried,
     )
 
@@ -344,8 +346,12 @@ def apply_round(
 def stop_reason(state: LoopState, config: LoopConfig) -> str | None:
     if state.best_score is not None and state.best_score > config.win_threshold_pp:
         return "win_threshold"
+    if state.evaluation_unavailable:
+        return "evaluation_unavailable"
     if state.dry_mechanisms >= config.max_no_improve:
         return "no_improve_exhausted"
+    if state.blocked_rounds >= config.max_no_improve:
+        return "blocked_budget_exhausted"
     if state.round >= config.max_rounds:
         return "round_cap"
     return None

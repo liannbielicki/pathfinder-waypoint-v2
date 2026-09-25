@@ -8,7 +8,7 @@ Org context is untrusted input and is always fenced.
 
 from waypoint.models import CHANNELS
 
-PROMPT_VERSION = "waypoint_v5"  # v5: model picks sms/email/call per idea
+PROMPT_VERSION = "waypoint_v7"  # v7: direct feature menu and conflict guidance
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -100,6 +100,13 @@ GROUNDING (hard rule): do NOT cite, state, or imply any specific value about
 this Pro that is not in the context below — no invented AR balances, job
 counts, revenue figures, or dates. An unknown factor may motivate a
 question-framed touch but never a stated fact.
+Only non-null Pro values in context are known. Fields listed as unknown, null,
+or absent are unknown, not zero, never, or inactive. Mark an unknown as unknown
+in manager_rationale if it motivates the idea. Historical outcomes concern
+other pros; feature descriptions define products. Neither proves a fact about
+this Pro. Do not infer this Pro's industry, customers, usage, or plan access
+from those references.
+Fields listed as conflicts are also unknown; never pick a side.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
@@ -262,8 +269,8 @@ refinement of a previous winner.{refill_guard}
 forbidden — do not reuse or rephrase them: {forbidden}.
 """
     return f"""You are running one round of an evolutionary search for retention action ideas
-for ONE specific Pro (a single HCP customer organization). Read the full history
-of what has been tried and scored, then propose exactly {count} new {ideas_word}.
+for ONE specific Pro (a single HCP customer organization). Read the selected
+idea and result from each prior round, then propose exactly {count} new {ideas_word}.
 {batch_rule} Exact duplicate concepts are discarded.
 
 Keep two layers separate:
@@ -278,6 +285,13 @@ GROUNDING (hard rule): do NOT cite, state, or imply any specific value about
 this Pro that is not in the context below — no invented AR balances, job
 counts, revenue figures, or dates. An unknown factor may motivate a
 question-framed touch but never a stated fact.
+
+Only non-null Pro values in context are known. Fields listed as unknown, null,
+or absent are unknown, not zero, never, or inactive. Mark an unknown as unknown
+in manager_rationale if it motivates the idea. Historical outcomes concern
+other pros; feature descriptions define products. Neither proves a fact about
+this Pro. Do not infer this Pro's industry, customers, usage, or plan access
+from those references.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
@@ -295,15 +309,20 @@ measured no-returns):
 {evidence}
 
 {directive}{warm_start}
-History of this Pro's rounds so far (score_pp is the frozen churn-reduction
-metric; higher is better):
+History of selected ideas from this Pro's rounds (score_pp is the frozen
+churn-reduction metric; higher is better). Do not repeat a prior concept;
+REFINE must change the execution, not just the wording:
 {history_json}
 
 Each idea is a JSON object with: title, mechanism, actions, pro_facing_concept,
-manager_rationale, channel, channel_override_reason, feature_key, risk. Use a
-feature_key shown in the context when a verified product destination is part of
-the idea; otherwise use null only for a concrete non-feature action or call agenda
-that can be executed from the stated context. Never invent a feature key or URL—Waypoint attaches
+manager_rationale, channel, channel_override_reason, feature_key, risk.
+Product cards in pc are reference material, not evidence that this Pro owns or
+can open a feature. In standard context, plan_eligibility=unverified means the
+plan was not independently checked; never claim confirmed plan access.
+Only set feature_key to a key in verified_destination_keys when a product destination
+is part of the idea; otherwise use null only for a concrete non-feature action or
+call agenda that can be executed from the stated context. Do not write a URL or
+tell the Pro to open a feature when feature_key is null. Waypoint attaches
 the catalog CTA after generation. Keep each string concise and actions to 1-3
 short strings. Begin the response with `[` and return a JSON array of exactly
 {count} {ideas_word}; do not add markdown, commentary, or code fences.
@@ -395,9 +414,15 @@ def critic_prompt(org_context: str, ideas_json: str) -> str:
 we have about this Pro is the context below. Classify the PRIMARY problem
 for each idea into exactly one block_kind:
 
-  - "ungrounded" (HARD BLOCK): the message or execution depends on a specific
-    value about this Pro that is NOT in the context — an exact AR balance, job
-    count, revenue figure, date, or a definite claim about an unknown factor.
+  - "ungrounded" (HARD BLOCK): any part of the idea, including title, actions,
+    pro_facing_concept, manager_rationale, risk, or channel_override_reason,
+    states or depends on a Pro fact not explicitly known in context. Null,
+    unknown, and absent fields are NOT zero, never, or inactive. Historical
+    outcomes concern other pros; feature descriptions define products. Neither
+    proves this Pro's industry, customers, usage, or plan access.
+    Fields listed as conflicts are unknown, and pc feature cards alone do not
+    prove attachment or access. A null feature_key cannot justify a feature
+    link or an instruction to open an unverified product screen.
   - "consent_ask" (HARD BLOCK): the idea's touch opens by (or consists of)
     asking the Pro for SMS/messaging consent, opt-in, or permission to contact
     them. Consent is handled upstream; a consent request is not a retention idea.
