@@ -142,6 +142,24 @@ def available_feature_keys(brief: OrgBrief) -> set[str]:
     }
 
 
+def feature_topic_keys(brief: OrgBrief) -> set[str]:
+    """Product topics grounded in a plan-compatible card, without implying attachment."""
+    if brief.curated_context is None:
+        return {
+            key for key in available_feature_keys(brief)
+            if key in CATALOG and CATALOG[key].description
+        }
+    cards = brief.curated_context.get("pc", {})
+    if not isinstance(cards, dict):
+        return set()
+    return {
+        key for key, card in cards.items()
+        if isinstance(card, dict)
+        and card.get("e") == "available"
+        and (card.get("v") or card.get("a") or (key in CATALOG and CATALOG[key].description))
+    }
+
+
 def _feasibility_suffix(entry: CatalogEntry) -> str:
     works = sorted({c["works_on"] for c in entry.ctas} & _REAL_CHANNELS)
     return f" [reachable on: {', '.join(works)}]" if works else ""
@@ -176,12 +194,14 @@ def feature_context(brief: OrgBrief, *, feasibility: bool) -> str:
 
 def waypoint_context(brief: OrgBrief, *, feasibility: bool) -> str:
     """Return promoted context when present, otherwise the legacy Waypoint brief."""
+    topics = sorted(feature_topic_keys(brief))
     verified_destination_keys = sorted(
         key for key in available_feature_keys(brief) if resolve_cta(key) is not None
     )
     if brief.curated_context is not None:
         return json.dumps(
-            {**brief.curated_context, "verified_destination_keys": verified_destination_keys},
+            {**brief.curated_context, "feature_topic_keys": topics,
+             "verified_destination_keys": verified_destination_keys},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -192,6 +212,7 @@ def waypoint_context(brief: OrgBrief, *, feasibility: bool) -> str:
     ]
     context = json.dumps(
         {"known": known, "unknown": unknown, "plan_eligibility": "unverified",
+         "feature_topic_keys": topics,
          "verified_destination_keys": verified_destination_keys},
         separators=(",", ":"),
     )

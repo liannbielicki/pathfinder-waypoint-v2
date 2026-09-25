@@ -119,6 +119,31 @@ def test_evolve_uses_only_verified_destination_keys_for_feature_actions() -> Non
     assert "Do not write a URL" in prompt
 
 
+def test_runtime_evolve_prompt_separates_product_topic_from_destination() -> None:
+    prompt = evolve_prompt(
+        '{"pc":{"card_on_file":{"e":"available"}},'
+        '"feature_topic_keys":["card_on_file"],"verified_destination_keys":[]}',
+        mode="cold", best_json=None, history_json="[]", tried_mechanisms=[],
+        channels=["email"], journey_window="churn_risk", evidence="none",
+        feature_topic_keys=["card_on_file"],
+        verified_destination_keys=[],
+    )
+    assert "Grounded product topics for this Pro: card_on_file" in prompt
+    assert "Verified product destinations for this Pro: none" in prompt
+    assert "claim access only when an attached state proves it" in prompt
+    assert 'channel_override_reason to ""' in prompt
+
+
+def test_critic_checks_topic_only_product_claims() -> None:
+    prompt = critic_prompt(
+        '{"feature_topic_keys":["card_on_file"],"verified_destination_keys":[]}',
+        "[]",
+    )
+    assert "promoted topic confirms plan compatibility only" in prompt
+    assert "does not prove attachment" in prompt
+    assert "without an attached state" in prompt.lower()
+
+
 def test_recommendation_is_structured_not_preformatted_prose() -> None:
     value = Recommendation.model_validate(RECOMMENDATION_FIXTURE)
     assert value.mechanism == "invoice_delivery"
