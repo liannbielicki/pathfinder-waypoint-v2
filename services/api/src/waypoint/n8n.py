@@ -128,6 +128,9 @@ class OrgBrief(BaseModel):
     platform_usage_band: str | None = None
     suggested_channel: str | None = None
     curated_context: dict[str, Any] | None = Field(default=None, exclude=True)
+    # Contact-plan inputs (one dict per active admin), never context: excluded
+    # from model_dump so neither prompt path can serialize them.
+    contact_candidates: list[dict[str, Any]] | None = Field(default=None, exclude=True)
     # Identifiers, not context: the numeric org id the run was keyed by and the
     # contact pro the context flow resolved for it (founding admin). The LCM
     # handoff sends pro_uuid; Iterable/Amplitude report on it.

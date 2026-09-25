@@ -1,6 +1,7 @@
 """Single strict environment contract. Missing values fail startup loudly."""
 
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -104,6 +105,10 @@ class Settings(BaseSettings):
     AMPLITUDE_RETURN_EVENT: str = "Loaded a Screen,Loaded a Page"
     # Cadence for both outcome pollers.
     POLL_SECONDS: float = Field(default=300.0, gt=0)
+    # Contact plan (docs/superpowers/specs/2026-09-25-contact-plan-design.md):
+    # off = not computed; shadow = computed + recorded, behaviour unchanged;
+    # enforce = the pinned (Pro, channel) drives ideation, follow-up and handoff.
+    CONTACT_PLAN_MODE: Literal["off", "shadow", "enforce"] = "off"
 
     @property
     def amplitude_return_events(self) -> frozenset[str]:
@@ -125,6 +130,14 @@ class Settings(BaseSettings):
         # Railway placeholder variables arrive as "" — that is "no key", and
         # must disable the poller, not enable it with blank credentials.
         return None if value == "" else value
+
+    @field_validator("CONTACT_PLAN_MODE", mode="before")
+    @classmethod
+    def _normalize_mode(cls, value: object) -> object:
+        # Railway values are hand-typed: "Shadow" or "" must not crash startup.
+        if isinstance(value, str):
+            return value.strip().lower() or "off"
+        return value
 
     @classmethod
     def load(cls) -> Settings:

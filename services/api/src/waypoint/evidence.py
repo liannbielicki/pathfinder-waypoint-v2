@@ -13,7 +13,7 @@ SQL GROUP BY if touch_outcomes outgrows the LIMIT.
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint.tables import TouchOutcomeRow
@@ -135,7 +135,9 @@ async def pattern_summaries(
     return patterns
 
 
-async def failed_mechanisms(session: AsyncSession, pro_id: str) -> list[str]:
+async def failed_mechanisms(
+    session: AsyncSession, pro_id: str, org_id: str | None = None
+) -> list[str]:
     """Mechanisms that recently failed FOR THIS PRO: an unsubscribe, or a
     measured 7-day no-return. Spec gate: a new candidate must be materially
     different from recent failed touches — same mechanism is not different.
@@ -144,14 +146,21 @@ async def failed_mechanisms(session: AsyncSession, pro_id: str) -> list[str]:
     rows never count — an untouched control must not veto the mechanism it
     benchmarks — and only the recent window suppresses, so a Day-7 miss is a
     steering signal, not a permanent ban. Reduced in SQL (DISTINCT + the
-    failure predicate) instead of loading every full row into Python."""
+    failure predicate) instead of loading every full row into Python.
+
+    A contact plan can switch which admin gets contacted between runs, and an
+    exposure-sourced outcome carries pro_id = pro_uuid (the admin), not the
+    numeric org — so also match rows by org_id when one is given, so a
+    recently-failed mechanism still gates the org even after the admin
+    changes."""
     cutoff = datetime.now(UTC) - timedelta(days=FAILED_MECHANISM_WINDOW_DAYS)
     rows = (
         await session.execute(
             select(TouchOutcomeRow.mechanism)
             .distinct()
             .where(
-                TouchOutcomeRow.pro_id == pro_id,
+                (TouchOutcomeRow.pro_id == pro_id)
+                | ((TouchOutcomeRow.org_id == org_id) if org_id else false()),
                 TouchOutcomeRow.evidence_limitation.is_(None),
                 TouchOutcomeRow.mechanism != "",
                 (TouchOutcomeRow.arm.is_(None)) | (TouchOutcomeRow.arm != "B"),

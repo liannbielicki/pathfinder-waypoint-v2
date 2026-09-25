@@ -4,7 +4,7 @@ import { Fragment, useState } from "react";
 import { PENDING_AUDIENCE_QUERY, TERMINAL_STATES, type RunDetail } from "@/lib/api";
 import { decisionKind } from "@/lib/decision";
 
-const PIPELINE_STAGES = ["context", "evolve", "final", "score", "measure", "ready"];
+const PIPELINE_STAGES = ["context", "plan", "evolve", "final", "score", "measure", "ready"];
 
 const NEXT_ACTION: Record<string, string> = {
   queued: "Waiting for a worker to claim the job.",

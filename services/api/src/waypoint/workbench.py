@@ -451,11 +451,13 @@ def build_audit_inventory(sources: Mapping[str, Any]) -> list[dict[str, str]]:
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
                 continue
+            query = _row_value(row, "query_name")
+            if str(query or "") == "waypoint_contact_candidate":
+                continue  # contact-plan identifiers, never promotable variables
             key = _row_value(row, "variable_name")
             if not isinstance(key, str) or not key:
                 continue
             value = _row_value(row, "value")
-            query = _row_value(row, "query_name")
             source_table = _row_value(row, "source_table")
             metadata = _row_value(row, "metadata")
             if not source_table and isinstance(metadata, Mapping):

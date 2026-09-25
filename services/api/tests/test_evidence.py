@@ -101,6 +101,15 @@ async def test_failed_mechanisms_use_the_day7_learning_checkpoint(db_session) ->
     assert set(failed) == {"invoice_delivery", "review_boost"}
 
 
+async def test_failed_mechanisms_match_the_org_across_admins(db_session) -> None:
+    # A failed touch recorded against admin A (pro_id=pro_uuid) with org_id "294916"
+    db_session.add(outcome(pro_id="pro_admin_a", org_id="294916",
+                           mechanism="billing-transparency", returned_7d=False))
+    await db_session.commit()
+    assert await failed_mechanisms(db_session, "294916", org_id="294916") == ["billing-transparency"]
+    assert await failed_mechanisms(db_session, "294916") == []  # old behaviour without org_id
+
+
 async def test_pattern_summaries_track_the_day1_learning_checkpoint(db_session) -> None:
     db_session.add(outcome(recommendation_id="w1", returned_1d=True, returned_7d=True))
     db_session.add(outcome(recommendation_id="w2", returned_1d=False))

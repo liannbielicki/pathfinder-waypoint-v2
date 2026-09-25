@@ -36,16 +36,13 @@ Detail lives in: `docs/2026-09-24-next-session-handoff.md` (loop work, "§" refs
 
 ## Channel selection — branch `feature/channel-selection`
 
-One feature; the brief on that branch has the evidence. Headline facts:
-- [ ] **The consent gate has never blocked anything.** Neither context flow emits `sms_consent_state` or
-  `email_consent_state`, and `call` has no consent key at all (`feasibility.py:28`). Source DNC/opt-out
-  from Salesforce `account` (`sms_opt_out__c`, `dnc_phone__c`, `dnc_email__c`) and mirror LCM's Iterable
-  SMS rule. Consent must bypass promotion, like the contact `pro_uuid` does.
-- [ ] **RECO never reaches Staging runs.** Check whether the active promotion bundle maps
-  `RECOMMENDED_ACTION → suggested_channel`; if not, that alone explains "RECO unavailable". Then switch to
-  the org-grain table `channel_recommendations_org` with probabilities.
-- [ ] **Pick the channel once per Pro, before the loop** (from the consent-filtered set, RECO as the
-  basis), so rounds stay comparable. **Needs Jake's sign-off on pinning.**
+Superseded by the contact-plan implementation: `contact_plan.py` selector, `plan` pipeline stage
+between `context` and `evolve`, `CONTACT_PLAN_MODE` (`off`/`shadow`/`enforce`, default `off`). See
+`docs/superpowers/specs/2026-09-25-contact-plan-design.md`. (verified: code in this branch)
+- [ ] **Deploy the query change to the live n8n flow.** The repo copy
+  (`n8n/waypoint-variable-audit-context-async-v1.json`) has the `waypoint_contact_candidate` block;
+  the live "Waypoint Context_URL_Workbench" flow does not yet. **Needs Jake** (manual n8n edit, not
+  code).
 
 ## Context, repo, and docs hygiene
 

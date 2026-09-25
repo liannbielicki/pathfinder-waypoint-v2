@@ -67,6 +67,17 @@ def test_channel_directive_forbids_sms_consent_asks() -> None:
     assert "consent" not in channel_directive(["email"])
 
 
+def test_pinned_call_directive_does_not_second_guess_the_pin() -> None:
+    from waypoint.prompts import channel_directive
+
+    pinned = channel_directive(["call"])
+    assert "A call is a real person from Housecall Pro phoning the Pro." in pinned
+    assert "Give the caller an agenda, not a script." in pinned
+    assert "would likely be ignored" not in pinned
+    # A choice that includes call still keeps the cost warning.
+    assert "would likely be ignored" in channel_directive(["sms", "email", "call"])
+
+
 def test_critic_prompt_fences_untrusted_ideas() -> None:
     prompt = critic_prompt(org_context="{}", ideas_json="[]")
     assert UNTRUSTED_START in prompt

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -857,3 +858,26 @@ def test_staging_brief_without_a_contact_pro_row_has_none() -> None:
     brief = compile_staging_brief("889901", [{"VARIABLE_NAME": "SAFE", "VALUE": 1}],
                                   context_payload(), bundle)
     assert brief.pro_uuid is None
+
+
+def test_staging_brief_carries_contact_candidates_outside_the_prompt() -> None:
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    candidate = {"pro_uuid": "pro_aaa", "pct_sms": 0.9, "sf_sms_opt_out": False}
+    snowflake = [
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        {"QUERY_NAME": "waypoint_contact_candidate", "VARIABLE_NAME": "contact_candidate",
+         "VALUE": candidate},
+        {"QUERY_NAME": "waypoint_contact_candidate", "VARIABLE_NAME": "contact_candidate",
+         "VALUE": json.dumps({"pro_uuid": "pro_bbb"})},
+    ]
+    brief = compile_staging_brief("889901", snowflake, context_payload(), bundle)
+    assert brief.contact_candidates == [candidate, {"pro_uuid": "pro_bbb"}]
+    assert "pro_aaa" not in str(brief.curated_context)
+    assert "contact_candidates" not in brief.model_dump()
+
+
+def test_staging_brief_without_candidate_rows_is_legacy() -> None:
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    brief = compile_staging_brief("889901", [{"VARIABLE_NAME": "SAFE", "VALUE": 1}],
+                                  context_payload(), bundle)
+    assert brief.contact_candidates is None

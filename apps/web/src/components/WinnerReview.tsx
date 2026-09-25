@@ -15,6 +15,49 @@ export function formatEstimate(score: Record<string, unknown> | undefined): stri
   return `${reduction.toFixed(1)} pp (CI ${lo.toFixed(1)}–${hi.toFixed(1)} pp)`;
 }
 
+type ContactPlan = {
+  pro_uuid?: string;
+  channel?: string;
+  source?: string;
+  runner_up?: [string, string] | null;
+  flags?: string[];
+  blocked?: unknown[];
+  abstain_reason?: string;
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  reco_default: "RECO default",
+  reco_fallback: "RECO fallback",
+  no_reco: "no RECO data",
+  legacy: "legacy pick",
+};
+
+function contactPlanOf(winner: Winner): ContactPlan | undefined {
+  return winner.evidence?.contact_plan as ContactPlan | undefined;
+}
+
+function ContactPlanLine({ plan }: { plan: ContactPlan }) {
+  // evidence is untyped JSON from the backend; guard every shape assumption
+  // (flags/blocked/runner_up) rather than trust the cast in contactPlanOf.
+  const flags = Array.isArray(plan.flags) ? plan.flags : [];
+  const blocked = Array.isArray(plan.blocked) ? plan.blocked : [];
+  const runnerUp = Array.isArray(plan.runner_up) && plan.runner_up.length === 2
+    ? plan.runner_up
+    : null;
+  return (
+    <p>
+      Contact plan: {String(plan.channel ?? "?").toUpperCase()} to{" "}
+      <code>{plan.pro_uuid ?? "unknown"}</code> ·{" "}
+      {SOURCE_LABEL[plan.source ?? ""] ?? plan.source}
+      {runnerUp ? ` · runner-up ${runnerUp[0]} by ${runnerUp[1]}` : ""}
+      {flags.includes("dnc_call") ? " · DNC on file — not a marketing call" : ""}
+      {blocked.length
+        ? ` · ${blocked.length} pair${blocked.length === 1 ? "" : "s"} blocked by consent`
+        : ""}
+    </p>
+  );
+}
+
 function ScoreBlock({ score }: { score: Record<string, unknown> }) {
   const estimate = formatEstimate(score);
   if (estimate === null) {
@@ -214,10 +257,14 @@ function WinnerCard({
         const b = roundBuckets(proCandidates);
         return { scored: b.screened, blocked: b.suppressed, unavailable: b.unevaluated };
       })();
+    const contactPlan = contactPlanOf(winner);
     return (
       <div className="card">
         <h4>{winner.rationale.startsWith("inconclusive_") ? "Inconclusive" : "Abstained"} for {winner.pro_id}</h4>
         <p>No supported decision. No handoff will be sent.</p>
+        {contactPlan?.abstain_reason && (
+          <p>Contact plan abstained: {contactPlan.abstain_reason}</p>
+        )}
         <p>{proCandidates.length} generated idea{proCandidates.length === 1 ? "" : "s"}; {scored} scored round{scored === 1 ? "" : "s"}; {blocked} blocked before evaluation; {unavailable} evaluation unavailable</p>
         <p className="technical">{winner.rationale}</p>
         <Rounds rounds={rounds} />
@@ -266,13 +313,17 @@ function WinnerCard({
       </p>
       <Rounds rounds={rounds} championRound={candidate?.round} />
       <h5>Selection summary</h5>
-      <p>
-        Selected {String(rec?.channel ?? "unknown").toUpperCase()} · RECO{" "}
-        {String(suggested ?? "unavailable")}
-        {suggested && suggested !== rec?.channel
-          ? ` · override: ${String(overrideReason || "reason missing")}`
-          : ""}
-      </p>
+      {contactPlanOf(winner) ? (
+        <ContactPlanLine plan={contactPlanOf(winner)!} />
+      ) : (
+        <p>
+          Selected {String(rec?.channel ?? "unknown").toUpperCase()} · RECO{" "}
+          {String(suggested ?? "unavailable")}
+          {suggested && suggested !== rec?.channel
+            ? ` · override: ${String(overrideReason || "reason missing")}`
+            : ""}
+        </p>
+      )}
       <p>
         {compared} candidate{compared === 1 ? "" : "s"} compared across {rounds}{" "}
         round{rounds === 1 ? "" : "s"} · warm start:{" "}

@@ -2,8 +2,8 @@
 
 Rejects a Pro or a channel before any LLM or persona budget is spent. Two
 rules, both fail-open on UNKNOWN data and fail-closed on affirmative negative
-data: the audience SQL upstream is the authoritative DNC/suppression filter,
-so this gate is belt-and-braces against contradictory briefs, not a re-filter.
+data: consent is decided by `contact_plan`; this gate only applies the
+journey window and the plan's channel.
 
   * consent: a channel whose consent state affirmatively reads as opted-out is
     removed; a Pro with no contactable channel abstains.

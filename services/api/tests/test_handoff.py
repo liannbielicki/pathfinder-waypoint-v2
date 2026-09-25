@@ -379,6 +379,55 @@ async def test_ready_rows_carry_the_winner_channel(
     assert [r["channel"] for r in rows] == ["email"]
 
 
+async def test_handoff_holds_back_a_row_off_its_contact_plan(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={"title": "Invoice nudge", "mechanism": "invoice_delivery",
+                        "pro_facing_concept": "get paid", "manager_rationale": "r",
+                        "actions": ["a"], "channel": "sms"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    winner.evidence = {**winner.evidence, "pro_uuid": "pro_x",
+                       "contact_plan": {"channel": "email", "pro_uuid": "pro_x"}}
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+    assert await ready_rows(db_session, "run-1") == []
+
+
+async def test_handoff_sends_the_plan_pro(
+    db_session: AsyncSession, seeded_run: None,
+) -> None:
+    candidate = CandidateRow(
+        run_id="run-1", pro_id="pro_1",
+        recommendation={"title": "Invoice nudge", "mechanism": "invoice_delivery",
+                        "pro_facing_concept": "get paid", "manager_rationale": "r",
+                        "actions": ["a"], "channel": "sms"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = await db_session.get(WinnerRow, "win-1")
+    assert winner is not None
+    winner.candidate_id = candidate.id
+    winner.evidence = {**winner.evidence, "pro_uuid": "pro_x",
+                       "contact_plan": {"channel": "sms", "pro_uuid": "pro_x"}}
+    db_session.add(MeasurementRow(run_id="run-1", winner_id="win-1", indicators=[{
+        "key": "jobs_created", "label": "Jobs created", "direction": "increase",
+        "source": "jobs", "window_days": 30, "rationale": "r",
+    }]))
+    await db_session.commit()
+    rows = await ready_rows(db_session, "run-1")
+    assert rows[0]["pro_uuid"] == "pro_x"
+
+
 async def test_ready_rows_carry_verified_cta_inside_the_stable_theme_contract(
     db_session: AsyncSession, seeded_run: None,
 ) -> None:

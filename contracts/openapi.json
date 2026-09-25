@@ -73,6 +73,13 @@
             "title": "Created At",
             "type": "string"
           },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
           "manager_rationale": {
             "title": "Manager Rationale",
             "type": "string"
@@ -96,6 +103,17 @@
           "pro_id": {
             "title": "Pro Id",
             "type": "string"
+          },
+          "pro_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pro Uuid"
           },
           "run_id": {
             "title": "Run Id",

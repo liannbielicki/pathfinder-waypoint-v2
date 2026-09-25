@@ -36,7 +36,8 @@ Always say which one you mean.
   Context_URL_Workbench" (webhook `waypoint/context-v1`) answers 202 and calls back with rows →
   `staging_context.compile_staging_brief()` keeps only values the **active promotion bundle** has a rule
   for. A new Snowflake column reaches the model only if it has a promotion rule (or an explicit bypass
-  like the contact `pro_uuid`).
+  like the contact `pro_uuid`). `contact_candidates` (carried from the same callback) is a
+  sibling bypass, for the `plan` stage; it is also never promoted. (verified: code in this branch)
 - **Standard context (fallback):** synchronous POST to `N8N_CONTEXT_URL` → "Waypoint Context_URL"
   (webhook `pathfinder-org-context`) → `n8n.ALLOWED_FIELDS` allowlist.
 - `N8N_CONTEXT_URL_STAGING` is dead.

@@ -250,6 +250,11 @@ async def ready_rows(
             "sms", "email"
         }:
             continue  # call/operator work and malformed legacy values never reach LCM
+        plan = winner.evidence.get("contact_plan")
+        if (candidate is not None and isinstance(plan, dict) and plan.get("channel")
+                and plan["channel"] != candidate.recommendation.get("channel")):
+            log.warning("winner %s: channel disagrees with its contact plan; held back", winner.id)
+            continue
         if winner.id in measured_winner_ids and candidate is not None:
             # The contact pro the context flow resolved for the org; a run keyed
             # by pro_uuid resolves to itself. An org_id with no resolution is

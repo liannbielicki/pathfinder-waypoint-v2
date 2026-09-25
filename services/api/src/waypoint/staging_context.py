@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections import defaultdict
@@ -279,6 +280,7 @@ def compile_staging_brief(
         pro_uuid=_contact_pro(rows),
         **typed,
         curated_context=curated_context,
+        contact_candidates=_contact_candidates(rows),
     )
 
 
@@ -291,6 +293,25 @@ def _contact_pro(rows: list[Mapping[str, Any]]) -> str | None:
             value = _row_value(row, "value")
             return str(value) if value else None
     return None
+
+
+def _contact_candidates(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]] | None:
+    """Rows from the flow's `waypoint_contact_candidate` block: identifiers and
+    booleans for the contact plan. Bypass promotion like `_contact_pro`. None
+    means the flow predates the block (legacy plan), not "no admins"."""
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if str(_row_value(row, "query_name") or "") != "waypoint_contact_candidate":
+            continue
+        value = _row_value(row, "value")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                continue
+        if isinstance(value, Mapping):
+            found.append(dict(value))
+    return found or None
 
 
 class WorkbenchStagingContextClient:

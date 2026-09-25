@@ -260,6 +260,8 @@ class CallItem(BaseModel):
     run_id: str
     pro_id: str
     org_id: str
+    pro_uuid: str | None = None  # the contact plan's Pro to phone
+    flags: list[str] = Field(default_factory=list)  # e.g. dnc_call, phone_shared
     title: str
     mechanism: str
     pro_facing_concept: str

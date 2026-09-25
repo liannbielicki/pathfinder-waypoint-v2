@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from waypoint import amplitude_source, iterable_source, queue
 from waypoint.calls import FleetSlots, MeteredLLM, RecordedCalls
 from waypoint.checkpoints import sweep_if_enabled
+from waypoint.contact_plan import fetch_profile, make_profile_client
 from waypoint.db import make_engine, make_session_factory
 from waypoint.handoff import lcm_http_client, push_ready_winners
 from waypoint.llm import LLMGateway, Pricing, retry_rate_limit
@@ -278,6 +279,7 @@ async def _worker_loop(
     maintenance: bool,
     settings: Settings,
     lcm_client: httpx.AsyncClient,
+    iterable_profiles: httpx.AsyncClient | None,
 ) -> None:
     """One claim→process loop. WORKER_COUNT of these run concurrently in-process;
     each owns a distinct worker_id (for lease ownership) and its own fleet-slot
@@ -335,6 +337,11 @@ async def _worker_loop(
                     worker_id=worker_id,
                     lease_seconds=LEASE_SECONDS,
                     llm_stacks=llm_stacks,
+                    contact_plan_mode=settings.CONTACT_PLAN_MODE,
+                    fetch_profile=(
+                        partial(fetch_profile, iterable_profiles)
+                        if iterable_profiles is not None else None
+                    ),
                 )
                 try:
                     await run_job(job.id, deps)
@@ -431,6 +438,13 @@ async def main() -> None:
     # One long-lived LCM transport shared by every loop (like the n8n client):
     # no per-Pro TLS handshake on the trickle path.
     lcm_client = lcm_http_client(settings)
+    # Read-only Iterable profile lookups for the contact plan; None => call-only plans.
+    iterable_profiles = (
+        make_profile_client(settings.ITERABLE_API_KEY.get_secret_value())
+        if settings.ITERABLE_API_KEY is not None else None
+    )
+    if iterable_profiles is None:
+        log.info("ITERABLE_API_KEY unset; contact plans are call-only")
 
     async with factory() as session:
         await apply_fleet_settings(session, settings)
@@ -460,6 +474,7 @@ async def main() -> None:
                 maintenance=(index == 0),
                 settings=settings,
                 lcm_client=lcm_client,
+                iterable_profiles=iterable_profiles,
             )
         finally:
             await slots_connection.close()

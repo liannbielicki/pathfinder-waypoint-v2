@@ -76,6 +76,17 @@ check out one branch in two worktrees, so the primary can't sit on V4 while its 
 
 The run form defaults to Standard (`RunStart.tsx`) even though Staging is the real path.
 
+### Contact plan
+
+A `plan` pipeline stage sits between `context` and `evolve` (`contact_plan.py`, selector).
+Candidates are read from the Part 1 `waypoint_contact_candidate` block appended to the Workbench
+flow's org-snapshot query (repo copy: `n8n/waypoint-variable-audit-context-async-v1.json`) — verified,
+this repo's copy only, deploying the query change to the **live** n8n flow is a manual step for Jake,
+not done by code. Iterable profile fields (phone/email presence) are read directly, read-only.
+`CONTACT_PLAN_MODE` (`off` default, `shadow`, `enforce`) gates whether the plan's channel/Pro pin takes
+effect. See `docs/superpowers/specs/2026-09-25-contact-plan-design.md` for the design. (verified: code
+in this branch)
+
 ### n8n flows (live instance; repo copies in `n8n/` on V4)
 
 | Live workflow (id) | Active | Repo copy |

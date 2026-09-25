@@ -515,6 +515,21 @@ def test_audit_inventory_preserves_every_experimental_row_and_observed_evidence(
     }
 
 
+def test_audit_inventory_excludes_contact_candidate_rows():
+    rows = [
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1, "QUERY_NAME": "part_1_org_snapshot"},
+        {
+            "QUERY_NAME": "waypoint_contact_candidate",
+            "VARIABLE_NAME": "contact_candidate",
+            "VALUE": {"pro_uuid": "pro_aaa"},
+        },
+    ]
+
+    inventory = build_audit_inventory({"snowflake": {"rows": rows}})
+
+    assert [item["key"] for item in inventory] == ["SAFE"]
+
+
 def test_feature_catalog_csv_requires_unique_exact_feature_keys():
     entries = parse_feature_catalog_csv(
         'feature,description,display_name\nonline_booking,"Book, online",Online Booking\nvoip,Calls,Voice\n'

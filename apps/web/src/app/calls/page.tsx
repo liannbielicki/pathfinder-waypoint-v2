@@ -59,7 +59,14 @@ export default function CallsPage() {
         <section key={call.winner_id} className="card" aria-label={call.title}>
           <h2>{call.title}</h2>
           <p>
-            Pro <code>{call.pro_id}</code> · org <code>{call.org_id || "?"}</code> ·{" "}
+            Pro <code>{call.pro_uuid ?? call.pro_id}</code> · org{" "}
+            <code>{call.org_id || "?"}</code> ·{" "}
+            {Array.isArray(call.flags) && call.flags.includes("dnc_call") && (
+              <strong>DNC on file — not a marketing call · </strong>
+            )}
+            {Array.isArray(call.flags) && call.flags.includes("phone_shared") && (
+              <strong>shared phone line · </strong>
+            )}
             <Link href={`/runs/${call.run_id}`}>run</Link> ·{" "}
             {new Date(call.created_at).toLocaleDateString()}
           </p>

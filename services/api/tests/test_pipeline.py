@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from decimal import Decimal
 from functools import partial
 
@@ -48,6 +49,7 @@ from .conftest import (
     PERSONAS,
     FakeContext,
     FakeDeps,
+    InjectedCrash,
     idea_json,
     reactions_json,
 )
@@ -1713,3 +1715,202 @@ async def test_a_lease_lost_while_queued_for_a_slot_is_not_relabelled(
 
     assert waited  # the slot queue really was the thing that lost the lease
     assert deps.gateway.calls_for("evolve") == 0  # never reached the provider
+
+
+# --- contact plan stage (off / shadow / enforce) -----------------------------
+
+# The seeded run is keyed by "pro_1", a pro_-prefixed id, so the plan limits
+# candidates to that Pro (operator-chosen Pro). pro_other must never be
+# evaluated — the shadow test asserts it is absent from the blocked list.
+CANDIDATES = [
+    {"pro_uuid": "pro_1", "has_phone": True, "pct_call": 0.9, "pct_sms": 0.1,
+     "pct_email": 0.1, "reco_scoring_date": "2099-01-01"},
+    {"pro_uuid": "pro_other", "has_phone": True, "pct_call": 0.2, "pct_sms": 0.2,
+     "pct_email": 0.2, "reco_scoring_date": "2099-01-01"},
+]
+
+
+def _with_candidates(deps, candidates) -> None:
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={
+        "organizations": [org.model_copy(update={"contact_candidates": candidates})]
+    })
+
+
+async def _job(deps, job_id: str) -> JobRow:
+    job = await deps.db.get(JobRow, job_id)
+    await deps.db.refresh(job)
+    return job
+
+
+async def test_plan_stage_off_by_default_records_nothing(seeded_job, deps) -> None:
+    await run_job(seeded_job.id, deps)
+    job = await _job(deps, seeded_job.id)
+    assert job.checkpoint["plan"] == {"mode": "off", "plan": None}
+
+
+async def test_shadow_plan_is_recorded_but_changes_nothing(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "shadow"
+    _with_candidates(deps, CANDIDATES)
+    await run_job(seeded_job.id, deps)
+    job = await _job(deps, seeded_job.id)
+    plan = job.checkpoint["plan"]["plan"]
+    # The run's channels are ["sms"]; with no fetcher, sms is blocked → abstain plan.
+    assert plan["abstain_reason"] == "no_contactable_pair"
+    assert {pro for pro, _, _ in plan["blocked"]} == {"pro_1"}  # forced-Pro filter
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    # Shadow never acts on the plan: no contact-plan abstain, the loop still ran.
+    assert winner is not None
+    assert not (winner.rationale or "").startswith("contact_plan:")
+    assert deps.gateway.call_count > 0
+
+
+async def test_enforce_abstains_before_any_llm_call(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "enforce"
+    _with_candidates(deps, CANDIDATES)  # run channels ["sms"], no Iterable → nothing open
+    await run_job(seeded_job.id, deps)
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    assert winner.kind == "abstained"
+    assert winner.rationale.startswith("contact_plan: no_contactable_pair")
+    assert winner.evidence["contact_plan"]["abstain_reason"] == "no_contactable_pair"
+    assert deps.gateway.call_count == 0
+
+
+async def test_shadow_plan_error_never_fails_the_job(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "shadow"
+    _with_candidates(deps, CANDIDATES)
+
+    async def boom(pro: str):
+        raise RuntimeError("iterable down")
+
+    deps.fetch_profile = boom
+    await run_job(seeded_job.id, deps)
+    job = await _job(deps, seeded_job.id)
+    assert job.checkpoint["plan"] == {"mode": "shadow", "plan": None, "error": "RuntimeError"}
+    assert deps.gateway.call_count > 0
+
+
+async def test_enforce_without_candidates_is_legacy_and_runs(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "enforce"
+    await run_job(seeded_job.id, deps)
+    job = await _job(deps, seeded_job.id)
+    assert job.checkpoint["plan"]["plan"]["source"] == "legacy"
+    assert deps.gateway.call_count > 0
+
+
+async def test_enforce_keeps_legacy_pick_for_a_job_with_paid_rounds(seeded_job, deps) -> None:
+    # A job that already paid for evolve rounds (but has no "evolve" checkpoint
+    # yet) must not get a fresh pick mid-loop.
+    deps.contact_plan_mode = "enforce"
+    _with_candidates(deps, CANDIDATES)
+    deps.db.add(EvolveRoundRow(run_id=seeded_job.run_id, pro_id=seeded_job.pro_id,
+                               round=1, mechanism="m", outcome="lose"))
+    await deps.db.commit()
+    deps.fail_after("plan")
+    with pytest.raises(InjectedCrash):
+        await run_job(seeded_job.id, deps)
+    job = await _job(deps, seeded_job.id)
+    assert job.checkpoint["plan"]["plan"]["source"] == "legacy"
+
+
+# --- contact plan enforce: pinned channel, follow-up, winner Pro -------------
+
+
+async def _enforce_call_plan(seeded_job, deps) -> None:
+    # pro_1 prefers calls; with every channel open the plan pins "call".
+    deps.contact_plan_mode = "enforce"
+    _with_candidates(deps, CANDIDATES)
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["sms", "email", "call"]
+    await deps.db.commit()
+
+
+async def test_enforce_pins_generation_to_the_plan_channel(seeded_job, deps) -> None:
+    await _enforce_call_plan(seeded_job, deps)
+    # RECO's hint differs from the pin; its value must never reach the model.
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={
+        "organizations": [org.model_copy(update={"suggested_channel": "sms"})]
+    })
+    await run_job(seeded_job.id, deps)
+    prompts = [p for p in deps.gateway.prompts if "Delivery for this Pro is gated to" in p]
+    assert prompts and all('gated to "call"' in p for p in prompts)
+    assert not any(re.search(r'"suggested_channel":\s*"', p) for p in deps.gateway.prompts)
+
+
+async def test_enforce_winner_carries_the_plan_pro(seeded_job, deps) -> None:
+    await _enforce_call_plan(seeded_job, deps)
+    await run_job(seeded_job.id, deps)
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    assert winner.kind == "winner"
+    assert winner.evidence["pro_uuid"] == "pro_1"
+    assert winner.evidence["contact_plan"]["channel"] == "call"
+    assert "contact_plan_shadow" not in winner.evidence
+
+
+async def test_shadow_winner_records_plan_without_using_it(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "shadow"
+    _with_candidates(deps, CANDIDATES)
+    await run_job(seeded_job.id, deps)
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    assert winner.kind == "winner"
+    assert winner.evidence["contact_plan_shadow"]["abstain_reason"] == "no_contactable_pair"
+    assert "contact_plan" not in winner.evidence
+
+
+async def test_off_pin_idea_is_coerced_not_suppressed(seeded_job, deps) -> None:
+    await _enforce_call_plan(seeded_job, deps)
+    await run_job(seeded_job.id, deps)
+    rows = (await deps.db.execute(select(CandidateRow))).scalars().all()
+    assert rows and all(r.recommendation["channel"] == "call" for r in rows)
+    assert not any((r.critics or {}).get("block_kind") == "infeasible_channel" for r in rows)
+
+
+
+def _with_org_id(deps, org_id: str) -> None:
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={
+        "organizations": [org.model_copy(update={"org_id": org_id})]
+    })
+
+
+@pytest.mark.parametrize("mode, gated", [("off", False), ("enforce", True)])
+async def test_org_keyed_failed_mechanism_gates_only_under_enforce(
+    db_session: AsyncSession, deps: FakeDeps, seeded_job, mode: str, gated: bool
+) -> None:
+    # Off/shadow must be today's behaviour: a failure recorded against another
+    # admin of the same org only gates once the plan can switch admins.
+    await _enforce_call_plan(seeded_job, deps)
+    deps.contact_plan_mode = mode
+    _with_org_id(deps, "294916")
+    db_session.add(TouchOutcomeRow(
+        recommendation_id="old-w", source="test", pro_id="pro_admin_a", org_id="294916",
+        channel="sms", mechanism="invoice_delivery", journey_window="churn_risk",
+        unsubscribed=True,
+    ))
+    await db_session.commit()
+    await set_loop_config(deps, seeded_job.run_id, CANDIDATE_COUNT=1)
+    await run_job(seeded_job.id, deps)
+    candidates = (await db_session.execute(
+        select(CandidateRow).where(CandidateRow.run_id == seeded_job.run_id)
+    )).scalars().all()
+    suppressed = [c for c in candidates if c.critics.get("block_kind") == "recently_failed"]
+    assert bool(suppressed) is gated
+
+
+@pytest.mark.parametrize("mode, key", [
+    ("enforce", "contact_plan"), ("shadow", "contact_plan_shadow"), ("off", None),
+])
+async def test_no_action_row_carries_the_contact_plan(
+    deps: FakeDeps, seeded_job, mode: str, key: str | None
+) -> None:
+    await _enforce_call_plan(seeded_job, deps)
+    deps.contact_plan_mode = mode
+    deps.gateway.responses["screen"] = [reactions_json(LOSE)]
+    await run_job(seeded_job.id, deps)
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    assert winner.kind == "no_action"
+    if key is None:
+        assert not {"contact_plan", "contact_plan_shadow"} & set(winner.evidence)
+    else:
+        assert winner.evidence[key]["pro_uuid"] == "pro_1"

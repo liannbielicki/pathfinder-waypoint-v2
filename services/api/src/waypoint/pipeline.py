@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -38,6 +38,7 @@ from waypoint.catalog import (
     resolve_cta,
     waypoint_context,
 )
+from waypoint.contact_plan import ContactPlan, ProfileFetcher, build_plan, legacy_plan
 from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
@@ -56,6 +57,7 @@ from waypoint.loop import (
 from waypoint.models import (
     PENDING_AUDIENCE_QUERY,
     TERMINAL_RUN_STATUSES,
+    Channel,
     FollowUpPlan,
     RankerDecision,
     Recommendation,
@@ -110,7 +112,7 @@ from waypoint.warmstart import FINGERPRINT_VERSION, build_fingerprint, retrieve
 
 log = logging.getLogger("waypoint.pipeline")
 
-STAGES = ("context", "evolve", "final", "score", "measure", "ready")
+STAGES = ("context", "plan", "evolve", "final", "score", "measure", "ready")
 
 TERMINAL_STATES = {
     "complete",
@@ -282,6 +284,10 @@ class PipelineDeps:
     llm_stacks: (
         Callable[[], AbstractAsyncContextManager[tuple[MeteredLLM, AsyncSession]]] | None
     ) = None
+    # Settings.CONTACT_PLAN_MODE; "off" keeps every pre-contact-plan behaviour.
+    contact_plan_mode: str = "off"
+    # Read-only Iterable profile lookup; None => only `call` can be open.
+    fetch_profile: ProfileFetcher | None = None
 
 
 @dataclass
@@ -290,6 +296,10 @@ class PipelineState:
     run: RunRow
     pro_id: str
     brief: OrgBrief | None = None
+    plan: ContactPlan | None = None
+    # The mode the plan was computed in: a shadow plan resumed after the
+    # shadow -> enforce flip must never be treated as enforced.
+    plan_mode: str | None = None
 
 
 async def _heartbeat(state: PipelineState, deps: PipelineDeps) -> None:
@@ -336,7 +346,11 @@ async def _guard(state: PipelineState, deps: PipelineDeps) -> None:
 
 
 async def _abstain_pro(
-    state: PipelineState, deps: PipelineDeps, pro_id: str, rationale: str
+    state: PipelineState,
+    deps: PipelineDeps,
+    pro_id: str,
+    rationale: str,
+    evidence: dict[str, Any] | None = None,
 ) -> None:
     if await deps.store.winner_for(state.run.id, pro_id) is None:
         deps.store.session.add(
@@ -345,6 +359,8 @@ async def _abstain_pro(
                 pro_id=pro_id,
                 kind="abstained",
                 rationale=rationale,
+                # Existing keys win: the plan-stage abstain passes its own plan.
+                evidence={**_plan_evidence(state, deps), **(evidence or {})},
             )
         )
         await deps.store.session.commit()
@@ -603,6 +619,102 @@ async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, 
         await _abstain_pro(state, deps, state.pro_id, "context missing: no org brief returned")
         return {"orgs": 0, "missing": [state.pro_id]}
     return {"orgs": 1, "missing": []}
+
+
+def _enforced(state: PipelineState, deps: PipelineDeps) -> ContactPlan | None:
+    plan = state.plan
+    if (deps.contact_plan_mode != "enforce" or state.plan_mode != "enforce"
+            or plan is None or plan.source == "legacy"):
+        return None
+    return plan
+
+
+def _apply_plan(state: PipelineState, deps: PipelineDeps) -> None:
+    """Under enforce, RECO's hint must not reach the model: the pin already
+    encodes it, and a differing hint makes the critic bench on-pin ideas."""
+    if _enforced(state, deps) is None or state.brief is None:
+        return
+    brief = state.brief
+    curated = dict(brief.curated_context or {})
+    if isinstance(curated.get("v"), dict):
+        curated["v"] = {k: v for k, v in curated["v"].items() if k != "suggested_channel"}
+    state.brief = brief.model_copy(update={
+        "suggested_channel": None,
+        "curated_context": curated if brief.curated_context is not None else None,
+    })
+
+
+def _generation_channels(state: PipelineState, deps: PipelineDeps) -> list[str]:
+    plan = _enforced(state, deps)
+    return [plan.channel] if plan and plan.channel else list(state.run.channels)
+
+
+def _follow_up_channels(state: PipelineState, deps: PipelineDeps) -> list[str]:
+    plan = _enforced(state, deps)
+    return list(plan.open_channels) if plan else list(state.run.channels)
+
+
+def _plan_evidence(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
+    """The plan on every WinnerRow (spec 3.1), abstained and no_action too. A
+    shadow plan rides along only if it was computed in shadow; off adds nothing."""
+    plan = _enforced(state, deps)
+    if plan is not None:
+        return {"contact_plan": plan.to_json()}
+    if state.plan is not None and state.plan_mode == "shadow":
+        return {"contact_plan_shadow": state.plan.to_json()}
+    return {}
+
+
+def _contact_evidence(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
+    """The resolved contact pro: what LCM sends to and what Iterable/Amplitude
+    report on."""
+    plan = _enforced(state, deps)
+    if plan is not None:
+        return {"pro_uuid": plan.pro_uuid, **_plan_evidence(state, deps)}
+    legacy = state.brief.pro_uuid if state.brief and state.brief.pro_uuid else None
+    return {**({"pro_uuid": legacy} if legacy else {}), **_plan_evidence(state, deps)}
+
+
+def _legacy_pro(state: PipelineState) -> str | None:
+    if state.brief is not None and state.brief.pro_uuid:
+        return state.brief.pro_uuid
+    return state.pro_id if state.pro_id.startswith("pro_") else None
+
+
+async def _stage_plan(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
+    """Decide once who to contact and how, before any LLM spend. A job that
+    already started evolving before this stage existed keeps today's pick."""
+    mode = deps.contact_plan_mode
+    if mode == "off" or state.brief is None:
+        return {"mode": mode, "plan": None}
+    channels = list(state.run.channels)
+    candidates = state.brief.contact_candidates
+    # Paid rounds without an "evolve" checkpoint are still a job mid-loop.
+    started = "evolve" in state.job.checkpoint or bool(
+        await deps.store.rounds_for(state.run.id, state.pro_id))
+    if started or candidates is None:
+        plan = legacy_plan(_legacy_pro(state), channels)
+    else:
+        forced = state.pro_id if state.pro_id.startswith("pro_") else None
+        try:
+            plan = await build_plan(candidates, channels, deps.fetch_profile,
+                                    datetime.now(UTC).date(), forced_pro=forced)
+        except Exception as error:  # shadow must never change or fail a run
+            if mode != "shadow":
+                raise  # enforce: the backstop requeues; consent is never guessed
+            log.warning("shadow contact plan failed for job %s: %r", state.job.id, error)
+            return {"mode": mode, "plan": None, "error": type(error).__name__}
+    log.info("contact plan job=%s mode=%s pro=%s channel=%s source=%s blocked=%s",
+             state.job.id, mode, plan.pro_uuid, plan.channel, plan.source,
+             sorted({reason for _, _, reason in plan.blocked}))
+    state.plan = plan
+    state.plan_mode = mode
+    _apply_plan(state, deps)
+    if _enforced(state, deps) is not None and plan.pro_uuid is None:
+        await _abstain_pro(state, deps, state.pro_id,
+                           f"contact_plan: {plan.abstain_reason}",
+                           evidence={"contact_plan": plan.to_json()})
+    return {"mode": mode, "plan": plan.to_json()}
 
 
 # --- evolve round: batch generation, batch critic, ranking, tie screening ----
@@ -893,6 +1005,10 @@ async def _verdicts_for_batch(
         # CTA is product truth, never model-authored content. Attach it only
         # after a feature resolves through the verified catalog below.
         idea.cta = None
+        if len(channels) == 1 and idea.channel not in channels and _enforced(state, deps):
+            # The pin is the decision; an off-pin channel is a model slip, not a bad idea.
+            log.info("coercing off-pin idea channel %r to %r", idea.channel, channels[0])
+            idea.channel = cast(Channel, channels[0])  # gate_pro only passes known channels
         if mechanism_key(idea.mechanism) in failed:
             # Spec gate: not materially different from a recent failed touch.
             verdicts[index] = {
@@ -1138,7 +1254,9 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     brief = state.brief
     if brief is None:
         return {"skipped": "no_brief"}
-    gate = gate_pro(brief, list(state.run.channels), state.run.journey_window)
+    if await deps.store.winner_for(state.run.id, state.pro_id) is not None:
+        return {"skipped": "decided"}  # e.g. the contact plan abstained
+    gate = gate_pro(brief, _generation_channels(state, deps), state.run.journey_window)
     if gate.blocked:
         # Spec stage 1: reject before any LLM or persona budget is spent.
         await _abstain_pro(state, deps, state.pro_id, f"infeasible: {gate.reason}")
@@ -1174,7 +1292,13 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     cell = brief.calibration_cell() or ""
     patterns = await pattern_summaries(session, state.run.journey_window, channels)
     evidence = evidence_block(patterns)
-    failed = {mechanism_key(item) for item in await failed_mechanisms(session, state.pro_id)}
+    # Org-keyed matching only once the plan can switch admins; off/shadow stay
+    # keyed by pro_id exactly as before.
+    org_key = (brief.org_id or brief.org_uuid) if _enforced(state, deps) is not None else None
+    failed = {
+        mechanism_key(item)
+        for item in await failed_mechanisms(session, state.pro_id, org_key)
+    }
 
     while (reason := stop_reason(lstate, config)) is None:
         await _guard(state, deps)
@@ -1734,6 +1858,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                 pro_id=state.pro_id,
                 kind=kind,
                 rationale=rationale,
+                evidence=_plan_evidence(state, deps),
             )
         )
         await deps.store.session.commit()
@@ -1789,9 +1914,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     "final": final,
                     "screen": screen_score,
                     "org_id": (state.brief.org_id or state.brief.org_uuid) if state.brief else "",
-                    # The resolved contact pro: what LCM sends to and what
-                    # Iterable/Amplitude report on, whatever id keyed the run.
-                    **({"pro_uuid": state.brief.pro_uuid} if state.brief and state.brief.pro_uuid else {}),
+                    **_contact_evidence(state, deps),
                     # RECO's channel suggestion next to the chosen channel, so
                     # agreement with the model is measurable before we trust it more.
                     **({"suggested_channel": suggested_channel} if suggested_channel else {}),
@@ -1824,6 +1947,7 @@ async def _stage_score(state: PipelineState, deps: PipelineDeps) -> dict[str, An
                     f"inconclusive_final_unavailable: {abstain_reason or outcome.reason}"
                     if unavailable else outcome.reason
                 ),
+                evidence=_plan_evidence(state, deps),
             )
         )
     await deps.store.session.commit()
@@ -1842,7 +1966,7 @@ async def _attach_follow_up(
     if state.brief is None:
         skip_reason = "channels not gateable on resume: no org brief"
     else:
-        gate = gate_pro(state.brief, list(state.run.channels), state.run.journey_window)
+        gate = gate_pro(state.brief, _follow_up_channels(state, deps), state.run.journey_window)
         if gate.blocked:
             skip_reason = f"channels not gateable: {gate.reason}"
         else:
@@ -2003,6 +2127,7 @@ async def finalize_stalled_runs(session: AsyncSession) -> int:
 
 STAGE_HANDLERS = {
     "context": _stage_context,
+    "plan": _stage_plan,
     "evolve": _stage_evolve,
     "final": _stage_final,
     "score": _stage_score,
@@ -2140,6 +2265,11 @@ async def run_job(job_id: str, deps: PipelineDeps) -> None:
         (brief for brief in batch.organizations if brief.pro_id == state.pro_id),
         None,
     )
+    saved_plan = job.checkpoint.get("plan")
+    if isinstance(saved_plan, Mapping) and isinstance(saved_plan.get("plan"), Mapping):
+        state.plan = ContactPlan.from_json(saved_plan["plan"])
+        state.plan_mode = str(saved_plan.get("mode"))
+        _apply_plan(state, deps)
     # Stamp the flow's self-reported query version exactly once, replacing only
     # the creation-time placeholder. Stamp-once keeps lineage stable when the
     # flow redeploys mid-run: later jobs (or lease-reclaim re-entries) never

@@ -16,6 +16,18 @@ from waypoint.tables import CallLogRow, CandidateRow, WinnerRow
 CALL_STATUSES = ("todo", "done")
 
 
+def _contact_plan_flags(plan: object) -> list[str]:
+    # Mirror handoff.py's isinstance guard: contact_plan is untrusted JSON
+    # (evidence column), so a malformed value (e.g. a string) must degrade to
+    # no flags rather than crash list_calls / 500 the whole /api/calls panel.
+    if not isinstance(plan, dict):
+        return []
+    flags = plan.get("flags")
+    if not isinstance(flags, list):
+        return []
+    return [str(f) for f in flags]
+
+
 async def list_calls(session: AsyncSession, limit: int = 500) -> list[CallItem]:
     rows = (
         await session.execute(
@@ -39,6 +51,9 @@ async def list_calls(session: AsyncSession, limit: int = 500) -> list[CallItem]:
                 run_id=winner.run_id,
                 pro_id=winner.pro_id,
                 org_id=str(winner.evidence.get("org_id", "")),
+                pro_uuid=(str(winner.evidence["pro_uuid"])
+                          if winner.evidence.get("pro_uuid") else None),
+                flags=_contact_plan_flags(winner.evidence.get("contact_plan")),
                 title=str(rec.get("title", "")),
                 mechanism=str(rec.get("mechanism", "")),
                 pro_facing_concept=str(rec.get("pro_facing_concept", "")),

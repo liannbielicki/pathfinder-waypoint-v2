@@ -50,7 +50,7 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
         "OUTCOMES_TOKEN",
         "SESSION_KEY", "LOG_LEVEL",
         "ITERABLE_API_KEY", "AMPLITUDE_API_KEY", "AMPLITUDE_SECRET_KEY",
-        "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS",
+        "AMPLITUDE_RETURN_EVENT", "POLL_SECONDS", "CONTACT_PLAN_MODE",
     }
 
 
@@ -107,3 +107,15 @@ def test_workbench_only_dotenv_keys_do_not_break_runtime_settings(monkeypatch: p
     monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_URL", "https://workbench.example.com")
     monkeypatch.setenv("N8N_CONTEXT_WEBHOOK_TOKEN", "workbench-token")
     assert Settings.load().WORKER_COUNT == 1
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("Shadow", "shadow"), (" ENFORCE ", "enforce"), ("", "off"), ("off", "off"),
+])
+def test_contact_plan_mode_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    for key, val in _MINIMAL_ENV.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setenv("CONTACT_PLAN_MODE", raw)
+    assert Settings.load().CONTACT_PLAN_MODE == expected

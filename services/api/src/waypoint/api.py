@@ -369,6 +369,11 @@ def create_app(
             "brief": {
                 **brief.model_dump(mode="json", exclude_none=True),
                 "curated_context": brief.curated_context,
+                **(
+                    {"contact_candidates": brief.contact_candidates}
+                    if brief.contact_candidates is not None
+                    else {}
+                ),
             },
         }
         job.checkpoint = checkpoint

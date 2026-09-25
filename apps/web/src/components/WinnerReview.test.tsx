@@ -114,6 +114,80 @@ describe("WinnerReview", () => {
     expect(screen.getByText(/evolve loop: 1 round/i)).toBeInTheDocument();
   });
 
+  it("shows the contact plan when the winner has one", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: {
+          ...WINNER_RUN.winners[0].evidence,
+          contact_plan: {
+            pro_uuid: "pro_x",
+            channel: "call",
+            source: "reco_fallback",
+            runner_up: ["pro_y", "email"],
+            flags: ["dnc_call"],
+            blocked: [["pro_z", "sms", "sf_dnc"]],
+          },
+        },
+      }],
+    };
+    render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByText(/Contact plan: CALL to/)).toBeInTheDocument();
+    expect(screen.getByText("pro_x")).toBeInTheDocument();
+    expect(screen.getByText(/RECO fallback/)).toBeInTheDocument();
+    expect(screen.getByText(/runner-up pro_y by email/)).toBeInTheDocument();
+    expect(screen.getByText(/DNC on file — not a marketing call/)).toBeInTheDocument();
+    expect(screen.getByText(/1 pair blocked by consent/)).toBeInTheDocument();
+  });
+
+  it("renders without throwing when contact_plan.flags/blocked are the wrong shape", () => {
+    const run: RunDetail = {
+      ...WINNER_RUN,
+      winners: [{
+        ...WINNER_RUN.winners[0],
+        evidence: {
+          ...WINNER_RUN.winners[0].evidence,
+          contact_plan: {
+            pro_uuid: "pro_x",
+            channel: "call",
+            source: "reco_default",
+            flags: { x: 1 },
+            blocked: "not-an-array",
+          },
+        },
+      }],
+    };
+    expect(() =>
+      render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />),
+    ).not.toThrow();
+    expect(screen.getByText(/Contact plan: CALL to/)).toBeInTheDocument();
+  });
+
+  it("falls back to the selection summary line when there is no contact plan", () => {
+    render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
+    expect(screen.getByText(/Selected SMS · RECO unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Contact plan:/)).not.toBeInTheDocument();
+  });
+
+  it("shows the abstain reason on an abstained contact plan", () => {
+    render(
+      <WinnerReview
+        run={{
+          ...RUN_FIXTURE,
+          status: "no_action",
+          winners: [{
+            id: "w", pro_id: "pro_1", kind: "abstained", candidate_id: null,
+            rationale: "no_reco", evidence: { contact_plan: { abstain_reason: "no_open_channels" } },
+          }],
+        }}
+        onHandoff={vi.fn()}
+        handingOff={false}
+      />,
+    );
+    expect(screen.getByText(/Contact plan abstained: no_open_channels/)).toBeInTheDocument();
+  });
+
   it("shows a compact channel, selection, warm-start, and model explanation", () => {
     const run: RunDetail = {
       ...WINNER_RUN,

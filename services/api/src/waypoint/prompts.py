@@ -56,7 +56,14 @@ def channel_directive(channels: list[str]) -> str:
             "it. When you differ, set channel_override_reason to the concrete evidence "
             "that makes the override more executable or likely to bring this Pro back."
         )
-    if "call" in allowed:
+    if allowed == ["call"]:
+        # Pinned by the contact plan: the call is already decided, so don't ask
+        # the model to second-guess it (spec 3.5).
+        lines.append(
+            "A call is a real person from Housecall Pro phoning the Pro. "
+            "Give the caller an agenda, not a script."
+        )
+    elif "call" in allowed:
         lines.append(
             "A call is a real person from Housecall Pro phoning the Pro. It costs staff "
             "time, so recommend it only when a conversation is the mechanism (a setup "

@@ -51,5 +51,8 @@ def test_async_workbench_workflow_validates_before_acknowledging() -> None:
     org_snapshot_query = nodes["Part 1 - Org snapshot and metadata"]["parameters"]["query"]
     assert "waypoint_contact_pro" in org_snapshot_query
     assert "founding_pro" in org_snapshot_query
+    assert "waypoint_contact_candidate" in org_snapshot_query
+    assert "boolor_agg" in org_snapshot_query  # multi-account orgs fail closed
+    assert "dnc_email__c ilike" not in org_snapshot_query  # addresses, not a flag
     payment_query = nodes["Addendum - Payment churn scores"]["parameters"]["query"]
     assert "addendum_channel_recommendation" in payment_query

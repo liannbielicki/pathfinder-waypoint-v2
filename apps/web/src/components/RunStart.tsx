@@ -217,7 +217,7 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
           required
         />
         <div>
-          <span>Channels (Waypoint picks per idea)</span>
+          <span>Allowed channels (Waypoint picks one Pro and channel per org)</span>
           {CHANNELS.map((c) => (
             <label key={c} className="check-row" htmlFor={`channel-${c}`}>
               <input

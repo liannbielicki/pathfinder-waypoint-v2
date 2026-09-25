@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import TEST_SETTINGS
 from waypoint.api import create_app
+from waypoint.n8n import OrgBrief
 from waypoint.tables import (
     CandidateRow,
     ContextPromotionRow,
@@ -646,6 +647,11 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
                 "VALUE": {"email": "must-not-persist@example.test"},
                 "METADATA": {"source_table": "ANALYTICS.SIGNALS"},
             },
+            {
+                "QUERY_NAME": "waypoint_contact_candidate",
+                "VARIABLE_NAME": "contact_candidate",
+                "VALUE": {"pro_uuid": "pro_aaa"},
+            },
         ],
     }
     headers = {"authorization": "Bearer test"}
@@ -680,6 +686,10 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     assert "SAFE_SIGNAL" not in str(stored)
     assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in str(stored)
     assert "must-not-persist" not in str(stored)
+    assert stored["brief"]["contact_candidates"] == [{"pro_uuid": "pro_aaa"}]
+    assert OrgBrief.model_validate(dict(stored["brief"])).contact_candidates == [
+        {"pro_uuid": "pro_aaa"}
+    ]
 
 
 async def test_staging_callback_never_resurrects_a_stopped_job(
@@ -1748,12 +1758,33 @@ async def test_calls_panel_lists_call_winners_and_tracks_done(
         )
         db_session.add(candidate)
         await db_session.flush()
+        evidence: dict = {"org_id": "org_1"}
+        if channel == "call":
+            evidence = {**evidence, "pro_uuid": "pro_x",
+                        "contact_plan": {"flags": ["dnc_call"]}}
         winner = WinnerRow(run_id=run_id, pro_id=f"pro_{channel}", kind="winner",
-                           candidate_id=candidate.id, evidence={"org_id": "org_1"})
+                           candidate_id=candidate.id, evidence=evidence)
         db_session.add(winner)
         await db_session.flush()
         winners.append(winner)
     call_winner, sms_winner = winners
+    # A second call winner with a malformed contact_plan (a string, not a dict):
+    # list_calls must degrade this row to flags == [] rather than 500 the panel.
+    malformed_candidate = CandidateRow(
+        run_id=run_id, pro_id="pro_call_malformed",
+        recommendation={"title": "T-call-malformed", "mechanism": "onboarding_call",
+                        "pro_facing_concept": "C", "manager_rationale": "R",
+                        "actions": ["a"], "channel": "call"},
+    )
+    db_session.add(malformed_candidate)
+    await db_session.flush()
+    malformed_winner = WinnerRow(
+        run_id=run_id, pro_id="pro_call_malformed", kind="winner",
+        candidate_id=malformed_candidate.id,
+        evidence={"org_id": "org_1", "contact_plan": "not-a-dict"},
+    )
+    db_session.add(malformed_winner)
+    await db_session.flush()
     # Mark the call winner's candidate as champion with a final score, and add
     # ranked runner-ups plus a suppressed idea that must never surface.
     champion = await db_session.get(CandidateRow, call_winner.candidate_id)
@@ -1771,17 +1802,24 @@ async def test_calls_panel_lists_call_winners_and_tracks_done(
     await db_session.commit()
 
     listed = (await auth_client.get("/api/calls")).json()
-    assert [c["winner_id"] for c in listed] == [call_winner.id]
-    assert listed[0]["status"] == "todo" and listed[0]["title"] == "T-call"
-    assert [a["title"] for a in listed[0]["alternatives"]] == ["second", "third"]
-    assert listed[0]["alternatives"][0]["score_pp"] == 3.0
+    assert {c["winner_id"] for c in listed} == {call_winner.id, malformed_winner.id}
+    by_id = {c["winner_id"]: c for c in listed}
+    assert by_id[call_winner.id]["status"] == "todo" and by_id[call_winner.id]["title"] == "T-call"
+    assert by_id[call_winner.id]["pro_uuid"] == "pro_x"
+    assert by_id[call_winner.id]["flags"] == ["dnc_call"]
+    # Malformed contact_plan (a string) degrades to no flags, no crash.
+    assert by_id[malformed_winner.id]["pro_uuid"] is None
+    assert by_id[malformed_winner.id]["flags"] == []
+    assert [a["title"] for a in by_id[call_winner.id]["alternatives"]] == ["second", "third"]
+    assert by_id[call_winner.id]["alternatives"][0]["score_pp"] == 3.0
 
     patched = await auth_client.patch(
         f"/api/calls/{call_winner.id}", json={"status": "done", "note": "left voicemail"}
     )
     assert patched.status_code == 200
     assert patched.json()["status"] == "done" and patched.json()["note"] == "left voicemail"
-    assert (await auth_client.get("/api/calls")).json()[0]["status"] == "done"
+    relisted = {c["winner_id"]: c for c in (await auth_client.get("/api/calls")).json()}
+    assert relisted[call_winner.id]["status"] == "done"
     # An sms winner is not a call: the panel refuses to log it.
     assert (
         await auth_client.patch(f"/api/calls/{sms_winner.id}", json={"status": "done"})

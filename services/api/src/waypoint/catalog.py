@@ -208,7 +208,7 @@ def waypoint_context(brief: OrgBrief, *, feasibility: bool) -> str:
     known = brief.model_dump(mode="json", exclude_none=True, exclude={"curated_context"})
     unknown = [
         name for name in type(brief).model_fields
-        if name != "curated_context" and getattr(brief, name) is None
+        if name not in {"curated_context", "contact_candidates"} and getattr(brief, name) is None
     ]
     context = json.dumps(
         {"known": known, "unknown": unknown, "plan_eligibility": "unverified",

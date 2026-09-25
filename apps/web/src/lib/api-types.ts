@@ -494,6 +494,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Flags */
+            flags?: string[];
             /** Manager Rationale */
             manager_rationale: string;
             /** Mechanism */
@@ -506,6 +508,8 @@ export interface components {
             pro_facing_concept: string;
             /** Pro Id */
             pro_id: string;
+            /** Pro Uuid */
+            pro_uuid?: string | null;
             /** Run Id */
             run_id: string;
             /**

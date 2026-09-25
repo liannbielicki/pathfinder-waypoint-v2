@@ -216,6 +216,10 @@ class FakeLLM:
     def call_count(self) -> int:
         return len(self.calls)
 
+    @property
+    def prompts(self) -> list[str]:
+        return [c["prompt"] for c in self.calls]
+
     def calls_for(self, stage: str) -> int:
         return sum(1 for c in self.calls if c["stage"] == stage)
 

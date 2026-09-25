@@ -1,8 +1,10 @@
+import re
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
+from waypoint import pipeline
 from waypoint.loop import DEFAULT_LOOP_CONFIG, replay
 from waypoint.pipeline import run_job
 from waypoint.tables import JobRow, LlmCallRow, RunRow, WinnerRow
@@ -181,3 +183,88 @@ async def test_replayed_state_carries_the_champion_reaction_from_the_ledger(
     assert ledger[0].outcome == "win"
     assert ledger[0].ranking["mean_reaction"] == pytest.approx(FIRST_WIN)
     assert replay(ledger, DEFAULT_LOOP_CONFIG).best_reaction == pytest.approx(FIRST_WIN)
+
+
+async def test_plan_is_loaded_not_recomputed_on_resume(seeded_job, deps) -> None:
+    deps.contact_plan_mode = "enforce"
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={"organizations": [
+        org.model_copy(update={"contact_candidates": [
+            {"pro_uuid": "pro_1", "has_phone": True, "pct_call": 0.9,
+             "reco_scoring_date": "2099-01-01"}]})]})
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["call"]
+    await deps.db.commit()
+    deps.fail_after("plan")
+    with pytest.raises(InjectedCrash):
+        await run_job(seeded_job.id, deps)
+    deps.clear_failure()
+    # Different candidates on resume must not change the pinned plan (a
+    # recompute here would abstain: the run's Pro is no longer a candidate).
+    deps.context.batch = deps.context.batch.model_copy(update={"organizations": [
+        org.model_copy(update={"contact_candidates": [
+            {"pro_uuid": "pro_new", "has_phone": True, "pct_call": 0.99,
+             "reco_scoring_date": "2099-01-01"}]})]})
+    await run_job(seeded_job.id, deps)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    await deps.db.refresh(job)
+    assert job.checkpoint["plan"]["plan"]["pro_uuid"] == "pro_1"
+    winner = await deps.store.winner_for(seeded_job.run_id, seeded_job.pro_id)
+    assert winner is None or not (winner.rationale or "").startswith("contact_plan:")
+
+
+async def test_shadow_plan_is_not_enforced_after_a_mode_flip(
+    seeded_job, deps, monkeypatch
+) -> None:
+    deps.contact_plan_mode = "shadow"
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={"organizations": [
+        org.model_copy(update={"contact_candidates": [
+            {"pro_uuid": "pro_1", "has_phone": True, "pct_call": 0.9,
+             "reco_scoring_date": "2099-01-01"}]})]})
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["call"]
+    await deps.db.commit()
+    deps.fail_after("plan")
+    with pytest.raises(InjectedCrash):
+        await run_job(seeded_job.id, deps)
+    deps.clear_failure()
+    # The rollout flips shadow -> enforce while this job is past "plan".
+    deps.contact_plan_mode = "enforce"
+    seen: list[object] = []
+    evolve = pipeline.STAGE_HANDLERS["evolve"]
+
+    async def spy(state, stage_deps):
+        seen.append(pipeline._enforced(state, stage_deps))
+        return await evolve(state, stage_deps)
+
+    monkeypatch.setitem(pipeline.STAGE_HANDLERS, "evolve", spy)
+    await run_job(seeded_job.id, deps)
+    assert seen == [None]  # the shadow plan loaded, but is never enforced
+    assert deps.gateway.call_count > 0
+
+
+async def test_resumed_enforce_job_never_leaks_the_reco_hint(seeded_job, deps) -> None:
+    # The restored brief is rebuilt from context on resume; the hint must be
+    # stripped again there, not only in the plan stage that already ran.
+    deps.contact_plan_mode = "enforce"
+    org = deps.context.batch.organizations[0]
+    curated = {**(org.curated_context or {}), "v": {"suggested_channel": "sms"}}
+    deps.context.batch = deps.context.batch.model_copy(update={"organizations": [
+        org.model_copy(update={
+            "suggested_channel": "sms",
+            "curated_context": curated,
+            "contact_candidates": [
+                {"pro_uuid": "pro_1", "has_phone": True, "pct_call": 0.9,
+                 "reco_scoring_date": "2099-01-01"}],
+        })]})
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["call"]
+    await deps.db.commit()
+    deps.fail_after("plan")
+    with pytest.raises(InjectedCrash):
+        await run_job(seeded_job.id, deps)
+    deps.clear_failure()
+    await run_job(seeded_job.id, deps)
+    assert deps.gateway.prompts
+    assert not any(re.search(r'"suggested_channel":\s*"', p) for p in deps.gateway.prompts)
