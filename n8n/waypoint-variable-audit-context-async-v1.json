@@ -23,7 +23,77 @@
           "name": "Header Auth account 3"
         }
       },
-      "notes": "Waypoint Staging POSTs organization_id, request_id, and promotion_id. Raw standardized Snowflake results pass through; the app owns PII exclusion."
+      "notes": "Waypoint Staging POSTs organization_id, request_id, and promotion_id. The call_phone mode reads one admin mobile on this same authenticated webhook. Raw context results pass through; the app owns PII exclusion."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a5108780-b8b4-4535-8912-bdb0f9e19b20",
+              "leftValue": "={{ String($json.body?.mode ?? '') }}",
+              "rightValue": "call_phone",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "db938817-774d-431e-a4f1-7ff2bc2728b5",
+      "name": "Route call phone",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [4800, 8960],
+      "notes": "Phone requests use this webhook and header authentication without starting the async context audit."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? {};\nconst organization_id = String(body.organization_id ?? '');\nconst pro_uuid = String(body.pro_uuid ?? '');\nif (!/^\\d{5,6}$/.test(organization_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(pro_uuid)) throw new Error('Invalid call phone lookup identity');\nreturn [{ json: { organization_id, pro_uuid } }];"
+      },
+      "id": "93ef89d0-60c5-42d1-bccc-742994619710",
+      "name": "Validate call phone",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4920, 9080]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select {{$json.organization_id}}::varchar as organization_id,\n       '{{$json.pro_uuid}}'::varchar as pro_uuid,\n       max(right(regexp_replace(mobile_number, '[^0-9]', ''), 10)) as phone,\n       count(*) as match_count\nfrom analytics.main.dim_service_pro\nwhere organization_id = {{$json.organization_id}}\n  and pro_uuid = '{{$json.pro_uuid}}'\n  and is_admin\n  and not coalesce(archived, false)\n  and length(regexp_replace(mobile_number, '[^0-9]', '')) >= 10",
+        "options": {}
+      },
+      "id": "a1975fb4-ab8b-47d7-ae2f-5c8449ca6066",
+      "name": "Read admin mobile",
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [5040, 9080],
+      "credentials": {
+        "snowflake": {
+          "id": "5zh9FdSvTdbj1oe3",
+          "name": "AIA - PROD_N8N_SVC READ ONLY SNOWFLAKE CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "id": "3634be3b-0ea1-4df7-ab87-a815da94e1d4",
+      "name": "Return selected number",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [5160, 9080]
     },
     {
       "parameters": {
@@ -316,12 +386,24 @@
       "main": [
         [
           {
-            "node": "Normalize staging request",
+            "node": "Route call phone",
             "type": "main",
             "index": 0
           }
         ]
       ]
+    },
+    "Route call phone": {
+      "main": [
+        [{"node": "Validate call phone", "type": "main", "index": 0}],
+        [{"node": "Normalize staging request", "type": "main", "index": 0}]
+      ]
+    },
+    "Validate call phone": {
+      "main": [[{"node": "Read admin mobile", "type": "main", "index": 0}]]
+    },
+    "Read admin mobile": {
+      "main": [[{"node": "Return selected number", "type": "main", "index": 0}]]
     },
     "Normalize staging request": {
       "main": [

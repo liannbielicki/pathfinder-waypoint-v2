@@ -152,27 +152,23 @@ def _profile_block(profile: Profile | None, channel: str) -> str | None:
     return None
 
 
-def _reco_fresh(candidates: Sequence[Mapping[str, Any]], today: date) -> bool:
-    for candidate in candidates:
-        raw = candidate.get("reco_scoring_date")
-        try:
-            scored = date.fromisoformat(str(raw)[:10])
-        except ValueError:
-            continue
-        if today - scored <= RECO_MAX_AGE:
-            return True
-    return False
+def _reco_fresh(candidate: Mapping[str, Any], today: date) -> bool:
+    try:
+        scored = date.fromisoformat(str(candidate.get("reco_scoring_date"))[:10])
+    except ValueError:
+        return False
+    return timedelta(0) <= today - scored <= RECO_MAX_AGE
 
 
-def _score(candidate: Mapping[str, Any], channel: str, fresh: bool) -> float | None:
-    value = candidate.get(f"pct_{channel}") if fresh else None
+def _score(candidate: Mapping[str, Any], channel: str, today: date) -> float | None:
+    value = candidate.get(f"pct_{channel}") if _reco_fresh(candidate, today) else None
     return float(value) if isinstance(value, int | float) else None
 
 
-def _rank_key(pair: tuple[Mapping[str, Any], str], fresh: bool) -> tuple[Any, ...]:
+def _rank_key(pair: tuple[Mapping[str, Any], str], today: date) -> tuple[Any, ...]:
     candidate, channel = pair
-    score = _score(candidate, channel, fresh)
-    p = candidate.get(f"p_{channel}") if fresh else None
+    score = _score(candidate, channel, today)
+    p = candidate.get(f"p_{channel}") if _reco_fresh(candidate, today) else None
     return (
         score is None, -(score or 0.0), -(float(p) if isinstance(p, int | float) else 0.0),
         not candidate.get("is_poc"), not candidate.get("founding_pro"),
@@ -239,9 +235,8 @@ async def build_plan(
     pool = [c for c in candidates if c.get("pro_uuid")
             and c.get("recommended_action") != "suppress_all"
             and (forced_pro is None or c.get("pro_uuid") == forced_pro)]
-    fresh = _reco_fresh(pool, today)
     pairs = sorted(((c, ch) for c in pool for ch in channels if ch in _SF_BLOCKS),
-                   key=lambda pair: _rank_key(pair, fresh))
+                   key=lambda pair: _rank_key(pair, today))
     checker = _Checker(fetch_profile)
     survivors: list[tuple[Mapping[str, Any], str]] = []
     for candidate, channel in pairs:
@@ -255,7 +250,7 @@ async def build_plan(
     chosen, channel = survivors[0]
     open_channels = tuple([ch for ch in channels if ch in _SF_BLOCKS
                            and await checker.reason(chosen, ch) is None])
-    score = _score(chosen, channel, fresh)
+    score = _score(chosen, channel, today)
     runner = survivors[1] if len(survivors) > 1 else None
     return ContactPlan(
         pro_uuid=str(chosen["pro_uuid"]), channel=channel, open_channels=open_channels,

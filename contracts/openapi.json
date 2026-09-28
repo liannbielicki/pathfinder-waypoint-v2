@@ -1469,6 +1469,50 @@
         "summary": "Patch Call"
       }
     },
+    "/api/calls/{winner_id}/phone": {
+      "get": {
+        "description": "Look up the selected admin mobile without persisting it in run evidence.",
+        "operationId": "call_phone_api_calls__winner_id__phone_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "winner_id",
+            "required": true,
+            "schema": {
+              "title": "Winner Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Call Phone Api Calls  Winner Id  Phone Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Call Phone"
+      }
+    },
     "/api/context-workbench/catalog/validate": {
       "post": {
         "operationId": "validate_catalog_api_context_workbench_catalog_validate_post",

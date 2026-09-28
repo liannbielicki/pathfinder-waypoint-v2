@@ -5,6 +5,7 @@ durable state. Health proves the database is reachable and nothing more.
 """
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
@@ -59,7 +60,7 @@ from waypoint.tables import (
     WinnerRow,
     WorkbenchCatalogVersionRow,
 )
-from waypoint.workbench import ContextLayerClient, org_uuid_from_n8n
+from waypoint.workbench import ContextLayerClient, N8NContextClient, org_uuid_from_n8n
 from waypoint.workbench_api import execute_run
 
 
@@ -667,6 +668,51 @@ def create_app(
         """Call-channel winners across runs: the operators' own work list.
         These never reach LCM; Pathfinder staff place the calls."""
         return await list_calls(session)
+
+    @app.get("/api/calls/{winner_id}/phone")
+    async def call_phone(
+        winner_id: str, request: Request, response: Response, session: SessionDep, _: AuthDep
+    ) -> dict[str, str]:
+        """Look up the selected admin mobile without persisting it in run evidence."""
+        row = (
+            await session.execute(
+                select(WinnerRow, CandidateRow)
+                .join(CandidateRow, CandidateRow.id == WinnerRow.candidate_id)
+                .where(WinnerRow.id == winner_id, WinnerRow.kind == "winner")
+            )
+        ).one_or_none()
+        if row is None or row[1].recommendation.get("channel") != "call":
+            raise HTTPException(status_code=404, detail="No call-channel winner with that id")
+        evidence = row[0].evidence or {}
+        org_id = str(evidence.get("org_id") or "")
+        pro_uuid = str(evidence.get("pro_uuid") or "")
+        if not re.fullmatch(r"\d{5,6}", org_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", pro_uuid):
+            raise HTTPException(status_code=404, detail="Selected Pro has no Snowflake phone lookup")
+        settings: Settings = request.app.state.settings
+        if settings.N8N_CONTEXT_URL_WORKBENCH is None:
+            raise HTTPException(status_code=503, detail="Snowflake phone lookup is not configured")
+        try:
+            payload = await N8NContextClient(timeout=20).fetch(
+                org_id, str(settings.N8N_CONTEXT_URL_WORKBENCH), settings.N8N_TOKEN.get_secret_value(),
+                pro_uuid=pro_uuid,
+            )
+        except (ConnectionError, TimeoutError, ValueError, TypeError):
+            raise HTTPException(status_code=502, detail="Snowflake phone lookup failed") from None
+        rows = payload if isinstance(payload, list) else [payload]
+        if not rows:
+            raise HTTPException(status_code=404, detail="No Snowflake admin mobile for selected Pro")
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=502, detail="Snowflake phone lookup returned ambiguous data")
+        result = {str(key).casefold(): value for key, value in rows[0].items()}
+        phone = str(result.get("phone") or "")
+        if str(result.get("organization_id")) != org_id or str(result.get("pro_uuid")) != pro_uuid or result.get("match_count") not in (0, 1):
+            raise HTTPException(status_code=502, detail="Snowflake phone lookup returned mismatched data")
+        if result["match_count"] == 0:
+            raise HTTPException(status_code=404, detail="No Snowflake admin mobile for selected Pro")
+        if not re.fullmatch(r"\d{10}", phone):
+            raise HTTPException(status_code=502, detail="Snowflake phone lookup returned invalid phone")
+        response.headers["Cache-Control"] = "no-store"
+        return {"phone": phone}
 
     @app.patch("/api/calls/{winner_id}", response_model=CallItem)
     async def patch_call(

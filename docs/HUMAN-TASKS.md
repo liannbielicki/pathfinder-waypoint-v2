@@ -24,9 +24,13 @@ A human must set these values (never their values in git). All names match
 - `LLM_API_KEY` — Anthropic API key
 - `N8N_CONTEXT_URL`, `N8N_TOKEN` — existing Standard n8n context webhook;
   Standard remains the default and is not changed by the Workbench
-- `N8N_CONTEXT_URL_WORKBENCH` — unchanged full experimental webhook used by
+- `N8N_CONTEXT_URL_WORKBENCH` — existing full experimental webhook used by
   Workbench authoring and Staging runtime; it shares `N8N_TOKEN` and never
-  replaces Standard
+  replaces Standard. The same workflow export has a synchronous `call_phone`
+  branch for the operator UI; activate the updated
+  `n8n/waypoint-variable-audit-context-async-v1.json` at its existing URL.
+  Verify a selected call winner returns the matching Snowflake admin mobile.
+  No additional workflow or environment variable is needed.
 - `CONTEXT_LAYER_BASE_URL`, `CONTEXT_LAYER_API_KEY` — direct Context Layer API
   used by Workbench authoring and Staging runtime
 - `N8N_CONTEXT_URL_STAGING` — deprecated compatibility value; current runtime

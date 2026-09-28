@@ -10,6 +10,7 @@ ponytail: rows are aggregated in Python over a bounded recent slice; move to
 SQL GROUP BY if touch_outcomes outgrows the LIMIT.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -192,9 +193,40 @@ def evidence_block(patterns: list[PatternEvidence]) -> str:
         # observation nothing made (label the limitation, never pretend) —
         # same rule as the m > 0 horizon filter above.
         lines.append(
-            f"- {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}"
+            f"- Historical aggregate only — {p.mechanism} via {p.channel}: {p.sent} sent, {horizons}"
             + (f", {p.unsubscribed} unsubscribed" if p.unsubscribed else "")
         )
-    return "Observed outcomes for similar pros (returns to the app are the goal):\n" + "\n".join(
+    return "Observed aggregate outcomes from prior touches (returns to the app are the goal):\n" + "\n".join(
         lines
     )
+
+
+def population_metric_misattributed(
+    rationale: str, patterns: list[PatternEvidence]
+) -> bool:
+    """Reject population return counts stated without population scope.
+
+    This catches the shipped 82/121 claim even if the model critic approves it.
+    Numeric variants outside the recorded counts remain the critic's job.
+    """
+    ratios = {
+        (returned, measured)
+        for pattern in patterns
+        for returned, measured in pattern.returned.values()
+        if measured > 0
+    }
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", rationale):
+        if not any(
+            re.search(rf"(?<!\d){returned}\s*(?:/|out\s+of|of)\s*{measured}(?!\d)",
+                      sentence, re.IGNORECASE)
+            for returned, measured in ratios
+        ):
+            continue
+        if re.search(r"\b(?:for\s+this\s+pro|this\s+pro's)\b", sentence, re.IGNORECASE):
+            return True
+        if not re.search(
+            r"\b(?:similar|other|comparable)\s+pros\b|\bpopulation(?:-wide)?\b|\b(?:historical\s+)?aggregate\b",
+            sentence, re.IGNORECASE,
+        ):
+            return True
+    return False

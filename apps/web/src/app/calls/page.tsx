@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ApiError, type CallItem, getCalls, updateCall } from "@/lib/api";
+import { CallPhone } from "@/components/CallPhone";
 
 // Operator work list: every winner Waypoint recommended over the call channel.
 // SMS and email winners go to LCM; these are placed by Pathfinder staff.
@@ -70,6 +71,7 @@ export default function CallsPage() {
             <Link href={`/runs/${call.run_id}`}>run</Link> ·{" "}
             {new Date(call.created_at).toLocaleDateString()}
           </p>
+          {call.pro_uuid && <p><CallPhone winnerId={call.winner_id} /></p>}
           <p><strong>Agenda:</strong> {call.pro_facing_concept}</p>
           {call.actions.length > 0 && (
             <ul>{call.actions.map((a, i) => <li key={i}>{a}</li>)}</ul>

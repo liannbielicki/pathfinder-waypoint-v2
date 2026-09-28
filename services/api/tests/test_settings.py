@@ -37,7 +37,7 @@ def test_all_runtime_names_are_short_and_descriptive() -> None:
     assert all(len(name) <= 24 or name in long_names for name in names)
     assert names == {
         "DATABASE_URL", "LLM_API_KEY", "N8N_CONTEXT_URL", "N8N_CONTEXT_URL_STAGING",
-        "N8N_CONTEXT_URL_WORKBENCH", "CONTEXT_LAYER_BASE_URL", "CONTEXT_LAYER_API_KEY",
+            "N8N_CONTEXT_URL_WORKBENCH", "CONTEXT_LAYER_BASE_URL", "CONTEXT_LAYER_API_KEY",
         "N8N_TOKEN",
         "N8N_TIMEOUT_SECONDS", "N8N_MAX_CONCURRENT",
         "PERSONA_URL", "PERSONA_TOKEN", "HANDOFF_URL", "HANDOFF_TOKEN",

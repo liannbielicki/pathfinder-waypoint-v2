@@ -251,10 +251,14 @@ class N8NContextClient:
         self._timeout_seconds = timeout
         self._timeout = httpx.Timeout(timeout, connect=min(timeout, 10.0))
 
-    async def fetch(self, organization_id: str, webhook_url: str, token: str) -> dict[str, Any] | list[Any]:
+    async def fetch(self, organization_id: str, webhook_url: str, token: str, *, pro_uuid: str | None = None) -> dict[str, Any] | list[Any]:
         try:
             async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout, follow_redirects=False) as client:
-                response = await client.post(webhook_url, headers={"Authorization": f"Bearer {token}"}, json={"organization_id": organization_id})
+                body = {"organization_id": organization_id}
+                if pro_uuid is not None:
+                    body["pro_uuid"] = pro_uuid
+                    body["mode"] = "call_phone"
+                response = await client.post(webhook_url, headers={"Authorization": f"Bearer {token}"}, json=body)
         except httpx.ConnectTimeout as error:
             raise TimeoutError("Snowflake/n8n could not connect within 10 seconds") from error
         except httpx.ReadTimeout as error:

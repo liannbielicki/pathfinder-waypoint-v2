@@ -59,6 +59,26 @@ export interface paths {
         patch: operations["patch_call_api_calls__winner_id__patch"];
         trace?: never;
     };
+    "/api/calls/{winner_id}/phone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Call Phone
+         * @description Look up the selected admin mobile without persisting it in run evidence.
+         */
+        get: operations["call_phone_api_calls__winner_id__phone_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/context-workbench/catalog/validate": {
         parameters: {
             query?: never;
@@ -1115,6 +1135,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    call_phone_api_calls__winner_id__phone_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                winner_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Validation Error */

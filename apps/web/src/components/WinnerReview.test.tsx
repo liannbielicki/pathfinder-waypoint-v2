@@ -98,6 +98,7 @@ describe("WinnerReview", () => {
   it("labels the score with confidence and calibration provenance", () => {
     render(<WinnerReview run={WINNER_RUN} onHandoff={vi.fn()} handingOff={false} />);
     expect(screen.getByText(/4\.2/)).toBeInTheDocument();
+    expect(screen.getByText(/calibration CI/)).toBeInTheDocument();
     expect(screen.getByText(/22cc4a1c89354327/)).toBeInTheDocument();
     expect(screen.getAllByText(/invoices_sent|Invoices sent/).length).toBeGreaterThan(0);
   });
@@ -135,6 +136,7 @@ describe("WinnerReview", () => {
     render(<WinnerReview run={run} onHandoff={vi.fn()} handingOff={false} />);
     expect(screen.getByText(/Contact plan: CALL to/)).toBeInTheDocument();
     expect(screen.getByText("pro_x")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show phone number" })).toBeInTheDocument();
     expect(screen.getByText(/RECO fallback/)).toBeInTheDocument();
     expect(screen.getByText(/runner-up pro_y by email/)).toBeInTheDocument();
     expect(screen.getByText(/DNC on file — not a marketing call/)).toBeInTheDocument();

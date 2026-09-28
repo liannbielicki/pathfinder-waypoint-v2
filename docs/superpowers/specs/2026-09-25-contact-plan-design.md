@@ -161,9 +161,11 @@ sms or email pair needs it. That's about 1–2 calls per org.
 `query_name='waypoint_contact_candidate'`, `variable_name='contact_candidate'`, with `value`
 an object of about 30 boolean and ID keys (no phone or email values).
 
-- **Additive:** it is appended to the Part 1 node's `union all`, so no new Merge input is needed
-  and an org with 0 admins returns 0 rows, which means abstain. The old `waypoint_contact_pro`
-  and RECO-addendum rows stay until enforce mode has run on staging.
+- **Additive:** it is appended to the Part 1 node's `union all`, so no new Merge input is needed.
+  An org with 0 admins returns 0 rows. The callback currently cannot distinguish that case from
+  a flow that omitted the candidate query, so a new enforced job fails closed. An explicit
+  empty-block marker in the source contract is needed before zero admins can safely abstain.
+  The old `waypoint_contact_pro` and RECO-addendum rows stay until enforce mode has run on staging.
 - `staging_context.compile_staging_brief` extracts them with `_contact_candidates(rows)`, next
   to `_contact_pro`, and bypasses promotion. The callback persists them in
   `checkpoint["staging_context"]` next to `brief` (the raw rows are discarded after the

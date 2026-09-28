@@ -109,7 +109,7 @@ describe("LoopProgress", () => {
       />,
     );
     expect(
-      screen.getByText(/Rejected at held-out final: 0\.4 pp \(CI -1\.2–2\.0 pp\)/),
+      screen.getByText(/Rejected at held-out final: 0\.4 pp \(calibration CI -1\.2–2\.0 pp\)/),
     ).toBeInTheDocument();
   });
 

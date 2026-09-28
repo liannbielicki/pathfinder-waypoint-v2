@@ -39,7 +39,13 @@ from waypoint.catalog import (
     waypoint_context,
 )
 from waypoint.contact_plan import ContactPlan, ProfileFetcher, build_plan, legacy_plan
-from waypoint.evidence import evidence_block, failed_mechanisms, pattern_summaries
+from waypoint.evidence import (
+    PatternEvidence,
+    evidence_block,
+    failed_mechanisms,
+    pattern_summaries,
+    population_metric_misattributed,
+)
 from waypoint.feasibility import gate_pro
 from waypoint.items import resolve_item
 from waypoint.llm import Pricing, RateLimitExhausted, extract_json, worst_case_cost
@@ -621,10 +627,11 @@ async def _stage_context(state: PipelineState, deps: PipelineDeps) -> dict[str, 
     return {"orgs": 1, "missing": []}
 
 
-def _enforced(state: PipelineState, deps: PipelineDeps) -> ContactPlan | None:
+def _enforced(state: PipelineState) -> ContactPlan | None:
     plan = state.plan
-    if (deps.contact_plan_mode != "enforce" or state.plan_mode != "enforce"
-            or plan is None or plan.source == "legacy"):
+    # The plan checkpoint is immutable for this job. A deployment that changes
+    # CONTACT_PLAN_MODE must not unpin a Pro or channel after rounds have started.
+    if state.plan_mode != "enforce" or plan is None or plan.source == "legacy":
         return None
     return plan
 
@@ -632,7 +639,7 @@ def _enforced(state: PipelineState, deps: PipelineDeps) -> ContactPlan | None:
 def _apply_plan(state: PipelineState, deps: PipelineDeps) -> None:
     """Under enforce, RECO's hint must not reach the model: the pin already
     encodes it, and a differing hint makes the critic bench on-pin ideas."""
-    if _enforced(state, deps) is None or state.brief is None:
+    if _enforced(state) is None or state.brief is None:
         return
     brief = state.brief
     curated = dict(brief.curated_context or {})
@@ -645,19 +652,19 @@ def _apply_plan(state: PipelineState, deps: PipelineDeps) -> None:
 
 
 def _generation_channels(state: PipelineState, deps: PipelineDeps) -> list[str]:
-    plan = _enforced(state, deps)
+    plan = _enforced(state)
     return [plan.channel] if plan and plan.channel else list(state.run.channels)
 
 
 def _follow_up_channels(state: PipelineState, deps: PipelineDeps) -> list[str]:
-    plan = _enforced(state, deps)
+    plan = _enforced(state)
     return list(plan.open_channels) if plan else list(state.run.channels)
 
 
 def _plan_evidence(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     """The plan on every WinnerRow (spec 3.1), abstained and no_action too. A
     shadow plan rides along only if it was computed in shadow; off adds nothing."""
-    plan = _enforced(state, deps)
+    plan = _enforced(state)
     if plan is not None:
         return {"contact_plan": plan.to_json()}
     if state.plan is not None and state.plan_mode == "shadow":
@@ -668,7 +675,7 @@ def _plan_evidence(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
 def _contact_evidence(state: PipelineState, deps: PipelineDeps) -> dict[str, Any]:
     """The resolved contact pro: what LCM sends to and what Iterable/Amplitude
     report on."""
-    plan = _enforced(state, deps)
+    plan = _enforced(state)
     if plan is not None:
         return {"pro_uuid": plan.pro_uuid, **_plan_evidence(state, deps)}
     legacy = state.brief.pro_uuid if state.brief and state.brief.pro_uuid else None
@@ -692,6 +699,11 @@ async def _stage_plan(state: PipelineState, deps: PipelineDeps) -> dict[str, Any
     # Paid rounds without an "evolve" checkpoint are still a job mid-loop.
     started = "evolve" in state.job.checkpoint or bool(
         await deps.store.rounds_for(state.run.id, state.pro_id))
+    if (candidates is None and not started and mode == "enforce"
+            and state.run.context_source == "staging"):
+        # An empty admin set and an older/misconfigured flow are indistinguishable
+        # without a source marker. Neither may bypass consent on a new enforced run.
+        raise PipelineFailure("contact_candidates_unavailable")
     if started or candidates is None:
         plan = legacy_plan(_legacy_pro(state), channels)
     else:
@@ -710,7 +722,7 @@ async def _stage_plan(state: PipelineState, deps: PipelineDeps) -> dict[str, Any
     state.plan = plan
     state.plan_mode = mode
     _apply_plan(state, deps)
-    if _enforced(state, deps) is not None and plan.pro_uuid is None:
+    if _enforced(state) is not None and plan.pro_uuid is None:
         await _abstain_pro(state, deps, state.pro_id,
                            f"contact_plan: {plan.abstain_reason}",
                            evidence={"contact_plan": plan.to_json()})
@@ -992,6 +1004,7 @@ async def _verdicts_for_batch(
     ideas: list[Recommendation],
     channels: list[str],
     failed: set[str],
+    patterns: list[PatternEvidence],
 ) -> list[dict[str, Any]]:
     """Pre-gate for free, then ONE critic call for everything that survives.
     The critic is only paid for ideas that clear the recently-failed and
@@ -1005,7 +1018,7 @@ async def _verdicts_for_batch(
         # CTA is product truth, never model-authored content. Attach it only
         # after a feature resolves through the verified catalog below.
         idea.cta = None
-        if len(channels) == 1 and idea.channel not in channels and _enforced(state, deps):
+        if len(channels) == 1 and idea.channel not in channels and _enforced(state):
             # The pin is the decision; an off-pin channel is a model slip, not a bad idea.
             log.info("coercing off-pin idea channel %r to %r", idea.channel, channels[0])
             idea.channel = cast(Channel, channels[0])  # gate_pro only passes known channels
@@ -1080,6 +1093,16 @@ async def _verdicts_for_batch(
             verdicts[index] = verdict
     for index, idea in enumerate(ideas):
         verdict = verdicts[index]
+        if (verdict is not None and verdict["block_kind"] not in SUPPRESSING_BLOCK_KINDS
+                and any(population_metric_misattributed(text, patterns) for text in (
+                    idea.title, idea.mechanism, *idea.actions, idea.pro_facing_concept,
+                    idea.manager_rationale, idea.channel_override_reason, idea.risk,
+                ))):
+            verdicts[index] = {
+                "block_kind": "per_pro_data",
+                "reason": "population return count cited without population scope",
+            }
+            continue
         if (
             verdict is not None
             and verdict["block_kind"] not in SUPPRESSING_BLOCK_KINDS
@@ -1294,7 +1317,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
     evidence = evidence_block(patterns)
     # Org-keyed matching only once the plan can switch admins; off/shadow stay
     # keyed by pro_id exactly as before.
-    org_key = (brief.org_id or brief.org_uuid) if _enforced(state, deps) is not None else None
+    org_key = (brief.org_id or brief.org_uuid) if _enforced(state) is not None else None
     failed = {
         mechanism_key(item)
         for item in await failed_mechanisms(session, state.pro_id, org_key)
@@ -1423,6 +1446,7 @@ async def _stage_evolve(state: PipelineState, deps: PipelineDeps) -> dict[str, A
             ideas=ideas,
             channels=channels,
             failed=failed,
+            patterns=patterns,
         )
         candidate_ids = [uuid4().hex for _ in ideas]
         rankable = [

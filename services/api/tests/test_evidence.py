@@ -3,6 +3,7 @@ from waypoint.evidence import (
     evidence_block,
     failed_mechanisms,
     pattern_summaries,
+    population_metric_misattributed,
 )
 from waypoint.tables import TouchOutcomeRow
 
@@ -130,8 +131,24 @@ async def test_evidence_block_labels_day30_as_diagnostic() -> None:
     assert "1d return 1/2" in text
     assert "7d return 2/3" in text
     assert "30d return 2/2 (diagnostic)" in text
+    assert "Historical aggregate only" in text
 
 
 async def test_evidence_block_is_honest_when_empty() -> None:
     text = evidence_block([])
     assert "No historical outcome evidence" in text
+
+
+def test_population_metric_misattribution_matches_the_documented_handoff() -> None:
+    patterns = [PatternEvidence(
+        channel="sms", mechanism="billing", sent=121,
+        returned={"1d": (82, 121), "7d": (116, 121)}, unsubscribed=0,
+    )]
+    assert population_metric_misattributed(
+        "SMS showed strong returns for this Pro (82/121 at 1d, 116/121 at 7d).", patterns
+    )
+    assert population_metric_misattributed("SMS showed 82 out of 121 returns.", patterns)
+    assert not population_metric_misattributed(
+        "The historical aggregate had 82/121 returns at 1d.", patterns
+    )
+    assert not population_metric_misattributed("This Pro sent 82 invoices.", patterns)

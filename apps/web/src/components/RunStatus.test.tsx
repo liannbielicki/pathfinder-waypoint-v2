@@ -69,7 +69,7 @@ describe("RunStatus", () => {
     const settings = screen.getByRole("region", { name: /run settings/i });
     for (const label of [
       /max rounds per pro/i, /scored losses or blocked rounds before stopping/i,
-      /refine attempts per mechanism/i, /min improvement to keep \(panel reaction\)/i,
+      /consecutive losses before shifting/i, /min improvement to keep \(panel reaction\)/i,
       /min improvement to keep \(pp\)/i,
       /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
@@ -81,6 +81,12 @@ describe("RunStatus", () => {
     // Audit view, never an editor: no inputs inside the snapshot.
     expect(within(settings).queryAllByRole("textbox")).toEqual([]);
     expect(within(settings).queryAllByRole("spinbutton")).toEqual([]);
+  });
+
+  it("names PATIENCE as consecutive losses in the audit snapshot", () => {
+    render(<RunStatus run={RUN_FIXTURE} onKill={vi.fn()} />);
+    const settings = screen.getByRole("region", { name: /run settings/i });
+    expect(within(settings).getByText(/consecutive losses before shifting/i)).toBeVisible();
   });
 
   it("shows per-Pro progress counts from winners", () => {

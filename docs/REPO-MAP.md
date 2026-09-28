@@ -84,8 +84,18 @@ flow's org-snapshot query (repo copy: `n8n/waypoint-variable-audit-context-async
 this repo's copy only, deploying the query change to the **live** n8n flow is a manual step for Jake,
 not done by code. Iterable profile fields (phone/email presence) are read directly, read-only.
 `CONTACT_PLAN_MODE` (`off` default, `shadow`, `enforce`) gates whether the plan's channel/Pro pin takes
-effect. See `docs/superpowers/specs/2026-09-25-contact-plan-design.md` for the design. (verified: code
-in this branch)
+effect when the plan stage runs. The checkpointed mode remains authoritative for that job if the
+environment setting changes later. See `docs/superpowers/specs/2026-09-25-contact-plan-design.md`
+for the design. (verified: code in this branch)
+
+For a new Staging job in `enforce`, a missing candidate block fails the plan stage before paid
+rounds; Standard context and already-started jobs retain their legacy plan. Malformed candidate
+rows mark the entire block unavailable, so off/shadow callbacks can complete while a new enforced
+Staging job fails at the plan stage. Zero admin rows are currently indistinguishable from an absent
+candidate query; enforced jobs fail closed until the source emits an explicit empty-block marker.
+RECO freshness is evaluated per candidate, and future-dated scores are ignored. Population outcome
+counts in the evidence prompt are labeled as historical aggregates; the critic and a deterministic
+ratio check cover every model-authored idea field before a candidate reaches the panel.
 
 ### n8n flows (live instance; repo copies in `n8n/` on V4)
 

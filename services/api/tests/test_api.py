@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -568,10 +569,16 @@ async def test_staging_preserves_numeric_organization_id_as_a_string(
     assert persisted.include_features_not_in_current_plan is True
 
 
+@pytest.mark.parametrize("candidate_value, expected_candidates", [
+    ({"pro_uuid": "pro_aaa"}, [{"pro_uuid": "pro_aaa"}]),
+    ("not-json", None),
+])
 async def test_staging_callback_compiles_compact_context_and_requeues_once(
     client: httpx.AsyncClient,
     db_session: AsyncSession,
     monkeypatch,
+    candidate_value,
+    expected_candidates,
 ) -> None:
     promotion = ContextPromotionRow(
         id="promotion-callback",
@@ -650,7 +657,7 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
             {
                 "QUERY_NAME": "waypoint_contact_candidate",
                 "VARIABLE_NAME": "contact_candidate",
-                "VALUE": {"pro_uuid": "pro_aaa"},
+                "VALUE": candidate_value,
             },
         ],
     }
@@ -686,10 +693,8 @@ async def test_staging_callback_compiles_compact_context_and_requeues_once(
     assert "SAFE_SIGNAL" not in str(stored)
     assert "cc962bf1-13bb-4eea-bf66-f3adc9e22192" not in str(stored)
     assert "must-not-persist" not in str(stored)
-    assert stored["brief"]["contact_candidates"] == [{"pro_uuid": "pro_aaa"}]
-    assert OrgBrief.model_validate(dict(stored["brief"])).contact_candidates == [
-        {"pro_uuid": "pro_aaa"}
-    ]
+    assert stored["brief"].get("contact_candidates") == expected_candidates
+    assert OrgBrief.model_validate(dict(stored["brief"])).contact_candidates == expected_candidates
 
 
 async def test_staging_callback_never_resurrects_a_stopped_job(
@@ -1824,3 +1829,49 @@ async def test_calls_panel_lists_call_winners_and_tracks_done(
     assert (
         await auth_client.patch(f"/api/calls/{sms_winner.id}", json={"status": "done"})
     ).status_code == 404
+    assert (await auth_client.get(f"/api/calls/{sms_winner.id}/phone")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_call_phone_uses_snowflake_for_selected_winner_only(
+    auth_client: httpx.AsyncClient, db_session: AsyncSession, httpx_mock: HTTPXMock
+) -> None:
+    run_id = (await auth_client.post("/api/runs", json=RUN_REQUEST)).json()["id"]
+    candidate = CandidateRow(
+        run_id=run_id, pro_id="pro_1",
+        recommendation={"channel": "call", "title": "Call"},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    winner = WinnerRow(
+        run_id=run_id, pro_id="pro_1", kind="winner",
+        candidate_id=candidate.id,
+        evidence={"org_id": "12345", "pro_uuid": "pro-abc"},
+    )
+    db_session.add(winner)
+    await db_session.commit()
+    httpx_mock.add_response(
+        url="https://n8n.example/webhook/context-workbench",
+        json=[{"ORGANIZATION_ID": "12345", "PRO_UUID": "pro-abc", "PHONE": "3035550123", "MATCH_COUNT": 1}],
+    )
+
+    response = await auth_client.get(f"/api/calls/{winner.id}/phone")
+    assert response.status_code == 200
+    assert response.json() == {"phone": "3035550123"}
+    assert response.headers["cache-control"] == "no-store"
+    assert json.loads(httpx_mock.get_request().content) == {
+        "organization_id": "12345", "pro_uuid": "pro-abc", "mode": "call_phone"
+    }
+    assert (await auth_client.get("/api/calls/not-a-winner/phone")).status_code == 404
+    assert "3035550123" not in str((await auth_client.get("/api/calls")).json())
+
+    httpx_mock.add_response(
+        url="https://n8n.example/webhook/context-workbench",
+        json=[{"ORGANIZATION_ID": "99999", "PRO_UUID": "pro-abc", "PHONE": "3035550123", "MATCH_COUNT": 1}],
+    )
+    assert (await auth_client.get(f"/api/calls/{winner.id}/phone")).status_code == 502
+    httpx_mock.add_response(
+        url="https://n8n.example/webhook/context-workbench",
+        json=[{"ORGANIZATION_ID": "12345", "PRO_UUID": "pro-abc", "PHONE": None, "MATCH_COUNT": 0}],
+    )
+    assert (await auth_client.get(f"/api/calls/{winner.id}/phone")).status_code == 404

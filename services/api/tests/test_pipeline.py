@@ -3,6 +3,7 @@ import json
 import re
 from decimal import Decimal
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -10,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from waypoint import queue as queue_module
 from waypoint.calls import BudgetExhausted
+from waypoint.contact_plan import ContactPlan
+from waypoint.evidence import PatternEvidence
 from waypoint.llm import RateLimitExhausted
 from waypoint.models import PENDING_AUDIENCE_QUERY, Recommendation
-from waypoint.n8n import ContextConfigurationError, OrgContextBatch
+from waypoint.n8n import ContextConfigurationError, OrgBrief, OrgContextBatch
 from waypoint.personas import PanelItem, PanelSelection
 from waypoint.pipeline import (
     JSON_CALL_ATTEMPTS,
@@ -20,11 +23,16 @@ from waypoint.pipeline import (
     PipelineFailure,
     PipelineState,
     _dedupe_ideas,
+    _enforced,
+    _follow_up_channels,
+    _generation_channels,
     _heartbeat,
     _model_authored_url,
     _parse_idea_batch,
     _reaction_cache_key,
+    _stage_plan,
     _valid_json_call,
+    _verdicts_for_batch,
     finalize_run,
     run_job,
 )
@@ -76,6 +84,56 @@ def test_generated_null_channel_override_reason_is_no_override() -> None:
     parsed = _parse_idea_batch(json.dumps([idea] * 3))
     assert len(parsed) == 3
     assert all(item.channel_override_reason == "" for item in parsed)
+
+
+async def test_population_ratio_is_blocked_even_when_critic_misses_it(monkeypatch) -> None:
+    async def critic_says_ok(*_args, **_kwargs):
+        return {0: {"block_kind": "none", "reason": ""}}
+
+    monkeypatch.setattr("waypoint.pipeline._valid_json_call", critic_says_ok)
+    idea = Recommendation(
+        title="Billing follow-up", mechanism="billing", actions=["Discuss billing"],
+        pro_facing_concept="Review billing options",
+        manager_rationale="SMS showed strong returns for this Pro (82/121 at 1d).",
+        channel="sms",
+    )
+    patterns = [PatternEvidence(
+        channel="sms", mechanism="billing", sent=121,
+        returned={"1d": (82, 121)}, unsubscribed=0,
+    )]
+    state = SimpleNamespace(run=SimpleNamespace(id="run-1", model_tier="fast"),
+                            pro_id="pro_1", plan=None, plan_mode=None)
+    deps = SimpleNamespace(contact_plan_mode="off")
+    verdicts = await _verdicts_for_batch(
+        state, deps, key="r1", org_context="{}", brief=OrgBrief(org_uuid="pro_1"),
+        ideas=[idea], channels=["sms"], failed=set(), patterns=patterns,
+    )
+    assert verdicts[0]["block_kind"] == "per_pro_data"
+
+
+@pytest.mark.parametrize("field", ["title", "actions", "pro_facing_concept", "risk"])
+async def test_population_ratio_is_blocked_outside_manager_rationale(monkeypatch, field) -> None:
+    async def critic_says_ok(*_args, **_kwargs):
+        return {0: {"block_kind": "none", "reason": ""}}
+
+    monkeypatch.setattr("waypoint.pipeline._valid_json_call", critic_says_ok)
+    idea = Recommendation(
+        title="Billing follow-up", mechanism="billing", actions=["Discuss billing"],
+        pro_facing_concept="Review billing options", manager_rationale="Use observed outcomes",
+        channel="sms",
+    )
+    setattr(idea, field, ["82/121 returned for this Pro"] if field == "actions"
+            else "82/121 returned for this Pro")
+    patterns = [PatternEvidence(channel="sms", mechanism="billing", sent=121,
+                                returned={"1d": (82, 121)}, unsubscribed=0)]
+    state = SimpleNamespace(run=SimpleNamespace(id="run-1", model_tier="fast"),
+                            pro_id="pro_1", plan=None, plan_mode=None)
+    deps = SimpleNamespace(contact_plan_mode="off")
+    verdicts = await _verdicts_for_batch(
+        state, deps, key="r1", org_context="{}", brief=OrgBrief(org_uuid="pro_1"),
+        ideas=[idea], channels=["sms"], failed=set(), patterns=patterns,
+    )
+    assert verdicts[0]["block_kind"] == "per_pro_data"
 
 
 async def run_status(session: AsyncSession, run_id: str) -> str:
@@ -312,6 +370,32 @@ async def test_staging_run_resumes_from_compact_callback_checkpoint(
     assert staging.starts == []
     assert staging.fetches == []
     assert await deps.store.stage_complete(seeded_job.id, "context")
+
+
+async def test_new_enforced_staging_job_fails_without_candidate_block_before_llm(
+    deps: FakeDeps, seeded_job,
+) -> None:
+    deps.contact_plan_mode = "enforce"
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    job = await deps.db.get(JobRow, seeded_job.id)
+    assert run is not None and job is not None
+    run.context_source = "staging"
+    run.audience_query = "workbench:promotion-ready"
+    staging = FakeContext()
+    deps.staging_context = staging
+    brief = staging.batch.organizations[0].model_dump(mode="json", exclude={"contact_candidates"})
+    job.checkpoint = {
+        "staging_request": {"promotion_id": "promotion-ready"},
+        "staging_context": {"promotion_id": "promotion-ready", "brief": brief},
+    }
+    await deps.db.commit()
+
+    await run_job(seeded_job.id, deps)
+
+    await deps.db.refresh(job)
+    assert job.status == "failed"
+    assert job.checkpoint["failure"]["reason"] == "contact_candidates_unavailable"
+    assert deps.gateway.call_count == 0
 
 
 async def test_winner_carries_canonical_item_identity(deps: FakeDeps, seeded_job) -> None:
@@ -1718,6 +1802,49 @@ async def test_a_lease_lost_while_queued_for_a_slot_is_not_relabelled(
 
 
 # --- contact plan stage (off / shadow / enforce) -----------------------------
+
+
+@pytest.mark.parametrize("context_source,started,mode,should_fail", [
+    ("staging", False, "enforce", True),
+    ("standard", False, "enforce", False),
+    ("staging", True, "enforce", False),
+    ("staging", False, "shadow", False),
+])
+async def test_missing_candidate_block_fails_only_new_enforced_staging_jobs(
+    context_source: str, started: bool, mode: str, should_fail: bool
+) -> None:
+    class Store:
+        async def rounds_for(self, _run_id: str, _pro_id: str) -> list[object]:
+            return [{}] if started else []
+
+    state = SimpleNamespace(
+        run=SimpleNamespace(id="run-1", context_source=context_source, channels=["sms"]),
+        job=SimpleNamespace(id="job-1", checkpoint={}),
+        brief=SimpleNamespace(contact_candidates=None, pro_uuid="pro_1"),
+        pro_id="pro_1", plan=None, plan_mode=None,
+    )
+    deps = SimpleNamespace(contact_plan_mode=mode, store=Store())
+    if should_fail:
+        with pytest.raises(PipelineFailure, match="contact_candidates_unavailable"):
+            await _stage_plan(state, deps)
+    else:
+        result = await _stage_plan(state, deps)
+        assert result["plan"]["source"] == "legacy"
+
+
+def test_checkpointed_enforce_plan_stays_active_after_setting_changes() -> None:
+    plan = ContactPlan(pro_uuid="pro_1", channel="call", open_channels=("call",),
+                       source="reco_default")
+    state = SimpleNamespace(plan=plan, plan_mode="enforce",
+                            run=SimpleNamespace(channels=["sms", "call"]))
+    deps = SimpleNamespace(contact_plan_mode="off")
+    assert _enforced(state) is plan
+    assert _generation_channels(state, deps) == ["call"]
+    assert _follow_up_channels(state, deps) == ["call"]
+    state.plan_mode = "shadow"
+    deps.contact_plan_mode = "enforce"
+    assert _enforced(state) is None
+    assert _generation_channels(state, deps) == ["sms", "call"]
 
 # The seeded run is keyed by "pro_1", a pro_-prefixed id, so the plan limits
 # candidates to that Pro (operator-chosen Pro). pro_other must never be

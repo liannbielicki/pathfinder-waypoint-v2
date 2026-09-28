@@ -235,13 +235,43 @@ async def test_shadow_plan_is_not_enforced_after_a_mode_flip(
     evolve = pipeline.STAGE_HANDLERS["evolve"]
 
     async def spy(state, stage_deps):
-        seen.append(pipeline._enforced(state, stage_deps))
+        seen.append(pipeline._enforced(state))
         return await evolve(state, stage_deps)
 
     monkeypatch.setitem(pipeline.STAGE_HANDLERS, "evolve", spy)
     await run_job(seeded_job.id, deps)
     assert seen == [None]  # the shadow plan loaded, but is never enforced
     assert deps.gateway.call_count > 0
+
+
+async def test_enforced_plan_stays_pinned_after_mode_flips_off(
+    seeded_job, deps, monkeypatch
+) -> None:
+    deps.contact_plan_mode = "enforce"
+    org = deps.context.batch.organizations[0]
+    deps.context.batch = deps.context.batch.model_copy(update={"organizations": [
+        org.model_copy(update={"contact_candidates": [
+            {"pro_uuid": "pro_1", "has_phone": True, "pct_call": 0.9,
+             "reco_scoring_date": "2099-01-01"}]})]})
+    run = await deps.db.get(RunRow, seeded_job.run_id)
+    run.channels = ["call"]
+    await deps.db.commit()
+    deps.fail_after("plan")
+    with pytest.raises(InjectedCrash):
+        await run_job(seeded_job.id, deps)
+    deps.clear_failure()
+    deps.contact_plan_mode = "off"
+    seen: list[object] = []
+    evolve = pipeline.STAGE_HANDLERS["evolve"]
+
+    async def spy(state, stage_deps):
+        seen.append(pipeline._enforced(state))
+        return await evolve(state, stage_deps)
+
+    monkeypatch.setitem(pipeline.STAGE_HANDLERS, "evolve", spy)
+    await run_job(seeded_job.id, deps)
+    assert len(seen) == 1 and seen[0] is not None
+    assert seen[0].channel == "call"
 
 
 async def test_resumed_enforce_job_never_leaks_the_reco_hint(seeded_job, deps) -> None:

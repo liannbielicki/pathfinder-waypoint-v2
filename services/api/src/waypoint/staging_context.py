@@ -308,9 +308,12 @@ def _contact_candidates(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]] |
             try:
                 value = json.loads(value)
             except ValueError:
-                continue
-        if isinstance(value, Mapping):
-            found.append(dict(value))
+                log.warning("invalid contact candidate JSON; block unavailable")
+                return None
+        if not isinstance(value, Mapping):
+            log.warning("non-object contact candidate; block unavailable")
+            return None
+        found.append(dict(value))
     return found or None
 
 

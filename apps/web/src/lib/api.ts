@@ -193,5 +193,8 @@ export const createHandoff = (id: string) =>
 // Call-channel winners are worked by operators, never sent to LCM.
 export const getCalls = () => api<CallItem[]>("/calls");
 
+export const getCallPhone = (winnerId: string) =>
+  api<{ phone: string }>(`/calls/${winnerId}/phone`);
+
 export const updateCall = (winnerId: string, body: CallUpdate) =>
   api<CallItem>(`/calls/${winnerId}`, { method: "PATCH", body: JSON.stringify(body) });

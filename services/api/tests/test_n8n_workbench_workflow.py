@@ -29,18 +29,25 @@ def test_async_workbench_webhook_never_collides_with_standard_context() -> None:
 def test_async_workbench_workflow_validates_before_acknowledging() -> None:
     workflow = json.loads(WORKFLOW.read_text())
     nodes = {node["name"]: node for node in workflow["nodes"]}
+    assert sum(node["type"] == "n8n-nodes-base.webhook" for node in workflow["nodes"]) == 1
 
     normalize = nodes["Normalize staging request"]["parameters"]["jsCode"]
     assert "x-waypoint-organization-id" in normalize
     assert "x-waypoint-request-id" in normalize
     assert "x-waypoint-promotion-id" in normalize
     assert "x-waypoint-callback-mode" in normalize
-    assert workflow["connections"]["Variable audit request"]["main"][0][0]["node"] == (
-        "Normalize staging request"
-    )
+    assert workflow["connections"]["Variable audit request"]["main"][0][0]["node"] == "Route call phone"
+    assert nodes["Variable audit request"]["parameters"]["authentication"] == "headerAuth"
+    assert nodes["Route call phone"]["parameters"]["conditions"]["conditions"][0]["rightValue"] == "call_phone"
+    assert workflow["connections"]["Route call phone"]["main"][0][0]["node"] == "Validate call phone"
+    assert workflow["connections"]["Route call phone"]["main"][1][0]["node"] == "Normalize staging request"
     assert workflow["connections"]["Normalize staging request"]["main"][0][0]["node"] == (
         "Acknowledge request"
     )
+    phone_query = nodes["Read admin mobile"]["parameters"]["query"]
+    assert "analytics.main.dim_service_pro" in phone_query
+    assert "pro_uuid" in phone_query and "mobile_number" in phone_query
+    assert workflow["connections"]["Read admin mobile"]["main"][0][0]["node"] == "Return selected number"
     callback = nodes["Prepare Waypoint callback"]["parameters"]["jsCode"]
     assert "$('Normalize staging request')" in callback
     assert "callback_mode" in callback

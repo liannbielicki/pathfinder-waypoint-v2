@@ -881,3 +881,25 @@ def test_staging_brief_without_candidate_rows_is_legacy() -> None:
     brief = compile_staging_brief("889901", [{"VARIABLE_NAME": "SAFE", "VALUE": 1}],
                                   context_payload(), bundle)
     assert brief.contact_candidates is None
+
+
+def test_staging_brief_marks_malformed_candidate_block_unavailable() -> None:
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    rows = [
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        {"QUERY_NAME": "waypoint_contact_candidate", "VARIABLE_NAME": "contact_candidate",
+         "VALUE": "not-json"},
+    ]
+    brief = compile_staging_brief("889901", rows, context_payload(), bundle)
+    assert brief.contact_candidates is None
+
+
+def test_staging_brief_does_not_use_partial_candidate_block() -> None:
+    bundle = promotion({"source_key": "SAFE", "source_table": "UNKNOWN", "canonical_key": "safe"})
+    rows = [
+        {"VARIABLE_NAME": "SAFE", "VALUE": 1},
+        {"QUERY_NAME": "waypoint_contact_candidate", "VALUE": {"pro_uuid": "pro_1"}},
+        {"QUERY_NAME": "waypoint_contact_candidate", "VALUE": "not-json"},
+    ]
+    brief = compile_staging_brief("889901", rows, context_payload(), bundle)
+    assert brief.contact_candidates is None

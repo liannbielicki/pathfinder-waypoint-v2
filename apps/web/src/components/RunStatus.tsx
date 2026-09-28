@@ -23,7 +23,7 @@ const NEXT_ACTION: Record<string, string> = {
 const SETTING_LABELS: [string, string][] = [
   ["MAX_ROUNDS", "Max rounds per Pro"],
   ["MAX_NO_IMPROVE", "Scored losses or blocked rounds before stopping"],
-  ["PATIENCE", "Refine attempts per mechanism"],
+  ["PATIENCE", "Consecutive losses before shifting"],
   ["KEEP_DELTA_REACTION", "Min improvement to keep (panel reaction)"],
   ["KEEP_DELTA_PP", "Min improvement to keep (pp)"],
   ["WIN_THRESHOLD_PP", "Stop-early reduction (pp)"],

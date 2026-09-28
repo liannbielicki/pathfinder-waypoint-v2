@@ -24,7 +24,7 @@ RECOMMENDATION_FIXTURE = {
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "waypoint_v7"
+    assert PROMPT_VERSION == "waypoint_v8"
 
 
 def test_fenced_context_wraps_untrusted_input() -> None:
@@ -89,6 +89,12 @@ def test_critic_prompt_hard_blocks_consent_asks() -> None:
     assert "consent_ask" in prompt
 
 
+def test_critic_prompt_names_population_misattribution_as_a_hard_block() -> None:
+    prompt = critic_prompt(org_context="{}", ideas_json="[]")
+    assert '"per_pro_data" (HARD BLOCK)' in prompt
+    assert "population" in prompt.lower()
+
+
 def test_evolve_and_critic_treat_missing_values_as_unknown_pro_facts() -> None:
     context = '{"known":{"jobs_created_28d_band":"6_20"},"unknown":["invoices_sent_28d_band"]}'
     generated = evolve_prompt(
@@ -107,7 +113,7 @@ def test_evolve_and_critic_treat_missing_values_as_unknown_pro_facts() -> None:
         assert "unknown" in prompt.lower()
         assert "zero" in prompt.lower()
         assert "manager_rationale" in prompt
-        assert "other pros" in prompt.lower()
+        assert "historical aggregate" in prompt.lower()
     assert "question" in generated.lower()
     assert "HARD BLOCK" in reviewed
 

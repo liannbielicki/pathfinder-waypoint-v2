@@ -60,6 +60,13 @@ async function fillRequiredInputs() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("RunStart", () => {
+  it("explains PATIENCE as consecutive losses that reset on a win", async () => {
+    stubFetch();
+    render(<RunStart onStarted={vi.fn()} />);
+    expect(await screen.findByLabelText(/consecutive losses before shifting/i)).toBeVisible();
+    expect(screen.getByText(/a win resets the loss count/i)).toBeVisible();
+  });
+
   it("defaults new runs to the configured deep model and permits fast override", async () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
@@ -112,7 +119,7 @@ describe("RunStart", () => {
     await waitFor(() =>
       expect(screen.getByLabelText(/max rounds per pro/i)).toHaveValue(7),
     );
-    expect(screen.getByLabelText(/refine attempts per mechanism/i)).toHaveValue(1);
+    expect(screen.getByLabelText(/consecutive losses before shifting/i)).toHaveValue(1);
   });
 
   it("every visible control keeps a persistent label", async () => {
@@ -124,7 +131,7 @@ describe("RunStart", () => {
     for (const label of [
       /pro ids/i, /audience run/i, /channel: sms/i, /channel: email/i, /channel: call/i,
       /max rounds per pro/i, /dry mechanisms before stopping/i,
-      /refine attempts per mechanism/i, /min improvement to keep \(panel reaction\)/i,
+      /consecutive losses before shifting/i, /min improvement to keep \(panel reaction\)/i,
       /min improvement to keep \(pp\)/i,
       /stop-early reduction/i, /ideas per round/i, /near-tie evidence margin/i,
     ]) {
@@ -196,16 +203,16 @@ describe("RunStart", () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
     await fillRequiredInputs();
-    const patience = await screen.findByLabelText(/refine attempts per mechanism/i);
+    const patience = await screen.findByLabelText(/consecutive losses before shifting/i);
     await userEvent.clear(patience);
     await userEvent.type(patience, "0");
     await userEvent.type(
-      screen.getByLabelText(/type "confirm" to apply the new refine attempts/i),
+      screen.getByLabelText(/type "confirm" to apply the new consecutive losses/i),
       "confirm",
     );
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
     const error = await screen.findByRole("alert");
-    expect(error).toHaveTextContent(/refine attempts per mechanism/i);
+    expect(error).toHaveTextContent(/consecutive losses before shifting/i);
     expect(error).toHaveTextContent(/at least 1/i);
     expect(createCalls).toEqual([]);
   });

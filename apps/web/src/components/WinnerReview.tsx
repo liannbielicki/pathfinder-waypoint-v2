@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Candidate, EvolveRound, RunDetail, Winner } from "@/lib/api";
 import { decisionKind, roundOutcomes } from "@/lib/decision";
+import { CallPhone } from "./CallPhone";
 
 // The one place a calibrated estimate is formatted. null when the panel
 // produced no usable numbers (abstained, or never ran) — callers that only
@@ -12,7 +13,7 @@ export function formatEstimate(score: Record<string, unknown> | undefined): stri
   const lo = score?.ci_lower_pp as number | null | undefined;
   const hi = score?.ci_upper_pp as number | null | undefined;
   if (reduction == null || lo == null || hi == null) return null;
-  return `${reduction.toFixed(1)} pp (CI ${lo.toFixed(1)}–${hi.toFixed(1)} pp)`;
+  return `${reduction.toFixed(1)} pp (calibration CI ${lo.toFixed(1)}–${hi.toFixed(1)} pp)`;
 }
 
 type ContactPlan = {
@@ -36,7 +37,7 @@ function contactPlanOf(winner: Winner): ContactPlan | undefined {
   return winner.evidence?.contact_plan as ContactPlan | undefined;
 }
 
-function ContactPlanLine({ plan }: { plan: ContactPlan }) {
+function ContactPlanLine({ plan, winnerId }: { plan: ContactPlan; winnerId: string }) {
   // evidence is untyped JSON from the backend; guard every shape assumption
   // (flags/blocked/runner_up) rather than trust the cast in contactPlanOf.
   const flags = Array.isArray(plan.flags) ? plan.flags : [];
@@ -49,6 +50,7 @@ function ContactPlanLine({ plan }: { plan: ContactPlan }) {
       Contact plan: {String(plan.channel ?? "?").toUpperCase()} to{" "}
       <code>{plan.pro_uuid ?? "unknown"}</code> ·{" "}
       {SOURCE_LABEL[plan.source ?? ""] ?? plan.source}
+      {plan.channel === "call" && plan.pro_uuid && <> · <CallPhone winnerId={winnerId} /></>}
       {runnerUp ? ` · runner-up ${runnerUp[0]} by ${runnerUp[1]}` : ""}
       {flags.includes("dnc_call") ? " · DNC on file — not a marketing call" : ""}
       {blocked.length
@@ -169,7 +171,7 @@ function noActionEnding(
   if (champion) {
     return ["Rejected at the final check.",
       `${label} cleared the screen but failed the held-out final — it needed ` +
-      "≥ 1.0 pp with a positive CI lower bound. The held-out final panel did not " +
+      "≥ 1.0 pp with a positive calibration CI lower bound. The held-out final panel did not " +
       "confirm the screen result."];
   }
   if (rounds > 0 && screened === 0) {
@@ -314,7 +316,7 @@ function WinnerCard({
       <Rounds rounds={rounds} championRound={candidate?.round} />
       <h5>Selection summary</h5>
       {contactPlanOf(winner) ? (
-        <ContactPlanLine plan={contactPlanOf(winner)!} />
+        <ContactPlanLine plan={contactPlanOf(winner)!} winnerId={winner.id} />
       ) : (
         <p>
           Selected {String(rec?.channel ?? "unknown").toUpperCase()} · RECO{" "}

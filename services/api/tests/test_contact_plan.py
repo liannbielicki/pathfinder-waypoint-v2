@@ -161,6 +161,21 @@ async def test_stale_or_missing_reco_is_no_reco() -> None:
     assert plan.source == "no_reco" and plan.pro_uuid == "pro_b"
 
 
+async def test_stale_score_cannot_outrank_another_pros_fresh_score() -> None:
+    stale = cand("pro_a", reco_scoring_date="2026-09-20", pct_call=0.99)
+    fresh = cand("pro_b", reco_scoring_date="2026-09-25", pct_call=0.2)
+    plan = await build_plan([stale, fresh], ["call"], fetcher({}), TODAY)
+    assert (plan.pro_uuid, plan.rank_score) == ("pro_b", 0.2)
+
+
+async def test_future_reco_date_is_not_fresh() -> None:
+    future = cand("pro_a", reco_scoring_date="2099-01-01", pct_call=0.99)
+    current = cand("pro_b", founding_pro=True, reco_scoring_date="2026-09-20",
+                   pct_call=0.2)
+    plan = await build_plan([future, current], ["call"], fetcher({}), TODAY)
+    assert (plan.pro_uuid, plan.source, plan.rank_score) == ("pro_b", "no_reco", None)
+
+
 async def test_forced_pro_limits_candidates() -> None:
     plan = await build_plan([cand("pro_a", pct_call=0.9), cand("pro_b")], ["call"],
                             fetcher({}), TODAY, forced_pro="pro_b")

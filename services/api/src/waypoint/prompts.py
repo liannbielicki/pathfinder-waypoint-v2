@@ -8,7 +8,7 @@ Org context is untrusted input and is always fenced.
 
 from waypoint.models import CHANNELS
 
-PROMPT_VERSION = "waypoint_v7"  # v7: direct feature menu and conflict guidance
+PROMPT_VERSION = "waypoint_v8"  # v8: population attribution guard
 UNTRUSTED_START = "<untrusted_org_context>"
 UNTRUSTED_END = "</untrusted_org_context>"
 
@@ -109,10 +109,12 @@ counts, revenue figures, or dates. An unknown factor may motivate a
 question-framed touch but never a stated fact.
 Only non-null Pro values in context are known. Fields listed as unknown, null,
 or absent are unknown, not zero, never, or inactive. Mark an unknown as unknown
-in manager_rationale if it motivates the idea. Historical outcomes concern
-other pros; feature descriptions define products. Neither proves a fact about
+in manager_rationale if it motivates the idea. Historical aggregate outcomes
+summarize prior touches; feature descriptions define products. Neither proves a fact about
 this Pro. Do not infer this Pro's industry, customers, usage, or plan access
 from those references.
+Never describe a historical return count as this Pro's own outcome. If cited
+in manager_rationale, label it as a historical aggregate.
 Fields listed as conflicts are also unknown; never pick a side.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
@@ -316,10 +318,12 @@ question-framed touch but never a stated fact.
 
 Only non-null Pro values in context are known. Fields listed as unknown, null,
 or absent are unknown, not zero, never, or inactive. Mark an unknown as unknown
-in manager_rationale if it motivates the idea. Historical outcomes concern
-other pros; feature descriptions define products. Neither proves a fact about
+in manager_rationale if it motivates the idea. Historical aggregate outcomes
+summarize prior touches; feature descriptions define products. Neither proves a fact about
 this Pro. Do not infer this Pro's industry, customers, usage, or plan access
 from those references.
+Never describe a historical return count as this Pro's own outcome. If cited
+in manager_rationale, label it as a historical aggregate.
 
 These ideas are SEEDS, not final copy. Per-Pro personalization is applied
 downstream by the marketing team — do not add merge fields. Do not write final
@@ -446,8 +450,8 @@ for each idea into exactly one block_kind:
   - "ungrounded" (HARD BLOCK): any part of the idea, including title, actions,
     pro_facing_concept, manager_rationale, risk, or channel_override_reason,
     states or depends on a Pro fact not explicitly known in context. Null,
-    unknown, and absent fields are NOT zero, never, or inactive. Historical
-    outcomes concern other pros; feature descriptions define products. Neither
+    unknown, and absent fields are NOT zero, never, or inactive. Historical aggregate
+    outcomes summarize prior touches; feature descriptions define products. Neither
     proves this Pro's industry, customers, usage, or plan access.
     Fields listed as conflicts are unknown, and pc feature cards alone do not
     prove attachment or access. A null feature_key cannot justify a feature
@@ -457,6 +461,9 @@ for each idea into exactly one block_kind:
     If a topic lacks a verified destination, a grounded setup or discovery question
     is allowed. Without an attached state, claims of existing access or instructions
     to open a product screen are not grounded; never invent a link.
+  - "per_pro_data" (HARD BLOCK): a population outcome is stated
+    as this Pro's own history, including in manager_rationale. A real aggregate
+    count is still false when attributed to this individual Pro.
   - "consent_ask" (HARD BLOCK): the idea's touch opens by (or consists of)
     asking the Pro for SMS/messaging consent, opt-in, or permission to contact
     them. Consent is handled upstream; a consent request is not a retention idea.
