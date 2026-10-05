@@ -195,7 +195,6 @@ async def ready_rows(
     run_id: str,
     *,
     pro_id: str | None = None,
-    include_degraded: bool = True,
 ) -> list[dict[str, Any]]:
     """Every winner of `run_id` (optionally one Pro's) that is fully ready to
     hand off (has a measurement plan and its candidate), shaped as Pathfinder
@@ -203,9 +202,10 @@ async def ready_rows(
 
     The audience-lineage guard lives HERE, on the one path every handoff
     caller routes through: a run whose n8n flow never reported its query
-    version raises instead of returning shippable rows. With
-    include_degraded=False, winners flagged with a panel_disclaimer are held
-    back for operator-initiated handoff."""
+    version raises instead of returning shippable rows. Winners flagged with
+    a panel_disclaimer ship like any other: the panel is a pure function of
+    (segment, size, seed), so a rerun reproduces the same short panel and
+    holding them back only strands them."""
     run = await session.get(RunRow, run_id)
     if run is None or run.audience_query == PENDING_AUDIENCE_QUERY:
         raise AudienceLineageUnresolved(
@@ -215,8 +215,6 @@ async def ready_rows(
     if pro_id is not None:
         query = query.where(WinnerRow.pro_id == pro_id)
     winners = (await session.execute(query)).scalars().all()
-    if not include_degraded:
-        winners = [w for w in winners if not w.evidence.get("panel_disclaimer")]
     # Set-based loading: two IN() prefetches instead of two SELECTs per winner.
     winner_ids = [w.id for w in winners]
     candidate_ids = [w.candidate_id for w in winners if w.candidate_id]
@@ -310,15 +308,14 @@ async def push_ready_winners(
     worker per Pro), so pushes never race on the same handoff row.
 
     Returns how many ready rows were ensured delivered (0 when the run is
-    stopped/failed, lineage is unresolved, or nothing is ready). Degraded-
-    panel winners are held back for the operator's manual POST /handoff."""
+    stopped/failed, lineage is unresolved, or nothing is ready)."""
     run = await session.get(RunRow, run_id)
     if run is None or run.status in ("stopped", "failed"):
         # An operator kill (or a failed run) must keep working: automatic
         # handoff would ship winners the operator just tried to withhold.
         return 0
     try:
-        rows = await ready_rows(session, run_id, pro_id=pro_id, include_degraded=False)
+        rows = await ready_rows(session, run_id, pro_id=pro_id)
     except AudienceLineageUnresolved:
         return 0  # same refusal as the manual endpoint, silently for the trickle
     if not rows:

@@ -258,20 +258,19 @@ async def test_trickle_push_refuses_stopped_or_failed_run(
     assert len(httpx_mock.get_requests()) == 0
 
 
-async def test_trickle_push_holds_back_degraded_panel_winners(
+async def test_trickle_push_ships_degraded_panel_winners(
     httpx_mock: HTTPXMock, db_session: AsyncSession,
 ) -> None:
+    # A rerun reproduces the same short panel, so holding these back only
+    # strands them: they trickle to LCM like any other winner.
     await seed_ready_winner(
         db_session, audience_query="audience_v7",
         winner_evidence={"org_id": "882486",
                          "panel_disclaimer": {"final": "only 2 of 5 personas qualified"}},
     )
-    # Degraded winners wait for the operator's manual POST /handoff...
-    assert await push_ready_winners(db_session, STUB_SETTINGS, "run-t", pro_id="pro_1") == 0
-    assert len(httpx_mock.get_requests()) == 0
-    # ...where they ARE included (include_degraded defaults to True).
-    rows = await ready_rows(db_session, "run-t")
-    assert [row["row_id"] for row in rows] == ["win-t"]
+    httpx_mock.add_response(status_code=202, json={"rows": [{"row_id": "win-t", "status": "accepted"}]})
+    assert await push_ready_winners(db_session, STUB_SETTINGS, "run-t", pro_id="pro_1") == 1
+    assert len(httpx_mock.get_requests()) == 1
 
 
 async def test_trickle_push_refuses_unresolved_audience_lineage(
