@@ -58,7 +58,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.first().json.body ?? {};\nconst organization_id = String(body.organization_id ?? '');\nconst pro_uuid = String(body.pro_uuid ?? '');\nif (!/^\\d{5,6}$/.test(organization_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(pro_uuid)) throw new Error('Invalid call phone lookup identity');\nreturn [{ json: { organization_id, pro_uuid } }];"
+        "jsCode": "const body = $input.first().json.body ?? {};\nconst organization_id = String(body.organization_id ?? '');\nconst pro_uuid = String(body.pro_uuid ?? '');\nif (!/^\\d{4,6}$/.test(organization_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(pro_uuid)) throw new Error('Invalid call phone lookup identity');\nreturn [{ json: { organization_id, pro_uuid } }];"
       },
       "id": "93ef89d0-60c5-42d1-bccc-742994619710",
       "name": "Validate call phone",

@@ -607,7 +607,7 @@ async def test_staging_omits_ambiguous_and_conflicting_values() -> None:
     }
 
 
-async def test_staging_requires_five_or_six_digit_ids_an_active_promotion_and_a_match() -> None:
+async def test_staging_requires_four_to_six_digit_ids_an_active_promotion_and_a_match() -> None:
     source = FakeSnowflake({
         "31336": [{"VARIABLE_NAME": "OTHER", "VALUE": 1}],
         "889901": [{"VARIABLE_NAME": "OTHER", "VALUE": 1}],
@@ -626,13 +626,13 @@ async def test_staging_requires_five_or_six_digit_ids_an_active_promotion_and_a_
     ).fetch(["31336"])
     assert result.organizations[0].org_id == "31336"
 
-    with pytest.raises(ContextUnavailable, match="five- or six-digit organization ID"):
+    with pytest.raises(ContextUnavailable, match="four- to six-digit organization ID"):
         await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
             ["pro_abc"]
         )
-    with pytest.raises(ContextUnavailable, match="five- or six-digit organization ID"):
+    with pytest.raises(ContextUnavailable, match="four- to six-digit organization ID"):
         await make_client(bundle=promotion(), snowflake=source, context_layer=context).fetch(
-            ["1234"]
+            ["123"]
         )
     with pytest.raises(ContextUnavailable, match="promotion"):
         await make_client(bundle=None, snowflake=source, context_layer=context).fetch(

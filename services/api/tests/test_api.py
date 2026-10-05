@@ -529,8 +529,8 @@ async def test_staging_readiness_ignores_deprecated_staging_url(
     assert response.json()["staging_context_available"] is True
 
 
-@pytest.mark.parametrize("invalid", ["pro_abc", "1234", "1234567"])
-async def test_staging_rejects_ids_outside_five_or_six_digits_before_enqueue(
+@pytest.mark.parametrize("invalid", ["pro_abc", "123", "1234567"])
+async def test_staging_rejects_ids_outside_four_to_six_digits_before_enqueue(
     auth_client: httpx.AsyncClient,
     invalid: str,
 ) -> None:
@@ -540,7 +540,7 @@ async def test_staging_rejects_ids_outside_five_or_six_digits_before_enqueue(
     )
 
     assert response.status_code == 422
-    assert "five- or six-digit organization id" in response.text.casefold()
+    assert "four- to six-digit organization id" in response.text.casefold()
 
 
 async def test_staging_preserves_numeric_organization_id_as_a_string(

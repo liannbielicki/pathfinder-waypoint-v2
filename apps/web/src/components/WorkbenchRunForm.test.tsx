@@ -49,18 +49,18 @@ describe("WorkbenchRunForm", () => {
     expect(screen.getByText(/snowflake.*configured/i)).toBeInTheDocument();
   });
 
-  it("requires a five- or six-digit organization ID before starting a job", async () => {
+  it("requires a four- to six-digit organization ID before starting a job", async () => {
     render(<WorkbenchRunForm onRun={vi.fn()} busy={false} />);
 
     fireEvent.change(screen.getByLabelText(/organization id/i), {
-      target: { value: "1234" },
+      target: { value: "123" },
     });
     fireEvent.submit(
       screen.getByRole("button", { name: /collect and curate all variables/i }).closest("form")!,
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /five- or six-digit organization id/i,
+      /four- to six-digit organization id/i,
     );
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringMatching(/\/jobs$/),
