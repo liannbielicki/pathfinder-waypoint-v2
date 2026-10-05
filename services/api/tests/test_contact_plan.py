@@ -239,3 +239,74 @@ async def test_fetch_profile_server_error_raises(httpx_mock: HTTPXMock) -> None:
     async with make_profile_client("it-key") as client:
         with pytest.raises(httpx.HTTPStatusError):
             await fetch_profile(client, "pro_a")
+
+
+async def test_fetch_profile_iterable_no_such_user_400_is_none(httpx_mock: HTTPXMock) -> None:
+    # Iterable answers a byUserId miss with 400, not 404 (verified live 2026-10-05).
+    httpx_mock.add_response(url=USER_URL, status_code=400, json={
+        "error": "BadRequest", "message": "No user with that id exists!",
+        "code": "error.users.noUserWithIdExists", "data": {"args": []}})
+    async with make_profile_client("it-key") as client:
+        assert await fetch_profile(client, "pro_a") is None
+
+
+async def test_fetch_profile_other_400_still_raises(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(url=USER_URL, status_code=400, json={"code": "error.some.other"})
+    async with make_profile_client("it-key") as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_profile(client, "pro_a")
+
+
+async def test_no_iterable_profile_falls_through_to_call() -> None:
+    plan = await build_plan([cand("pro_a", pct_sms=0.9, pct_email=0.8, pct_call=0.1)],
+                            ["sms", "email", "call"], fetcher({"pro_a": None}), TODAY)
+    assert (plan.pro_uuid, plan.channel) == ("pro_a", "call")
+
+
+# LCM parity: evaluateGates in Codefied/hcp-email-review server/featureProjection.js.
+@pytest.mark.parametrize("profile,channel,reason", [
+    (Profile(True, True, False, frozenset(), frozenset(), email_unsub=True),
+     "email", "iterable_email_unsub"),
+    (Profile(True, True, False, frozenset(), frozenset(), has_email=False),
+     "email", "iterable_no_email"),
+    (Profile(True, True, False, frozenset(), frozenset(), sub_message_types=frozenset({12345})),
+     "sms", "iterable_sms_not_subscribed"),
+    (Profile(True, True, False, frozenset(), frozenset(), account_block="bad_actor"),
+     "sms", "bad_actor"),
+    (Profile(True, True, False, frozenset(), frozenset(), account_block="account_suspended"),
+     "email", "account_suspended"),
+    (Profile(True, True, False, frozenset(), frozenset(), account_block="archived"),
+     "call", "archived"),
+])
+async def test_lcm_gates_block_before_handoff(
+    profile: Profile, channel: str, reason: str
+) -> None:
+    plan = await build_plan([cand("pro_a")], [channel], fetcher({"pro_a": profile}), TODAY)
+    assert plan.pro_uuid is None
+    assert ("pro_a", channel, reason) in plan.blocked
+
+
+async def test_sms_subscribed_to_ours_or_empty_list_passes() -> None:
+    for subs in (frozenset(), frozenset({77064, 12345})):
+        profile = Profile(True, True, False, frozenset(), frozenset(), sub_message_types=subs)
+        plan = await build_plan([cand("pro_a")], ["sms"], fetcher({"pro_a": profile}), TODAY)
+        assert plan.channel == "sms"
+
+
+@pytest.mark.parametrize("data,block", [
+    ({"bad_actor": True}, "bad_actor"),
+    ({"account_suspension_status": "suspended"}, "account_suspended"),
+    ({"account_suspension_status": "allow"}, None),
+    ({"archived": True}, "archived"),
+    ({"ARCHIVED": True}, "archived"),
+    ({}, None),
+])
+def test_profile_reads_account_block(data: dict[str, Any], block: str | None) -> None:
+    assert Profile.from_iterable({"email": "x@example.com", "dataFields": data}).account_block == block
+
+
+def test_profile_reads_email_consent_and_subscriptions() -> None:
+    profile = Profile.from_iterable({"dataFields": {
+        "global_email_unsubscribed": True, "subscribedMessageTypeIds": [77064]}})
+    assert profile.email_unsub and not profile.has_email
+    assert profile.sub_message_types == frozenset({77064})

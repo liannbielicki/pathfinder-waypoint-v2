@@ -21,6 +21,8 @@ SMS_CHANNEL_IDS = frozenset({62580, 141340, 141339, 62566, 116525})
 SMS_MESSAGE_TYPE_IDS = frozenset({77064, 86860, 149942})
 EMAIL_CHANNEL_ID = 47360  # "Marketing Channel - Updates"
 EMAIL_MESSAGE_TYPE_ID = 183150  # "Retention"
+# The one SMS message type LCM's sms_not_subscribed gate checks (its smsIds default).
+LCM_SMS_MESSAGE_TYPE_ID = 77064
 RECO_MAX_AGE = timedelta(days=2)
 ITERABLE_BASE_URL = "https://api.iterable.com"
 
@@ -57,16 +59,33 @@ class Profile:
     dnc: bool
     unsub_channels: frozenset[int]
     unsub_message_types: frozenset[int]
+    # LCM parity (evaluateGates, hcp-email-review server/featureProjection.js):
+    # without these, LCM dismisses a Pro Waypoint already handed off.
+    email_unsub: bool = False
+    has_email: bool = True
+    sub_message_types: frozenset[int] = frozenset()
+    account_block: str | None = None  # bad_actor | account_suspended | archived
 
     @classmethod
     def from_iterable(cls, user: Mapping[str, Any]) -> Profile:
         fields = user.get("dataFields") or {}
+        suspension = str(fields.get("account_suspension_status") or "").strip()
+        account_block = (
+            "bad_actor" if fields.get("bad_actor") is True
+            else "account_suspended" if suspension and suspension != "allow"
+            else "archived" if fields.get("archived") is True or fields.get("ARCHIVED") is True
+            else None
+        )
         return cls(
             has_phone=bool(fields.get("phoneNumber") or user.get("phoneNumber")),
             sms_disclaimer=fields.get("receivedSMSDisclaimer") is True,
             dnc=str(fields.get("dnc_flag") or "").strip() != "",
             unsub_channels=_ids(fields.get("unsubscribedChannelIds")),
             unsub_message_types=_ids(fields.get("unsubscribedMessageTypeIds")),
+            email_unsub=fields.get("global_email_unsubscribed") is True,
+            has_email=bool(str(user.get("email") or fields.get("email") or "").strip()),
+            sub_message_types=_ids(fields.get("subscribedMessageTypeIds")),
+            account_block=account_block,
         )
 
 
@@ -135,8 +154,13 @@ def _sf_block(candidate: Mapping[str, Any], channel: str) -> str | None:
 def _profile_block(profile: Profile | None, channel: str) -> str | None:
     if profile is None:
         return "no_iterable_profile"
+    if profile.account_block:
+        return profile.account_block
     if channel == "email":
-        if (EMAIL_CHANNEL_ID in profile.unsub_channels
+        if not profile.has_email:
+            return "iterable_no_email"
+        if (profile.email_unsub
+                or EMAIL_CHANNEL_ID in profile.unsub_channels
                 or EMAIL_MESSAGE_TYPE_ID in profile.unsub_message_types):
             return "iterable_email_unsub"
         return None
@@ -149,6 +173,10 @@ def _profile_block(profile: Profile | None, channel: str) -> str | None:
     if (profile.unsub_channels & SMS_CHANNEL_IDS
             or profile.unsub_message_types & SMS_MESSAGE_TYPE_IDS):
         return "iterable_sms_unsub"
+    # An EMPTY subscribed list means nothing (it is [] for nearly every Pro);
+    # only a non-empty list without ours is a refusal.
+    if profile.sub_message_types and LCM_SMS_MESSAGE_TYPE_ID not in profile.sub_message_types:
+        return "iterable_sms_not_subscribed"
     return None
 
 
@@ -197,6 +225,11 @@ class _Checker:
                 reason = "iterable_unconfigured"
             else:
                 reason = _profile_block(await self.profile(pro), channel)
+        elif reason is None and channel == "call" and self.fetch is not None:
+            # A call needs no Iterable profile (a missing one leaves call as the
+            # only avenue), but a bad-actor/suspended/archived account is not dialled.
+            profile = await self.profile(pro)
+            reason = profile.account_block if profile is not None else None
         return reason
 
     async def open(self, candidate: Mapping[str, Any], channel: str) -> bool:
@@ -262,6 +295,18 @@ async def build_plan(
     )
 
 
+def _no_such_user(response: httpx.Response) -> bool:
+    """Iterable answers a byUserId miss with 400 noUserWithIdExists, not 404
+    (verified live 2026-10-05). Other 400s still raise."""
+    if response.status_code != 400:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, Mapping) and body.get("code") == "error.users.noUserWithIdExists"
+
+
 def make_profile_client(api_key: str) -> httpx.AsyncClient:
     # Short timeout: this sits on the job's critical path, unlike the poller.
     return httpx.AsyncClient(
@@ -276,7 +321,7 @@ async def fetch_profile(client: httpx.AsyncClient, pro_uuid: str) -> Profile | N
     """READ-ONLY GET of one Iterable profile. None = no profile (fail closed for
     sms/email); any other failure raises so the job requeues."""
     response = await client.get(f"/api/users/byUserId/{quote(pro_uuid, safe='')}")
-    if response.status_code == 404:
+    if response.status_code == 404 or _no_such_user(response):
         return None
     response.raise_for_status()
     user = (response.json() or {}).get("user")
