@@ -311,7 +311,7 @@ describe("RunStart", () => {
       .not.toBeInTheDocument();
   });
 
-  it("blocks organization IDs outside five or six digits in Staging", async () => {
+  it("blocks organization IDs outside four to six digits in Staging", async () => {
     const { createCalls } = stubFetch();
     render(<RunStart onStarted={vi.fn()} />);
     await fillRequiredInputs();
@@ -319,11 +319,11 @@ describe("RunStart", () => {
     await userEvent.click(screen.getByLabelText(/staging context/i));
     const organizationIds = screen.getByLabelText(/organization ids \(one per line\)/i);
     await userEvent.clear(organizationIds);
-    await userEvent.type(organizationIds, "1234");
+    await userEvent.type(organizationIds, "123");
     await userEvent.click(screen.getByRole("button", { name: /start run/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /five- or six-digit organization ids/i,
+      /four- to six-digit organization ids/i,
     );
     expect(createCalls).toEqual([]);
   });

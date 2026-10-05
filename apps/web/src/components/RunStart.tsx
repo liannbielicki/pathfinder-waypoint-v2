@@ -144,9 +144,9 @@ export function RunStart({ onStarted }: { onStarted: (run: RunView) => void }) {
       setError(invalid);
       return;
     }
-    if (contextSource === "staging" && ids.some((id) => !/^\d{5,6}$/.test(id))) {
+    if (contextSource === "staging" && ids.some((id) => !/^\d{4,6}$/.test(id))) {
       focusField("pro-ids");
-      setError("Staging context requires five- or six-digit organization IDs.");
+      setError("Staging context requires four- to six-digit organization IDs.");
       return;
     }
     setBusy(true);

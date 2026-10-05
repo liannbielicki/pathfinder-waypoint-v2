@@ -402,12 +402,12 @@ def create_app(
     ) -> RunView:
         settings: Settings = request.app.state.settings
         if body.context_source == "staging" and any(
-            len(identifier) not in {5, 6} or not identifier.isdigit()
+            len(identifier) not in {4, 5, 6} or not identifier.isdigit()
             for identifier in body.pro_ids
         ):
             raise HTTPException(
                 status_code=422,
-                detail="Staging context requires five- or six-digit organization IDs",
+                detail="Staging context requires four- to six-digit organization IDs",
             )
         await _ensure_fleet(session, settings)
         fleet = await lock_fleet(session, settings)
@@ -686,7 +686,7 @@ def create_app(
         evidence = row[0].evidence or {}
         org_id = str(evidence.get("org_id") or "")
         pro_uuid = str(evidence.get("pro_uuid") or "")
-        if not re.fullmatch(r"\d{5,6}", org_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", pro_uuid):
+        if not re.fullmatch(r"\d{4,6}", org_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", pro_uuid):
             raise HTTPException(status_code=404, detail="Selected Pro has no Snowflake phone lookup")
         settings: Settings = request.app.state.settings
         if settings.N8N_CONTEXT_URL_WORKBENCH is None:
